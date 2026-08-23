@@ -67,14 +67,33 @@ ok "code at $(git -C "$INSTALL_DIR" rev-parse --short HEAD)"
 
 # ---------------------------------------------------------------- 3. venv
 say "Creating isolated Python environment…"
-if [ ! -x "$INSTALL_DIR/.venv/bin/python" ]; then
-  "$PY" -m venv "$INSTALL_DIR/.venv" 2>/dev/null || die "venv creation failed.
-     Debian/Ubuntu: sudo apt install python3-venv
-     Fedora:        sudo dnf install python3-devel"
-fi
 VENV_PY="$INSTALL_DIR/.venv/bin/python"
-"$VENV_PY" -m pip install --quiet --upgrade pip >/dev/null 2>&1 || true
-"$VENV_PY" -m pip install --quiet PyYAML >/dev/null 2>&1 || die "failed to install PyYAML (network?)"
+if [ ! -x "$VENV_PY" ]; then
+  # path 1: standard venv (macOS, most Linux)
+  "$PY" -m venv "$INSTALL_DIR/.venv" 2>/dev/null || true
+  # path 2: venv --without-pip + system pip targeting it (Debian without python3-venv)
+  if [ ! -x "$VENV_PY" ] && "$PY" -m pip --version >/dev/null 2>&1; then
+    "$PY" -m venv --without-pip "$INSTALL_DIR/.venv" 2>/dev/null || true
+    if [ -x "$VENV_PY" ]; then
+      "$PY" -m pip --python "$VENV_PY" install --quiet PyYAML pytest >/dev/null 2>&1 || true
+    fi
+  fi
+  # path 3: uv (fast, no ensurepip needed)
+  if [ ! -x "$VENV_PY" ] && command -v uv >/dev/null 2>&1; then
+    uv venv "$INSTALL_DIR/.venv" >/dev/null 2>&1 || true
+    [ -x "$VENV_PY" ] && uv pip install --python "$VENV_PY" --quiet PyYAML pytest >/dev/null 2>&1 || true
+  fi
+  [ -x "$VENV_PY" ] || die "could not create a virtual environment.
+     Debian/Ubuntu: sudo apt install python3-venv
+     Fedora:        sudo dnf install python3-devel
+     or install uv: curl -LsSf https://astral.sh/uv/install.sh | sh"
+fi
+# ensure PyYAML no matter which path created the venv
+"$VENV_PY" -c "import yaml" >/dev/null 2>&1 || \
+  "$VENV_PY" -m pip install --quiet PyYAML >/dev/null 2>&1 || \
+  die "failed to install PyYAML into the venv (network?)"
+"$VENV_PY" -c "import pytest" >/dev/null 2>&1 || \
+  "$VENV_PY" -m pip install --quiet pytest >/dev/null 2>&1 || true
 ok "virtualenv ready (PyYAML installed)"
 
 # ---------------------------------------------------------------- 4. tests
