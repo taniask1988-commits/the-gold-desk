@@ -67,34 +67,49 @@ ok "code at $(git -C "$INSTALL_DIR" rev-parse --short HEAD)"
 
 # ---------------------------------------------------------------- 3. venv
 say "Creating isolated Python environment…"
-VENV_PY="$INSTALL_DIR/.venv/bin/python"
-if [ ! -x "$VENV_PY" ]; then
-  # path 1: standard venv (macOS, most Linux)
-  "$PY" -m venv "$INSTALL_DIR/.venv" 2>/dev/null || true
-  # path 2: venv --without-pip + system pip targeting it (Debian without python3-venv)
-  if [ ! -x "$VENV_PY" ] && "$PY" -m pip --version >/dev/null 2>&1; then
-    "$PY" -m venv --without-pip "$INSTALL_DIR/.venv" 2>/dev/null || true
-    if [ -x "$VENV_PY" ]; then
-      "$PY" -m pip --python "$VENV_PY" install --quiet PyYAML pytest >/dev/null 2>&1 || true
+VENV_DIR="$INSTALL_DIR/.venv"
+VENV_PY="$VENV_DIR/bin/python"
+VENV_LOG="$INSTALL_DIR/.venv-setup.log"
+
+venv_ready() { [ -x "$VENV_PY" ] && "$VENV_PY" -c "import yaml, pytest" >/dev/null 2>&1; }
+
+if [ ! -x "$VENV_PY" ] || ! venv_ready; then
+  # A. standard venv (macOS, most Linux)
+  rm -rf "$VENV_DIR"
+  if "$PY" -m venv "$VENV_DIR" >"$VENV_LOG" 2>&1; then
+    "$VENV_PY" -m pip install --quiet PyYAML pytest >>"$VENV_LOG" 2>&1 || true
+  fi
+  # B. venv --without-pip + system pip targeting it (Debian without python3-venv)
+  if ! venv_ready && [ -x "$VENV_PY" ] && "$PY" -m pip --version >/dev/null 2>&1; then
+    "$PY" -m pip --python "$VENV_PY" install --quiet PyYAML pytest >>"$VENV_LOG" 2>&1 || true
+  fi
+  if ! venv_ready && "$PY" -m pip --version >/dev/null 2>&1; then
+    rm -rf "$VENV_DIR"
+    if "$PY" -m venv --without-pip "$VENV_DIR" >>"$VENV_LOG" 2>&1; then
+      "$PY" -m pip --python "$VENV_PY" install --quiet PyYAML pytest >>"$VENV_LOG" 2>&1 || true
     fi
   fi
-  # path 3: uv (fast, no ensurepip needed)
-  if [ ! -x "$VENV_PY" ] && command -v uv >/dev/null 2>&1; then
-    uv venv "$INSTALL_DIR/.venv" >/dev/null 2>&1 || true
-    [ -x "$VENV_PY" ] && uv pip install --python "$VENV_PY" --quiet PyYAML pytest >/dev/null 2>&1 || true
+  # C. uv (fast, no ensurepip needed)
+  if ! venv_ready && command -v uv >/dev/null 2>&1; then
+    rm -rf "$VENV_DIR"
+    if uv venv "$VENV_DIR" >>"$VENV_LOG" 2>&1; then
+      uv pip install --python "$VENV_PY" --quiet PyYAML pytest >>"$VENV_LOG" 2>&1 || true
+    fi
   fi
-  [ -x "$VENV_PY" ] || die "could not create a virtual environment.
+  # D. last resort: bootstrap pip inside the venv via ensurepip alternatives
+  if ! venv_ready && [ -x "$VENV_PY" ]; then
+    "$VENV_PY" -m pip install --quiet PyYAML pytest >>"$VENV_LOG" 2>&1 || true
+  fi
+  if ! venv_ready; then
+    [ -f "$VENV_LOG" ] && tail -6 "$VENV_LOG" >&2
+    die "could not create a working virtual environment.
      Debian/Ubuntu: sudo apt install python3-venv
      Fedora:        sudo dnf install python3-devel
      or install uv: curl -LsSf https://astral.sh/uv/install.sh | sh"
+  fi
 fi
-# ensure PyYAML no matter which path created the venv
-"$VENV_PY" -c "import yaml" >/dev/null 2>&1 || \
-  "$VENV_PY" -m pip install --quiet PyYAML >/dev/null 2>&1 || \
-  die "failed to install PyYAML into the venv (network?)"
-"$VENV_PY" -c "import pytest" >/dev/null 2>&1 || \
-  "$VENV_PY" -m pip install --quiet pytest >/dev/null 2>&1 || true
-ok "virtualenv ready (PyYAML installed)"
+rm -f "$VENV_LOG"
+ok "virtualenv ready (PyYAML + pytest installed)"
 
 # ---------------------------------------------------------------- 4. tests
 if [ "${GOLD_DESK_SKIP_TESTS:-0}" != "1" ]; then
