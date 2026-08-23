@@ -35,6 +35,27 @@ is by design — the demo overlay is the only thing that exercises trading
 behavior, and everything it emits is watermarked `DEMO`.
 
 
+## Install — one command
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/taniask1988-commits/the-gold-desk/main/install.sh | bash
+```
+
+Then **restart the terminal** and type:
+
+```bash
+gold-desk          # launches the web command deck (Hermes-style global command)
+gold-desk tui      # terminal UI instead
+gold-desk doctor   # verify the installation
+gold-desk help     # every command
+```
+
+The installer clones to `~/gold-desk`, creates an isolated venv, installs
+dependencies, **runs the 92-test matrix as self-verification**, generates the
+90-day demo journal, installs web-deck dependencies, and puts the global
+`gold-desk` command on your PATH. No accounts, no keys, completely free.
+(Manual alternative: `git clone <repo> && cd the-gold-desk && bash install.sh`)
+
 ## Repository layout
 
 ```
@@ -61,7 +82,20 @@ bun install
 bun run dev          # http://localhost:3000
 ```
 
-Env overrides: `GOLD_DESK_DATA` (journal path), `GOLD_DESK_ROOT`
+### The `gold-desk` command
+
+| Command | Does |
+|---|---|
+| `gold-desk` | web command deck (auto port, opens browser) |
+| `gold-desk tui` | terminal UI |
+| `gold-desk demo [days] [seed]` | regenerate the demo journal |
+| `gold-desk test` | run the 92-test matrix |
+| `gold-desk zen` | sync free OpenCode Zen models |
+| `gold-desk doctor` | installation health check |
+| `gold-desk update` | pull latest + refresh launcher |
+| `gold-desk <anything else>` | pass-through to the harness CLI |
+
+Env overrides: `GOLD_DESK_PORT` (web port, default 3000), `GOLD_DESK_DATA` (journal path), `GOLD_DESK_ROOT`
 (harness root for the veto bench), `GOLD_DESK_PYTHON` (python with PyYAML).
 
 ## Quickstart

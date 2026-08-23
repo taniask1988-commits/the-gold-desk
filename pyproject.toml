@@ -13,7 +13,7 @@ dependencies = ["PyYAML>=6.0"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]
-gold-desk = "gold_desk.cli:main"
+gold-desk-cli = "gold_desk.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

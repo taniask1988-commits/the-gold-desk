@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# ============================================================================
+#  gold-desk — global launcher (installed by install.sh)
+#
+#  gold-desk              launch the web command deck (auto port)
+#  gold-desk tui          launch the terminal UI
+#  gold-desk demo         regenerate the demo journal
+#  gold-desk test         run the frozen test matrix
+#  gold-desk zen          sync the free OpenCode Zen model catalog
+#  gold-desk doctor       verify the installation
+#  gold-desk update       pull the latest code + refresh launcher
+#  gold-desk help         full command list
+#
+#  anything else passes through to the harness CLI, e.g.:
+#  gold-desk validate · gold-desk replay --date 2026-06-10 · gold-desk eod …
+# ============================================================================
+set -euo pipefail
+
+GOLD_DESK_ROOT="__GOLD_DESK_ROOT__"   # replaced at install time
+VENV_PY="$GOLD_DESK_ROOT/.venv/bin/python"
+DATA_DIR="$GOLD_DESK_ROOT/data"
+PORT="${GOLD_DESK_PORT:-3000}"
+
+GOLD='\033[38;5;214m'; BOLD='\033[1m'; DIM='\033[2m'; GREEN='\033[38;5;71m'; RED='\033[38;5;203m'; OFF='\033[0m'
+say() { printf "${GOLD}◆${OFF} %s\n" "$*"; }
+ok()  { printf "  ${GREEN}✓${OFF} %s\n" "$*"; }
+err() { printf "${RED}✗ %s${OFF}\n" "$*" >&2; }
+
+cli() {
+  (cd "$GOLD_DESK_ROOT" && PYTHONPATH="$GOLD_DESK_ROOT/src" "$VENV_PY" -m gold_desk.cli "$@")
+}
+
+ensure_data() {
+  if [ ! -d "$DATA_DIR/events" ]; then
+    say "No journal found — generating the 90-day demo journal…"
+    (cd "$GOLD_DESK_ROOT" && PYTHONPATH="$GOLD_DESK_ROOT/src" "$VENV_PY" -m gold_desk.cli demo --days 90 --seed 42 >/dev/null 2>&1) \
+      || { err "journal generation failed"; return 1; }
+  fi
+}
+
+port_free() { ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+
+find_port() {
+  local p="$PORT"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if port_free "$p"; then echo "$p"; return 0; fi
+    p=$((p + 1))
+  done
+  err "no free port in $PORT..$p range"; return 1
+}
+
+open_browser() {
+  local url="$1"
+  command -v xdg-open >/dev/null 2>&1 && { xdg-open "$url" >/dev/null 2>&1 || true; return; }
+  command -v open     >/dev/null 2>&1 && { open "$url" >/dev/null 2>&1 || true; return; }
+  command -v start    >/dev/null 2>&1 && { start "$url" >/dev/null 2>&1 || true; return; }
+}
+
+# ------------------------------------------------------------------ web
+launch_web() {
+  ensure_data || exit 1
+  cd "$GOLD_DESK_ROOT/web"
+
+  local PM PMRUN
+  if command -v bun >/dev/null 2>&1; then PM="bun"; PMRUN="bun run dev";
+  elif command -v npm >/dev/null 2>&1; then PM="npm"; PMRUN="npm run dev";
+  else
+    err "Node.js or bun is required for the web deck."
+    say "Install Node from https://nodejs.org — or use the TUI instead:"
+    printf "    ${GOLD}gold-desk tui${OFF}\n"
+    exit 1
+  fi
+
+  if [ ! -d node_modules ]; then
+    say "Installing web deck dependencies ($PM)…"
+    if [ "$PM" = "bun" ]; then bun install >/dev/null 2>&1 || { err "bun install failed"; exit 1; }
+    else npm install --no-fund --no-audit >/dev/null 2>&1 || { err "npm install failed"; exit 1; }
+    fi
+  fi
+
+  local P; P="$(find_port)"
+
+  printf "\n${GOLD}${BOLD}  G O L D   D E S K   C O M M A N D${OFF}\n"
+  printf "  ${DIM}frosted-glass telemetry over the journaled desk${OFF}\n\n"
+  printf "  URL      : ${BOLD}http://localhost:$P${OFF}\n"
+  printf "  Journal  : %s\n" "$DATA_DIR"
+  printf "  Stop     : Ctrl+C\n\n"
+
+  # open the browser once the server answers
+  (
+    for _ in $(seq 1 60); do
+      if ! port_free "$P"; then open_browser "http://localhost:$P"; exit 0; fi
+      sleep 1
+    done
+  ) &
+
+  export GOLD_DESK_DATA="$DATA_DIR"
+  exec $PMRUN -- -p "$P"
+}
+
+# ------------------------------------------------------------------ tui
+launch_tui() {
+  ensure_data || exit 1
+  exec "$VENV_PY" "$GOLD_DESK_ROOT/tui/desk_tui.py" --data-root "$DATA_DIR"
+}
+
+# ------------------------------------------------------------------ doctor
+doctor() {
+  printf "\n${GOLD}${BOLD}  gold-desk doctor${OFF}\n\n"
+  if [ -x "$VENV_PY" ]; then ok "venv python  : $($VENV_PY --version 2>&1 | awk '{print $2}')"
+  else err "venv missing : re-run the installer"; fi
+  if "$VENV_PY" -c "import yaml" >/dev/null 2>&1; then ok "PyYAML       : importable"
+  else err "PyYAML missing: $VENV_PY -m pip install PyYAML"; fi
+  if git -C "$GOLD_DESK_ROOT" rev-parse --short HEAD >/dev/null 2>&1; then
+    ok "code         : $(git -C "$GOLD_DESK_ROOT" rev-parse --short HEAD) at $GOLD_DESK_ROOT"
+  else err "repo missing at $GOLD_DESK_ROOT"; fi
+  if [ -d "$DATA_DIR/events" ]; then
+    ok "journal      : $(ls "$DATA_DIR/events" 2>/dev/null | wc -l | tr -d ' ') days"
+  else
+    printf "  ${GOLD}!${OFF} journal empty — run: gold-desk demo\n"
+  fi
+  if [ -f "$DATA_DIR/zen-catalog.json" ]; then ok "zen catalog  : present"
+  else printf "  ${GOLD}!${OFF} no zen catalog — run: gold-desk zen\n"; fi
+  if command -v bun >/dev/null 2>&1; then ok "bun          : $(bun --version 2>/dev/null || echo present)"
+  elif command -v npm >/dev/null 2>&1; then ok "npm          : $(npm --version 2>/dev/null || echo present)"
+  else printf "  ${GOLD}!${OFF} no node/bun — web deck unavailable (TUI works)\n"; fi
+  if [ -d "$GOLD_DESK_ROOT/web/node_modules" ]; then ok "web deps     : installed"
+  else printf "  ${GOLD}!${OFF} web deps missing — gold-desk web installs them on first run\n"; fi
+  case ":$PATH:" in
+    *":$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")"):"*) ok "launcher on  : PATH" ;;
+    *) printf "  ${GOLD}!${OFF} launcher dir not on PATH — restart your terminal\n" ;;
+  esac
+  printf "\n"
+}
+
+# ------------------------------------------------------------------ update
+do_update() {
+  say "Pulling the latest code…"
+  (cd "$GOLD_DESK_ROOT" && git pull --ff-only >/dev/null 2>&1) || { err "git pull failed"; exit 1; }
+  local NEW; NEW="$(git -C "$GOLD_DESK_ROOT" rev-parse --short HEAD)"
+  local SELF; SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+  if [ -f "$GOLD_DESK_ROOT/bin/gold-desk" ]; then
+    sed "s|__GOLD_DESK_ROOT__|$GOLD_DESK_ROOT|g" "$GOLD_DESK_ROOT/bin/gold-desk" > "$SELF"
+    chmod +x "$SELF"
+  fi
+  ok "updated to $NEW (launcher refreshed)"
+}
+
+# ------------------------------------------------------------------ help
+help() {
+  cat << EOF
+$(printf "${GOLD}${BOLD}")  gold-desk$(printf "${OFF}") — the silent XAUUSD H1 decision desk
+
+  $(printf "${GOLD}")gold-desk$(printf "${OFF}")                    launch the web command deck
+  $(printf "${GOLD}")gold-desk tui$(printf "${OFF}")                 launch the terminal UI
+  $(printf "${GOLD}")gold-desk demo$(printf "${OFF}") [days] [seed]  regenerate the demo journal
+  $(printf "${GOLD}")gold-desk test$(printf "${OFF}")                run the frozen test matrix (92 tests)
+  $(printf "${GOLD}")gold-desk zen$(printf "${OFF}")                 sync free OpenCode Zen models
+  $(printf "${GOLD}")gold-desk doctor$(printf "${OFF}")              verify the installation
+  $(printf "${GOLD}")gold-desk update$(printf "${OFF}")              pull latest code + refresh launcher
+
+  harness CLI pass-through:
+  gold-desk validate · replay --date YYYY-MM-DD · eod --date YYYY-MM-DD
+  gold-desk veto-bench --scenario clean|news|stale [--model ID]
+
+  env: GOLD_DESK_PORT (web, default 3000) · GOLD_DESK_DATA (journal)
+EOF
+}
+
+# ------------------------------------------------------------------ main
+case "${1:-web}" in
+  web)        launch_web ;;
+  tui)        launch_tui ;;
+  demo)       shift; if [ $# -eq 0 ]; then set -- --days 90; fi; cli demo "$@" ;;
+  test)       cd "$GOLD_DESK_ROOT" && exec "$VENV_PY" -m pytest tests/ -q ;;
+  zen)        shift; cli zen "$@" ;;
+  doctor)     doctor ;;
+  update)     do_update ;;
+  help|-h|--help) help ;;
+  *)          cli "$@" ;;
+esac
