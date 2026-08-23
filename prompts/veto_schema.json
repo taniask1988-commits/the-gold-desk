@@ -1,0 +1,11 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "veto_output.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["decision", "reason"],
+  "properties": {
+    "decision": { "type": "string", "enum": ["ENDORSE", "VETO"] },
+    "reason": { "type": "string", "maxLength": 500 }
+  }
+}

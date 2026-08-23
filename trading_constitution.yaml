@@ -1,0 +1,145 @@
+# =============================================================================
+# Gold Decision Harness v1 — Document 1: trading_constitution.yaml
+# =============================================================================
+# Immutable. Hashed. Loaded at process start. The sha256 of this file is
+# written onto every journal event. Changing it is a human git commit,
+# never a runtime action (Law L12).
+#
+# STATUS: PERSONAL ACCOUNT (firm overlay disabled by owner choice).
+#         Broker block + internal limit numbers remain BLOCKED pending the
+#         owner's real numbers. The desk runs FAIL-CLOSED while any field
+#         required by a decision is BLOCKED: every bar ends with reason code
+#         CONSTITUTION_BLOCKED and no ticket can exist.
+#
+# To commit your numbers: edit this file, then run
+#     python -m gold_desk.cli validate
+# It will list exactly which fields are still BLOCKED.
+# A prefilled starting point lives at config/constitution.example.yaml
+# (typical gold CFD + conservative limits) — copy, edit, commit.
+# =============================================================================
+
+schema: trading_constitution.v1
+status: BLOCKED_PENDING_OWNER_NUMBERS
+
+identity:
+  name: Gold Decision Harness
+  version: 1
+  instrument: XAUUSD
+  timeframe: H1
+  mode: proposal_only            # no live broker, no orders, ever, in v1
+  llm_role: context_veto_phase2_only
+  llm_is_agent: false
+  phase: 1                       # orchestrator refuses veto unless phase >= 2
+
+# --- Firm overlay: owner declared PERSONAL account (plan question 1) ---
+firm:
+  enabled: false                # personal account: internal limits govern
+  name: PERSONAL
+  challenge_type: personal
+  account_size: BLOCKED         # still needed for paper-account simulation
+  profit_target_pct: null       # personal: no challenge target
+  daily_loss_pct: null          # personal: internal daily stop governs
+  max_dd_pct: null
+  max_dd_type: null
+  min_trading_days: null
+  consistency_rule: null
+  news_trading_rule: BLOCKED    # even personal accounts should state one
+  weekend_holding_rule: BLOCKED
+
+# --- Broker / contract: owner will paste real numbers (plan question 2) ---
+broker:
+  name_or_feed: BLOCKED
+  symbol: XAUUSD
+  contract_size: BLOCKED        # ounces per lot — do not guess
+  quote_digits: BLOCKED
+  tick_size: BLOCKED
+  tick_value: BLOCKED
+  lot_step: BLOCKED
+  min_lot: BLOCKED
+  max_lot: BLOCKED
+  typical_london_open_spread: BLOCKED
+  min_spread_assumption: BLOCKED
+  commission_per_lot_rt: BLOCKED   # account currency per lot, round trip
+  session_timezone: BLOCKED        # broker server tz for H1 alignment
+  sunday_open_policy: BLOCKED
+
+costs:
+  slippage_buffer: BLOCKED
+  assume_spread_at_least_london_typical: true
+  unfillable_if_spread_gt: BLOCKED
+
+# --- Internal limits: owner will paste real numbers (plan question 3) ---
+internal_limits:
+  risk_pct_per_trade: BLOCKED          # fixed fraction, stricter than any firm
+  sizing_equity_basis: BLOCKED         # equity | balance
+  max_trades_per_day: BLOCKED
+  consecutive_loss_standdown: BLOCKED
+  overnight_positions: BLOCKED         # false recommended for v1 gold
+  allowed_sessions: BLOCKED            # e.g. [london, london_ny_overlap]
+  news_blackout_minutes_before: BLOCKED
+  news_blackout_minutes_after: BLOCKED
+  high_impact_only: BLOCKED
+  max_spread: BLOCKED
+  min_stop_distance_spread_mult: BLOCKED   # stop >= N * spread
+  min_stop_distance_atr_mult: BLOCKED      # and/or stop >= M * ATR14
+  min_rr: BLOCKED                          # or null for none
+  daily_loss_internal_pct: BLOCKED         # daily stop on equity
+  max_dd_internal_pct: null                # personal: optional soft stop
+  max_bar_lag_minutes: 5                   # data freshness ceiling
+  outlier_return_abs_pct: 2.0              # sanity bound per H1 bar
+
+execution:
+  boundary: telegram_manual_paste
+  cbot_template: false
+  approval: human_required
+  ticket_expiry_minutes: BLOCKED
+  late_approval: dead_ticket
+  chase_fill: false
+  llm_may_place_orders: false
+  llm_may_write_code: false
+
+blindfold:
+  veto_sees:
+    - timestamped_bars
+    - timestamped_features
+    - candidate_package
+    - timestamped_news
+    - timestamped_calendar
+    - static_risk_pct_rule
+    - static_session_and_news_rules
+  veto_never_sees:
+    - equity
+    - balance
+    - daily_pnl
+    - floating_pnl
+    - remaining_daily_budget
+    - streaks
+    - challenge_progress
+    - trades_today
+    - open_position_details
+  remaining_budget_in_prompt: false
+  score_in_prompt: false
+
+fail_closed:
+  llm_timeout: no_ticket
+  llm_invalid_json: veto
+  news_unavailable: no_trade
+  stale_data: no_trade
+  spread_widened: reject
+  retry_into_fill: false
+
+llm:
+  in_v1_live_loop: phase2_only
+  tools: []
+  may_edit_sl_tp_size: false
+  identity: context_veto
+  provider: not_in_constitution
+
+journal:
+  every_bar_reason_code: true
+  memory_retrieval: false
+  reflections: write_only_after_outcome
+
+promotion:
+  requires_simulator_pass: true
+  llm_cannot_promote: true

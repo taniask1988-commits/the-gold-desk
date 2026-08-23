@@ -1,0 +1,54 @@
+# =============================================================================
+# demo.yaml — DEMO OVERLAY (synthetic feed only; NEVER a source of live numbers)
+# =============================================================================
+# Applied by `python -m gold_desk.cli demo` on top of trading_constitution.yaml
+# to exercise the full pipeline. Every journal event emitted under this overlay
+# carries payload.demo = true and every ticket is watermarked DEMO.
+# The canonical constitution and the canonical journal remain fail-closed.
+# =============================================================================
+
+demo: true
+
+firm:
+  account_size: 10000.0
+  news_trading_rule: no_entries_within_blackout_windows
+  weekend_holding_rule: no_weekend_positions
+
+broker:
+  name_or_feed: DEMO_SYNTHETIC
+  contract_size: 100
+  quote_digits: 2
+  tick_size: 0.01
+  tick_value: 1.0
+  lot_step: 0.01
+  min_lot: 0.01
+  max_lot: 20.0
+  typical_london_open_spread: 0.30
+  min_spread_assumption: 0.25
+  commission_per_lot_rt: 7.0
+  session_timezone: UTC
+  sunday_open_policy: skip_sunday_first_hours
+
+costs:
+  slippage_buffer: 0.10
+  unfillable_if_spread_gt: 0.60
+
+internal_limits:
+  risk_pct_per_trade: 0.0025
+  sizing_equity_basis: equity
+  max_trades_per_day: 2
+  consecutive_loss_standdown: 2
+  overnight_positions: false
+  allowed_sessions: [london, london_ny_overlap]
+  news_blackout_minutes_before: 30
+  news_blackout_minutes_after: 30
+  high_impact_only: true
+  max_spread: 0.45
+  min_stop_distance_spread_mult: 3.0
+  min_stop_distance_atr_mult: 0.5
+  min_rr: 1.5
+  daily_loss_internal_pct: 0.01
+  max_dd_internal_pct: 0.04
+
+execution:
+  ticket_expiry_minutes: 10

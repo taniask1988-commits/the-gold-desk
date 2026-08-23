@@ -1,0 +1,125 @@
+# =============================================================================
+# constitution.example.yaml — EDITABLE STARTING POINT (not loaded by the desk)
+# =============================================================================
+# Copy over trading_constitution.yaml when your real numbers are ready.
+# Values below are TYPICAL/CONSERVATIVE ILLUSTRATIONS, not your broker's truth.
+# Verify every number against your broker's contract specifications before
+# committing. The desk is fail-closed: it only trusts trading_constitution.yaml.
+# =============================================================================
+
+schema: trading_constitution.v1
+status: OWNER_EDITED_EXAMPLE
+
+identity:
+  name: Gold Decision Harness
+  version: 1
+  instrument: XAUUSD
+  timeframe: H1
+  mode: proposal_only
+  llm_role: context_veto_phase2_only
+  llm_is_agent: false
+  phase: 1
+
+firm:
+  enabled: false
+  name: PERSONAL
+  challenge_type: personal
+  account_size: 10000          # your real paper/live account size
+  news_trading_rule: no_entries_within_blackout_windows
+  weekend_holding_rule: no_weekend_positions
+
+broker:
+  name_or_feed: my_ctrader_broker        # <- your feed
+  symbol: XAUUSD
+  contract_size: 100                     # oz per lot — check broker spec
+  quote_digits: 2
+  tick_size: 0.01
+  tick_value: 1.0                        # USD per 1.00 move per lot (100 oz)
+  lot_step: 0.01
+  min_lot: 0.01
+  max_lot: 20.0
+  typical_london_open_spread: 0.30       # price units
+  min_spread_assumption: 0.25
+  commission_per_lot_rt: 7.0             # USD per lot round trip
+  session_timezone: UTC                  # broker server tz for H1 alignment
+  sunday_open_policy: skip_sunday_first_hours
+
+costs:
+  slippage_buffer: 0.10
+  assume_spread_at_least_london_typical: true
+  unfillable_if_spread_gt: 0.60
+
+internal_limits:
+  risk_pct_per_trade: 0.0025             # 0.25% fixed fraction
+  sizing_equity_basis: equity
+  max_trades_per_day: 2
+  consecutive_loss_standdown: 2
+  overnight_positions: false
+  allowed_sessions: [london, london_ny_overlap]
+  news_blackout_minutes_before: 30
+  news_blackout_minutes_after: 30
+  high_impact_only: true
+  max_spread: 0.45
+  min_stop_distance_spread_mult: 3.0     # stop >= 3 * spread
+  min_stop_distance_atr_mult: 0.5        # and stop >= 0.5 * ATR14
+  min_rr: 1.5
+  daily_loss_internal_pct: 0.01          # 1% internal daily stop
+  max_dd_internal_pct: 0.04              # optional internal soft ceiling
+  max_bar_lag_minutes: 5
+  outlier_return_abs_pct: 2.0
+
+execution:
+  boundary: telegram_manual_paste
+  cbot_template: false
+  approval: human_required
+  ticket_expiry_minutes: 10
+  late_approval: dead_ticket
+  chase_fill: false
+  llm_may_place_orders: false
+  llm_may_write_code: false
+
+blindfold:
+  veto_sees:
+    - timestamped_bars
+    - timestamped_features
+    - candidate_package
+    - timestamped_news
+    - timestamped_calendar
+    - static_risk_pct_rule
+    - static_session_and_news_rules
+  veto_never_sees:
+    - equity
+    - balance
+    - daily_pnl
+    - floating_pnl
+    - remaining_daily_budget
+    - streaks
+    - challenge_progress
+    - trades_today
+    - open_position_details
+  remaining_budget_in_prompt: false
+  score_in_prompt: false
+
+fail_closed:
+  llm_timeout: no_ticket
+  llm_invalid_json: veto
+  news_unavailable: no_trade
+  stale_data: no_trade
+  spread_widened: reject
+  retry_into_fill: false
+
+llm:
+  in_v1_live_loop: phase2_only
+  tools: []
+  may_edit_sl_tp_size: false
+  identity: context_veto
+  provider: not_in_constitution
+
+journal:
+  every_bar_reason_code: true
+  memory_retrieval: false
+  reflections: write_only_after_outcome
+
+promotion:
+  requires_simulator_pass: true
+  llm_cannot_promote: true
