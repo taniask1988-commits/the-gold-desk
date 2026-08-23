@@ -6,7 +6,7 @@ __pycache__/
 .venv/
 
 # Harness runtime data (regenerate: python -m gold_desk.cli demo --days 90)
-data/
+/data/
 
 # Node / Next.js
 node_modules/
