@@ -101,6 +101,7 @@ launch_web() {
 # ------------------------------------------------------------------ tui
 launch_tui() {
   ensure_data || exit 1
+  export TERM="${TERM:-xterm-256color}"
   exec "$VENV_PY" "$GOLD_DESK_ROOT/tui/desk_tui.py" --data-root "$DATA_DIR"
 }
 
