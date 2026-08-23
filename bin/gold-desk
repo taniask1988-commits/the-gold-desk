@@ -61,6 +61,19 @@ launch_web() {
   ensure_data || exit 1
   cd "$GOLD_DESK_ROOT/web"
 
+  # Next 16 hard-errors on a middleware.ts without a function export.
+  # The app uses no middleware — if one exists (editor/AI artifact), fix it.
+  if [ -f src/middleware.ts ] && ! grep -qE "export (default |function |const ).*(middleware|\()" src/middleware.ts; then
+    say "Broken src/middleware.ts detected (missing function export)."
+    printf "  ${GOLD}!${OFF} fix: rm src/middleware.ts   (this app uses no middleware)\n"
+    if [ "\${GOLD_DESK_AUTO_FIX:-0}" = "1" ]; then
+      rm -f src/middleware.ts && ok "auto-removed broken middleware.ts"
+    else
+      err "remove web/src/middleware.ts and run gold-desk again"
+      exit 1
+    fi
+  fi
+
   local PM PMRUN
   if command -v bun >/dev/null 2>&1; then PM="bun"; PMRUN="bun run dev";
   elif command -v npm >/dev/null 2>&1; then PM="npm"; PMRUN="npm run dev";

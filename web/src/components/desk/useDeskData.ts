@@ -84,6 +84,14 @@ export interface DriverDTO {
   display: string;
   formatted: string;
   history: number[];
+  live?: boolean;
+  source?: string;
+}
+
+export interface DriverValuesDTO {
+  ok: boolean;
+  live: Record<string, { value: number; unit: string; source: string; display_k?: number }>;
+  unavailable: string[];
 }
 
 export interface ReplayDTO {
@@ -106,6 +114,7 @@ export function useDeskData() {
   const [bars, setBars] = useState<BarDTO[]>([]);
   const [tickets, setTickets] = useState<TicketDTO[]>([]);
   const [drivers, setDrivers] = useState<DriverDTO[]>([]);
+  const [driverValues, setDriverValues] = useState<DriverValuesDTO | null>(null);
   const [composite, setComposite] = useState(50);
   const [replay, setReplay] = useState<ReplayDTO | null>(null);
   const [dayEvents, setDayEvents] = useState<DeskEventDTO[]>([]);
@@ -145,6 +154,19 @@ export function useDeskData() {
     return () => { dead = true; };
   }, [activeDay]);
 
+  // real driver values — free feeds, refreshed every 5 minutes
+  useEffect(() => {
+    let dead = false;
+    const load = () =>
+      fetch("/api/desk/driver-values")
+        .then((r) => r.json())
+        .then((d: DriverValuesDTO) => { if (!dead && d.ok) setDriverValues(d); })
+        .catch(() => {});
+    const kick = setTimeout(() => void load(), 0);
+    const iv = setInterval(() => void load(), 5 * 60_000);
+    return () => { dead = true; clearTimeout(kick); clearInterval(iv); };
+  }, []);
+
   // driver drift — deterministic simulation ticks
   useEffect(() => {
     if (!activeDay) return;
@@ -167,7 +189,7 @@ export function useDeskData() {
   }, []);
 
   return {
-    overview, bars, tickets, drivers, composite, replay, dayEvents,
+    overview, bars, tickets, drivers, driverValues, composite, replay, dayEvents,
     day, setDay: setPickedDay, error, reload,
   };
 }

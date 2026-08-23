@@ -1,7 +1,7 @@
 "use client";
 
-import type { DriverDTO } from "./useDeskData";
-import { DRIVERS } from "@/lib/desk/drivers";
+import type { DriverDTO, DriverValuesDTO } from "./useDeskData";
+import { DRIVERS, stanceFor } from "@/lib/desk/drivers";
 
 function DriverSpark({ data, stance }: { data: number[]; stance: string }) {
   const w = 88, h = 22;
@@ -23,8 +23,37 @@ const TIER_META: Record<number, { label: string; note: string }> = {
   4: { label: "TIER 4 · MICROSTRUCTURE", note: "this hour, tradeable or not" },
 };
 
-export function DriverBoard({ drivers }: { drivers: DriverDTO[] }) {
+function mergeReal(drivers: DriverDTO[], values: DriverValuesDTO | null): DriverDTO[] {
+  if (!values?.live) return drivers;
+  return drivers.map((d) => {
+    const real = values.live[d.id];
+    if (!real || typeof real.value !== "number") return d;
+    const def = DRIVERS.find((x) => x.id === d.id);
+    const overrideVal =
+      d.id === "D5" && typeof real.display_k === "number"
+        ? real.display_k
+        : real.value;
+    return {
+      ...d,
+      value: overrideVal,
+      stance: def ? stanceFor(def, overrideVal) : d.stance,
+      formatted: def ? def.format(overrideVal) : d.formatted,
+      delta: overrideVal - d.value,
+      live: true,
+      source: real.source,
+    };
+  });
+}
+
+export function DriverBoard({
+  drivers, driverValues,
+}: {
+  drivers: DriverDTO[];
+  driverValues: DriverValuesDTO | null;
+}) {
   const tiers = [1, 2, 3, 4];
+  const merged = mergeReal(drivers, driverValues);
+  const liveCount = merged.filter((d) => d.live).length;
   return (
     <div className="gdc-panel overflow-hidden">
       <div className="gdc-sheen" aria-hidden style={{ "--sheen-delay": "4.8s", "--sheen-dur": "10.5s" } as React.CSSProperties} />
@@ -33,11 +62,22 @@ export function DriverBoard({ drivers }: { drivers: DriverDTO[] }) {
           <span className="gdc-display text-[17px] italic text-[#f4f7fa]">Market drivers</span>
           <span className="gdc-kicker">what institutions watch</span>
         </div>
-        <span className="gdc-chip border-[#d29922]/30 text-[#d29922]">SIM VALUES</span>
+        <span
+          className={`gdc-chip ${liveCount > 0 ? "border-[#3fb950]/35 text-[#3fb950]" : "border-[#d29922]/30 text-[#d29922]"}`}
+        >
+          {liveCount > 0 ? (
+            <>
+              <span className="gdc-live-dot h-1.5 w-1.5 rounded-full bg-[#3fb950]" />
+              {liveCount}/{DRIVERS.length} live feeds
+            </>
+          ) : (
+            "SIM VALUES"
+          )}
+        </span>
       </div>
       <div className="grid gap-3 sm:grid-cols-2">
         {tiers.map((t) => {
-          const list = drivers.filter((d) => d.tier === t);
+          const list = merged.filter((d) => d.tier === t);
           const meta = TIER_META[t];
           return (
             <div key={t} className="rounded-2xl border border-white/[0.05] bg-white/[0.02] p-3 backdrop-blur-sm">
@@ -59,7 +99,11 @@ export function DriverBoard({ drivers }: { drivers: DriverDTO[] }) {
                       <div className="min-w-0 flex-1">
                         <div className="flex items-baseline justify-between gap-2">
                           <span className="truncate text-[11.5px] font-medium text-[#f4f7fa]">{d.name}</span>
-                          <span className="gdc-display-num shrink-0 text-[16px]" style={{ color: c }}>
+                          <span
+                            className="gdc-display-num shrink-0 text-[16px]"
+                            style={{ color: c }}
+                            title={d.live ? `live · ${d.source}` : "simulated — no free feed"}
+                          >
                             {d.formatted}
                           </span>
                         </div>
@@ -72,6 +116,7 @@ export function DriverBoard({ drivers }: { drivers: DriverDTO[] }) {
                             {d.delta >= 0 ? "▲" : "▼"} {Math.abs(d.delta) < 10 ? Math.abs(d.delta).toFixed(2) : Math.abs(d.delta).toFixed(0)}
                             {" · "}
                             {d.stance}
+                            {d.live ? " · LIVE" : " · SIM"}
                           </span>
                         </div>
                       </div>
@@ -85,7 +130,10 @@ export function DriverBoard({ drivers }: { drivers: DriverDTO[] }) {
         })}
       </div>
       <div className="border-t border-white/[0.07] px-4 py-2 text-[9px] font-medium text-[#8a95a1]">
-        Taxonomy — docs/MARKET_DRIVERS.md · {DRIVERS.length} drivers · tier-weighted composite in the header
+        Taxonomy — docs/MARKET_DRIVERS.md · {DRIVERS.length} drivers · tier-weighted composite in the header ·{" "}
+        {liveCount > 0
+          ? `${liveCount} live (Treasury, Yahoo, CFTC, computed) · ${DRIVERS.length - liveCount} simulated (no free feed)`
+          : "all simulated — feeds unreachable"}
       </div>
     </div>
   );

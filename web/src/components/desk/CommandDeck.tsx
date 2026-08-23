@@ -16,7 +16,7 @@ import { NewsPanel } from "./NewsPanel";
 import { ChatPanel } from "./ChatPanel";
 
 export function CommandDeck() {
-  const { overview, bars, tickets, drivers, composite, replay, dayEvents, day, setDay, error } =
+  const { overview, bars, tickets, drivers, driverValues, composite, replay, dayEvents, day, setDay, error } =
     useDeskData();
   const [live, setLive] = useState(true);
   const [speed, setSpeed] = useState(4);
@@ -78,7 +78,7 @@ export function CommandDeck() {
 
           {/* Row 2: drivers + wire */}
           <div className="grid gap-4 lg:grid-cols-[1.35fr_1fr]">
-            <DriverBoard drivers={drivers} />
+            <DriverBoard drivers={drivers} driverValues={driverValues} />
             <FeedTerminal
               key={day}
               events={dayEvents}

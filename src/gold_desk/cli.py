@@ -11,6 +11,7 @@
     python -m gold_desk.cli news     [--json]         # gold news headlines (free RSS)
     python -m gold_desk.cli chat     [--json] [--message "..." | --stdin]
                                                     # chat with The Desk expert
+    python -m gold_desk.cli drivers  [--json]        # real driver values (free feeds)
 """
 from __future__ import annotations
 
@@ -186,6 +187,28 @@ def cmd_chat(args) -> int:
     return 0
 
 
+def cmd_drivers(args) -> int:
+    from .data.driver_feeds import fetch_driver_values
+    out = fetch_driver_values(args.data_root)
+    if args.json:
+        print(json.dumps(out, sort_keys=True))
+        return 0 if out.get("ok") else 1
+    print("MARKET DRIVERS — REAL VALUES (free feeds)")
+    print("=" * 56)
+    live = out.get("live", {})
+    for did in sorted(live.keys()):
+        v = live[did]
+        extra = f" (= {v['display_k']}k)" if v.get("display_k") else ""
+        print(f"  {did:4s} {v['value']:>12} {v['unit']:<11} {v['source']}{extra}")
+    un = out.get("unavailable", [])
+    if un:
+        print()
+        print(f"  unavailable right now: {', '.join(un)} (simulated in the UI)")
+    print()
+    print("  D6/D7/D8/D12 have no free feeds — simulated, badged SIM in the UI")
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="gold-desk",
                                      description="Gold Decision Harness v1")
@@ -250,6 +273,11 @@ def main(argv=None) -> int:
     p_chat.add_argument("--model", default=None)
     p_chat.add_argument("--data-root", default=str(REPO_ROOT / "data"))
     p_chat.set_defaults(func=cmd_chat)
+
+    p_drv = sub.add_parser("drivers", help="real driver values (free feeds)")
+    p_drv.add_argument("--json", action="store_true")
+    p_drv.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_drv.set_defaults(func=cmd_drivers)
 
     args = parser.parse_args(argv)
     return args.func(args)

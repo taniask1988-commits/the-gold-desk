@@ -76,12 +76,12 @@ export const DRIVERS: DriverDef[] = [
   {
     id: "D3",
     tier: 1,
-    name: "Fed Path (25h OIS)",
+    name: "Fed Path (1M T-bill)",
     unit: "%",
     format: (v) => v.toFixed(2) + "%",
     neutral: [3.75, 4.05],
     upIs: "HEADWIND",
-    why: "Expected policy path repricing moves real yields",
+    why: "Front-end rate = market's near-policy expectation (Treasury 1-Mo)",
     display: "rate expectations",
   },
   {
@@ -147,7 +147,7 @@ export const DRIVERS: DriverDef[] = [
     format: (v) => v.toFixed(0) + "h",
     neutral: [8, 999],
     upIs: "HEADWIND", // close event = danger for new entries
-    why: "NFP/CPI/FOMC = blackout windows in the constitution",
+    why: "Hours to NFP (first Friday 13:30 UTC) — blackout windows in the constitution",
     display: "blackout clock",
   },
   {

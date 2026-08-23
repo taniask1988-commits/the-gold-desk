@@ -98,6 +98,16 @@ bun run dev          # http://localhost:3000
 | `gold-desk news` | live gold headlines (free Yahoo Finance RSS) |
 | `gold-desk <anything else>` | pass-through to the harness CLI |
 
+### Real driver values on the Driver Board
+
+Tier-1 macro drivers are now **real, keyless, live**: 10y real yield + 1-Mo
+T-bill + 10y breakeven (US Treasury daily yield-curve CSVs), DXY and VIX
+(Yahoo Finance quotes), CFTC managed-money gold positioning (public COT API),
+NFP event clock and session liquidity (computed). Drivers with no free feed
+(ETF flows, central-bank buying, EFP, dealer gamma) stay simulated and are
+honestly badged **SIM** — hover any value for its source. `gold-desk drivers`
+prints the same data in the terminal.
+
 ### Live data — completely free, no keys
 
 The web deck's ticker shows the **real gold price** (LIVE badge): Yahoo COMEX
@@ -107,6 +117,14 @@ headlines from Yahoo Finance RSS. "The Desk" chat button opens a Hermes-style
 conversation with a 20-year gold-desk veteran persona running on free OpenCode
 Zen models — grounded with the live spot, headlines, and your journal, and
 explicitly education-only (it cannot trade and never invents prices).
+
+### Troubleshooting
+
+**`Middleware is missing expected function export name` (./src/middleware.ts)** —
+a `middleware.ts` file exists in `web/src/` that doesn't export a function. The
+desk uses **no middleware**; the file is an artifact (often created by an
+editor or AI assistant). Fix: `rm web/src/middleware.ts` and restart
+(`gold-desk` also detects and reports this automatically).
 
 Env overrides: `GOLD_DESK_PORT` (web port, default 3000), `GOLD_DESK_DATA` (journal path), `GOLD_DESK_ROOT`
 (harness root for the veto bench), `GOLD_DESK_PYTHON` (python with PyYAML).
