@@ -172,7 +172,12 @@ EOF
 case "${1:-web}" in
   web)        launch_web ;;
   tui)        launch_tui ;;
-  demo)       shift; if [ $# -eq 0 ]; then set -- --days 90; fi; cli demo "$@" ;;
+  demo)       shift
+              if [ $# -eq 0 ]; then set -- --days 90
+              elif [[ "$1" =~ ^[0-9]+$ ]]; then
+                DAYS="$1"; SEED="${2:-42}"; set -- --days "$DAYS" --seed "$SEED"
+              fi
+              cli demo "$@" ;;
   test)       cd "$GOLD_DESK_ROOT" && exec "$VENV_PY" -m pytest tests/ -q ;;
   zen)        shift; cli zen "$@" ;;
   doctor)     doctor ;;
