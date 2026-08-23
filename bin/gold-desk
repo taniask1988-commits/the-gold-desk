@@ -122,6 +122,13 @@ doctor() {
   fi
   if [ -f "$DATA_DIR/zen-catalog.json" ]; then ok "zen catalog  : present"
   else printf "  ${GOLD}!${OFF} no zen catalog — run: gold-desk zen\n"; fi
+  local SPOT
+  SPOT="$(cli price --json 2>/dev/null | head -c 400 || true)"
+  if echo "$SPOT" | grep -q '"ok": *true'; then
+    ok "live feeds   : $(echo "$SPOT" | "$VENV_PY" -c 'import json,sys; d=json.load(sys.stdin); print(f"{d["price"]:.2f} USD/oz via {d["source"].split(" ")[0]}")' 2>/dev/null || echo reachable)"
+  else
+    printf "  ${GOLD}!${OFF} live feeds unreachable (display-only feature)\n"
+  fi
   if command -v bun >/dev/null 2>&1; then ok "bun          : $(bun --version 2>/dev/null || echo present)"
   elif command -v npm >/dev/null 2>&1; then ok "npm          : $(npm --version 2>/dev/null || echo present)"
   else printf "  ${GOLD}!${OFF} no node/bun — web deck unavailable (TUI works)\n"; fi
@@ -156,6 +163,9 @@ $(printf "${GOLD}${BOLD}")  gold-desk$(printf "${OFF}") — the silent XAUUSD H1
   $(printf "${GOLD}")gold-desk tui$(printf "${OFF}")                 launch the terminal UI
   $(printf "${GOLD}")gold-desk demo$(printf "${OFF}") [days] [seed]  regenerate the demo journal
   $(printf "${GOLD}")gold-desk test$(printf "${OFF}")                run the frozen test matrix (92 tests)
+  $(printf "${GOLD}")gold-desk chat$(printf "${OFF}")              talk to The Desk expert (free models)
+  $(printf "${GOLD}")gold-desk price$(printf "${OFF}")             live gold spot (free feeds)
+  $(printf "${GOLD}")gold-desk news$(printf "${OFF}")              live gold headlines (free RSS)
   $(printf "${GOLD}")gold-desk zen$(printf "${OFF}")                 sync free OpenCode Zen models
   $(printf "${GOLD}")gold-desk doctor$(printf "${OFF}")              verify the installation
   $(printf "${GOLD}")gold-desk update$(printf "${OFF}")              pull latest code + refresh launcher
@@ -180,6 +190,9 @@ case "${1:-web}" in
               cli demo "$@" ;;
   test)       cd "$GOLD_DESK_ROOT" && exec "$VENV_PY" -m pytest tests/ -q ;;
   zen)        shift; cli zen "$@" ;;
+  chat)       shift; export TERM="${TERM:-xterm-256color}"; cli chat "$@" ;;
+  price)      shift; cli price "$@" ;;
+  news)       shift; cli news "$@" ;;
   doctor)     doctor ;;
   update)     do_update ;;
   help|-h|--help) help ;;

@@ -1,6 +1,16 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import type { BarDTO, OverviewDTO } from "./useDeskData";
+
+interface LiveSpot {
+  ok: boolean;
+  price: number;
+  prev_close: number | null;
+  source: string;
+  market_time: number | null;
+  reference?: { source: string; price: number; as_of: number };
+}
 
 function Spark({ data, color = "#e8b440", w = 120, h = 34 }: { data: number[]; color?: string; w?: number; h?: number }) {
   if (data.length < 2) return <svg width={w} height={h} />;
@@ -23,10 +33,26 @@ export function TickerStrip({
   overview: OverviewDTO | null;
   livePrice: number | null;
 }) {
+  const [spot, setSpot] = useState<LiveSpot | null>(null);
+  useEffect(() => {
+    let dead = false;
+    const load = () =>
+      fetch("/api/desk/price")
+        .then((r) => r.json())
+        .then((d: LiveSpot) => { if (!dead && d.ok) setSpot(d); })
+        .catch(() => {});
+    void load();
+    const t = setInterval(() => void load(), 60_000);
+    return () => { dead = true; clearInterval(t); };
+  }, []);
+
   const last = bars[bars.length - 1];
-  const price = livePrice ?? last?.c ?? 0;
-  const dayBars = bars.filter((b) => b.ts_close.slice(0, 10) === last?.ts_close.slice(0, 10));
-  const dayOpen = dayBars[0]?.o ?? price;
+  const journalPrice = livePrice ?? last?.c ?? 0;
+  const price = spot?.price ?? journalPrice;
+  const dayOpen = spot?.prev_close ?? (() => {
+    const dayBars = bars.filter((b) => b.ts_close.slice(0, 10) === last?.ts_close.slice(0, 10));
+    return dayBars[0]?.o ?? journalPrice;
+  })();
   const dayChange = price - dayOpen;
   const pct = (dayChange / (dayOpen || 1)) * 100;
   const up = dayChange >= 0;
@@ -62,9 +88,23 @@ export function TickerStrip({
       <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-x-10 gap-y-4 px-4 py-4 sm:px-7">
         <div className="flex items-center gap-5">
           <div className="flex flex-col gap-2 pb-0.5">
-            <span className="text-[9px] font-semibold uppercase tracking-[0.28em] leading-none text-[#8a95a1]">
+            <span className="flex items-center gap-2 text-[9px] font-semibold uppercase tracking-[0.28em] leading-none text-[#8a95a1]">
               XAU / USD
+              {spot ? (
+                <span className="flex items-center gap-1 rounded-full border border-[#3fb950]/35 bg-[#3fb950]/[0.08] px-1.5 py-[1px] text-[7.5px] tracking-[0.14em] text-[#3fb950]">
+                  <span className="gdc-live-dot h-1 w-1 rounded-full bg-[#3fb950]" /> LIVE
+                </span>
+              ) : (
+                <span className="rounded-full border border-[#d29922]/35 bg-[#d29922]/[0.08] px-1.5 py-[1px] text-[7.5px] tracking-[0.14em] text-[#d29922]">DEMO</span>
+              )}
             </span>
+            {spot && (
+              <span className="text-[7.5px] uppercase tracking-[0.14em] text-[#76828e]">
+                {spot.source.split(" ")[0]} · {spot.market_time
+                  ? new Date(spot.market_time * 1000).toISOString().slice(11, 16) + " UTC"
+                  : ""}
+              </span>
+            )}
             <span
               className={`gdc-display-num text-[44px] leading-[0.95] ${
                 up ? "text-[#3fb950] gdc-glow-green" : "text-[#f85149] gdc-glow-red"

@@ -12,6 +12,8 @@ import { TicketBoard } from "./TicketBoard";
 import { ReplayPanel } from "./ReplayPanel";
 import { ConstitutionPanel, LawsMarquee } from "./ConstitutionPanel";
 import { ZenPanel } from "./ZenPanel";
+import { NewsPanel } from "./NewsPanel";
+import { ChatPanel } from "./ChatPanel";
 
 export function CommandDeck() {
   const { overview, bars, tickets, drivers, composite, replay, dayEvents, day, setDay, error } =
@@ -19,6 +21,7 @@ export function CommandDeck() {
   const [live, setLive] = useState(true);
   const [speed, setSpeed] = useState(4);
   const [scope, setScope] = useState<"DAY" | "ALL">("DAY");
+  const [chatOpen, setChatOpen] = useState(false);
 
   // live price = close of the newest fully-revealed bar in the wire
   const livePrice = useMemo(() => {
@@ -56,6 +59,8 @@ export function CommandDeck() {
           hash={overview?.constitutionHash ?? null}
           composite={composite}
           spanDays={overview?.span.days ?? 0}
+          onChat={() => setChatOpen((v) => !v)}
+          chatOpen={chatOpen}
         />
         <TickerStrip bars={bars} overview={overview} livePrice={livePrice} />
 
@@ -85,6 +90,9 @@ export function CommandDeck() {
             />
           </div>
 
+          {/* Row 2.5: the tape (live news) */}
+          <NewsPanel />
+
           {/* Row 3: tickets + replay */}
           <div className="grid gap-4 lg:grid-cols-[1.1fr_1fr]">
             <TicketBoard tickets={tickets} />
@@ -97,6 +105,8 @@ export function CommandDeck() {
           {/* Row 4: constitution */}
           <ConstitutionPanel hash={overview?.constitutionHash ?? null} blockedCount={30} phase={1} />
         </main>
+
+        <ChatPanel open={chatOpen} onClose={() => setChatOpen(false)} />
 
         <footer className="mt-auto">
           <LawsMarquee />

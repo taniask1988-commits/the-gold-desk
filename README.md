@@ -93,7 +93,20 @@ bun run dev          # http://localhost:3000
 | `gold-desk zen` | sync free OpenCode Zen models |
 | `gold-desk doctor` | installation health check |
 | `gold-desk update` | pull latest + refresh launcher |
+| `gold-desk chat` | talk to **The Desk** — 20-yr gold expert (free Zen models, grounded with live data) |
+| `gold-desk price` | live gold spot — free feeds (Yahoo GC=F futures, Binance PAXG 24/7 fallback) |
+| `gold-desk news` | live gold headlines (free Yahoo Finance RSS) |
 | `gold-desk <anything else>` | pass-through to the harness CLI |
+
+### Live data — completely free, no keys
+
+The web deck's ticker shows the **real gold price** (LIVE badge): Yahoo COMEX
+futures (GC=F) when the market is open, Binance PAXG (tokenized gold, 24/7)
+when futures are closed or unreachable. "The tape" panel streams live gold
+headlines from Yahoo Finance RSS. "The Desk" chat button opens a Hermes-style
+conversation with a 20-year gold-desk veteran persona running on free OpenCode
+Zen models — grounded with the live spot, headlines, and your journal, and
+explicitly education-only (it cannot trade and never invents prices).
 
 Env overrides: `GOLD_DESK_PORT` (web port, default 3000), `GOLD_DESK_DATA` (journal path), `GOLD_DESK_ROOT`
 (harness root for the veto bench), `GOLD_DESK_PYTHON` (python with PyYAML).

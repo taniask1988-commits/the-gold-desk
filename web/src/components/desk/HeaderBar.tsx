@@ -4,13 +4,15 @@ import { useEffect, useState } from "react";
 import { sessionOfHour } from "./useDeskData";
 
 export function HeaderBar({
-  phase, demo, hash, composite, spanDays,
+  phase, demo, hash, composite, spanDays, onChat, chatOpen,
 }: {
   phase: number;
   demo: boolean;
   hash: string | null;
   composite: number;
   spanDays: number;
+  onChat: () => void;
+  chatOpen: boolean;
 }) {
   const [now, setNow] = useState<Date | null>(null);
   useEffect(() => {
@@ -47,6 +49,16 @@ export function HeaderBar({
         </div>
 
         <div className="ml-auto flex flex-wrap items-center gap-2 text-[10px]">
+          <button
+            onClick={onChat}
+            aria-label="Chat with The Desk"
+            className={`gdc-chip cursor-pointer border-[#e8b440]/35 transition-all hover:bg-[#e8b440]/[0.12] ${
+              chatOpen ? "bg-[#e8b440]/[0.12] text-[#e8b440]" : "text-[#e8b440]"
+            }`}
+          >
+            <span className="gdc-display text-[12px] italic">The Desk</span>
+            <span aria-hidden>✦</span> chat
+          </button>
           <span className="gdc-chip text-[#aab4bf]">
             <span className="gdc-live-dot h-1.5 w-1.5 rounded-full bg-[#3fb950]" />
             Phase {phase} · No LLM
