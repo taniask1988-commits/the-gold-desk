@@ -192,3 +192,107 @@ def complete_json(
     if not content or not isinstance(content, str):
         raise LLMInvalidJSON("empty content")
     return _extract_json_object(content)
+
+
+def complete_stream(
+    messages: list[dict],
+    model: str,
+    timeout: float = 90.0,
+    temperature: float = 0.4,
+    max_tokens: int = 1800,
+):
+    """Streaming completion. Yields ('reasoning'|'content', delta_str) tuples.
+
+    OpenAI-compatible SSE: each event is `data: <json>\\n\\n` and the stream
+    ends with `data: [DONE]\\n\\n`. Reasoning-capable models emit deltas
+    with `reasoning_content` before deltas with `content`.
+
+    The generator handles transient 429/5xx with one retry (warm-reopen) but
+    never retries a partial stream — once tokens have flowed, what was
+    emitted is the truth (fail-closed, same as the non-stream path).
+
+    Raises LLMUnavailable on transport failure before first byte.
+    """
+    import time as _time
+
+    body = json.dumps({
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": True,
+    }).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": USER_AGENT,
+        "Accept": "text/event-stream",
+    }
+
+    backoff_s = 0.8
+    for attempt in range(2):
+        req = urllib.request.Request(
+            f"{base_url()}/chat/completions",
+            data=body,
+            headers=headers,
+        )
+        try:
+            resp = urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as e:
+            if _is_transient(e.code) and attempt == 0:
+                _time.sleep(backoff_s)
+                continue
+            raise LLMUnavailable(f"zen http {e.code}") from e
+        except TimeoutError as e:
+            if attempt == 0:
+                _time.sleep(backoff_s)
+                continue
+            raise LLMUnavailable("zen timeout") from e
+        except Exception as e:
+            if attempt == 0:
+                _time.sleep(backoff_s)
+                continue
+            raise LLMUnavailable(f"zen transport: {type(e).__name__}") from e
+
+        # parse SSE event stream — we read raw bytes and decode line-by-line
+        try:
+            buf = b""
+            while True:
+                chunk = resp.read(8192)
+                if not chunk:
+                    break
+                buf += chunk
+                # events are split on \n\n; process complete events only
+                while b"\n\n" in buf:
+                    raw_event, buf = buf.split(b"\n\n", 1)
+                    for line in raw_event.split(b"\n"):
+                        line = line.decode("utf-8", errors="replace")
+                        if not line.startswith("data:"):
+                            continue
+                        payload = line[5:].strip()
+                        if payload == "[DONE]":
+                            return
+                        if not payload:
+                            continue
+                        try:
+                            evt = json.loads(payload)
+                        except json.JSONDecodeError:
+                            continue
+                        choices = evt.get("choices") or []
+                        if not choices:
+                            continue
+                        delta = choices[0].get("delta") or {}
+                        rc = delta.get("reasoning_content")
+                        if rc:
+                            yield ("reasoning", rc)
+                        c = delta.get("content")
+                        if c:
+                            yield ("content", c)
+        finally:
+            try:
+                resp.close()
+            except Exception:
+                pass
+        return
+
+    # Defensive
+    raise LLMUnavailable("zen stream exhausted retries")

@@ -624,4 +624,121 @@ header.sticky { animation: gdc-rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) backward
 }
 .gdc-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.2); background-clip: padding-box; }
 
+/* ---------- REASONING PANEL (Hermes-style) ---------- */
+
+/* Soft pulsing glow on the live reasoning card border */
+@keyframes gdc-reasoning-pulse {
+  0%, 100% { box-shadow:
+    inset 0 0 0 1px rgba(232, 180, 64, 0.22),
+    0 0 0 0 rgba(232, 180, 64, 0.18); }
+  50%      { box-shadow:
+    inset 0 0 0 1px rgba(232, 180, 64, 0.45),
+    0 0 36px -8px rgba(232, 180, 64, 0.35),
+    0 0 12px -4px rgba(232, 180, 64, 0.28); }
+}
+.gdc-reasoning-live {
+  animation: gdc-reasoning-pulse 2.6s ease-in-out infinite;
+}
+
+/* The gold left rule that "breathes" while tokens stream in */
+@keyframes gdc-rule-breathe {
+  0%, 100% { opacity: 0.55; transform: scaleY(0.92); }
+  50%      { opacity: 1;    transform: scaleY(1); }
+}
+.gdc-reasoning-rule {
+  animation: gdc-rule-breathe 1.8s ease-in-out infinite;
+  transform-origin: center;
+}
+
+/* Thin gold shimmer that sweeps across the top of the reasoning card */
+@keyframes gdc-reasoning-sheen {
+  0%   { transform: translateX(-110%); }
+  100% { transform: translateX(110%); }
+}
+.gdc-reasoning-sheen {
+  position: absolute; left: 0; right: 0; top: 0; height: 1px;
+  background: linear-gradient(90deg,
+    transparent,
+    rgba(232, 180, 64, 0.85) 35%,
+    rgba(255, 244, 196, 0.95) 50%,
+    rgba(232, 180, 64, 0.85) 65%,
+    transparent);
+  animation: gdc-reasoning-sheen 2.4s ease-in-out infinite;
+}
+
+/* Blinking caret that sits at the end of streaming text */
+@keyframes gdc-caret-blink {
+  0%, 49%  { opacity: 1; }
+  50%, 100% { opacity: 0.15; }
+}
+.gdc-reasoning-caret {
+  display: inline-block;
+  width: 0.55ch;
+  height: 1em;
+  margin-left: 0.15ch;
+  background: linear-gradient(180deg, #ffd479, #e8b440);
+  border-radius: 1px;
+  vertical-align: -0.15em;
+  animation: gdc-caret-blink 0.95s step-end infinite;
+  box-shadow: 0 0 8px rgba(232, 180, 64, 0.65);
+}
+
+/* Per-token fade-in — keeps streaming text from feeling "jumpy" */
+@keyframes gdc-token-fade {
+  from { opacity: 0; filter: blur(0.4px); }
+  to   { opacity: 1; filter: blur(0); }
+}
+.gdc-token-in { animation: gdc-token-fade 0.16s ease-out; }
+
+/* Whole reasoning card slides up softly when first appearing */
+@keyframes gdc-reasoning-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.gdc-reasoning-enter { animation: gdc-reasoning-enter 0.22s ease-out; }
+
+/* Phase chip morphs reasoning -> replying */
+@keyframes gdc-phase-shift {
+  0%   { transform: scale(1);   background-color: rgba(232, 180, 64, 0.18); }
+  50%  { transform: scale(1.06); background-color: rgba(63, 185, 80, 0.18); }
+  100% { transform: scale(1);   background-color: rgba(63, 185, 80, 0.10); }
+}
+.gdc-phase-shift { animation: gdc-phase-shift 0.55s ease-out; }
+
+/* Premium "thinking" status chip — three dots that breathe in sequence */
+@keyframes gdc-dot-1 { 0%, 33% { opacity: 0.25; } 11%, 22% { opacity: 1; } }
+@keyframes gdc-dot-2 { 0%, 33% { opacity: 0.25; } 22%, 33% { opacity: 1; } }
+@keyframes gdc-dot-3 { 0%, 33% { opacity: 0.25; } 33%, 44% { opacity: 1; } }
+.gdc-think-dot-1 { animation: gdc-dot-1 1.2s ease-in-out infinite; }
+.gdc-think-dot-2 { animation: gdc-dot-2 1.2s ease-in-out infinite; }
+.gdc-think-dot-3 { animation: gdc-dot-3 1.2s ease-in-out infinite; }
+
+/* When reasoning collapses to a header-only strip after the reply starts */
+.gdc-reasoning-collapsed {
+  transition: max-height 0.35s ease, opacity 0.35s ease, margin 0.35s ease;
+  max-height: 600px;
+  overflow: hidden;
+}
+.gdc-reasoning-collapsed.is-collapsed {
+  max-height: 0;
+  opacity: 0;
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gdc-reasoning-live,
+  .gdc-reasoning-rule,
+  .gdc-reasoning-sheen,
+  .gdc-reasoning-caret,
+  .gdc-token-in,
+  .gdc-reasoning-enter,
+  .gdc-phase-shift,
+  .gdc-think-dot-1,
+  .gdc-think-dot-2,
+  .gdc-think-dot-3 {
+    animation: none !important;
+  }
+}
+
 /* cache-bust 1787548200 (lab-brutalist v2) */

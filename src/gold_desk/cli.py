@@ -128,7 +128,7 @@ def cmd_news(args) -> int:
 
 def cmd_chat(args) -> int:
     import sys as _sys
-    from .llm.expert_chat import chat as run_chat
+    from .llm.expert_chat import chat as run_chat, chat_stream as run_chat_stream
     from .llm.zen_client import LLMUnavailable
 
     if args.json:
@@ -138,6 +138,23 @@ def cmd_chat(args) -> int:
             messages = payload.get("messages", [])
         else:
             messages = [{"role": "user", "content": args.message or ""}]
+
+        if args.stream:
+            # NDJSON streaming mode: one JSON event per line, flushed immediately.
+            # events: start | reasoning | content | done | error
+            #     start    {"type":"start","model":..,"grounded":bool}
+            #     reasoning {"type":"reasoning","delta":str}     (optional, many)
+            #     content  {"type":"content","delta":str}        (many)
+            #     done     {"type":"done","model":..,"latency_ms":int,"grounded":bool}
+            #     error    {"type":"error","error":str}          (terminal)
+            # terminal is exactly one of done | error
+            out = _sys.stdout
+            for evt in run_chat_stream(messages, data_root=args.data_root,
+                                       model=args.model):
+                out.write(json.dumps(evt, sort_keys=True) + "\n")
+                out.flush()
+            return 0
+
         try:
             out = run_chat(messages, data_root=args.data_root, model=args.model)
         except LLMUnavailable as e:
@@ -270,6 +287,9 @@ def main(argv=None) -> int:
                         help="single message (with --json)")
     p_chat.add_argument("--stdin", action="store_true",
                         help="read {messages:[...]} transcript from stdin")
+    p_chat.add_argument("--stream", action="store_true",
+                        help="with --json: stream NDJSON events "
+                             "(start|reasoning|content|done|error)")
     p_chat.add_argument("--model", default=None)
     p_chat.add_argument("--data-root", default=str(REPO_ROOT / "data"))
     p_chat.set_defaults(func=cmd_chat)

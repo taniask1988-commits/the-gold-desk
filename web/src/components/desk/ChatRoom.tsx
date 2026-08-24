@@ -1,6 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 
 /* ----------------------------- types ----------------------------- */
 
@@ -10,6 +16,7 @@ interface Msg {
   model?: string;
   latency?: number;
   grounded?: boolean;
+  reasoning?: string;       // full reasoning transcript (collapsible)
 }
 
 interface SpotTick {
@@ -51,6 +58,25 @@ interface Overview {
   balance?: number;
 }
 
+/** Live in-flight stream state. Cleared when a terminal event arrives. */
+interface StreamState {
+  phase: "reasoning" | "replying";
+  model: string | null;
+  grounded: boolean;
+  reasoning: string;
+  reply: string;
+  startedAt: number;
+  tokenCount: number;
+}
+
+/** Events emitted by /api/desk/chat as NDJSON lines. */
+type ChatEvent =
+  | { type: "start"; model: string; grounded: boolean }
+  | { type: "reasoning"; delta: string }
+  | { type: "content"; delta: string }
+  | { type: "done"; model: string; latency_ms: number; grounded: boolean }
+  | { type: "error"; error: string };
+
 /* ----------------------------- constants ----------------------------- */
 
 const SUGGESTIONS = [
@@ -62,7 +88,6 @@ const SUGGESTIONS = [
   "What's CFTC managed-money positioning telling us?",
 ];
 
-// Driver code → human label (matches src/gold_desk/data/driver_feeds.py _collect)
 const DRIVER_META: Record<string, { label: string; decimals: number }> = {
   D1:  { label: "10y Real Yield",  decimals: 2 },
   D2:  { label: "DXY Dollar Idx", decimals: 2 },
@@ -89,6 +114,9 @@ export function ChatRoom() {
   const [error, setError] = useState<string | null>(null);
   const [model, setModel] = useState<string | null>(null);
   const [lastLatency, setLastLatency] = useState<number | null>(null);
+  const [stream, setStream] = useState<StreamState | null>(null);
+  /** When reasoning has finished and reply is streaming, collapse it. */
+  const [reasoningCollapsed, setReasoningCollapsed] = useState(false);
 
   // left-rail live data
   const [spot, setSpot] = useState<SpotTick | null>(null);
@@ -97,6 +125,11 @@ export function ChatRoom() {
   const [overview, setOverview] = useState<Overview | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  const streamRef = useRef<StreamState | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
+  // keep streamRef in sync so the streaming reader can mutate latest state
+  useEffect(() => { streamRef.current = stream; }, [stream]);
 
   /* -------- polling for left-rail data -------- */
   useEffect(() => {
@@ -126,13 +159,23 @@ export function ChatRoom() {
     };
   }, []);
 
-  /* -------- autoscroll on new messages -------- */
+  /* -------- autoscroll on new messages / streaming tokens -------- */
   useEffect(() => {
     if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      // Only snap to bottom if user is already near the bottom (don't yank
+      // them while they're reading earlier reasoning).
+      const el = scrollRef.current;
+      const nearBottom =
+        el.scrollHeight - el.scrollTop - el.clientHeight < 220;
+      if (nearBottom) el.scrollTop = el.scrollHeight;
     }
-  }, [messages, busy]);
+  }, [messages, busy, stream]);
 
+  /**
+   * Send a question and stream the answer back. Reads NDJSON events from
+   * /api/desk/chat line-by-line, mutating `stream` state for each delta so
+   * the reasoning + reply panels paint token-by-token.
+   */
   const send = useCallback(
     async (text: string) => {
       const question = text.trim();
@@ -140,34 +183,139 @@ export function ChatRoom() {
       setInput("");
       setError(null);
       setBusy(true);
+      setReasoningCollapsed(false);
       const next: Msg[] = [...messages, { role: "user", content: question }];
       setMessages(next);
+
+      const fresh: StreamState = {
+        phase: "reasoning",
+        model: null,
+        grounded: false,
+        reasoning: "",
+        reply: "",
+        startedAt: performance.now(),
+        tokenCount: 0,
+      };
+      setStream(fresh);
+
+      const ac = new AbortController();
+      abortRef.current = ac;
+
       try {
-        const r = await fetch("/api/desk/chat", {
+        const res = await fetch("/api/desk/chat", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "Accept": "application/x-ndstream",
+          },
           body: JSON.stringify({ messages: next }),
-        }).then((x) => x.json());
-        if (r.ok) {
-          setModel(r.model ?? null);
-          setLastLatency(r.latency_ms ?? null);
-          setMessages((m) => [
-            ...m,
-            {
-              role: "assistant",
-              content: r.reply,
-              model: r.model,
-              latency: r.latency_ms,
-              grounded: r.grounded,
-            },
-          ]);
+          signal: ac.signal,
+        });
+        if (!res.ok || !res.body) {
+          const j = await res.json().catch(() => ({}));
+          throw new Error(
+            (j as { error?: string }).error || `chat endpoint ${res.status}`,
+          );
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "";
+        let terminalSeen = false;
+        let doneModel: string | null = null;
+        let doneLatency: number | null = null;
+        let doneGrounded = false;
+        let errorText: string | null = null;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          let nlIdx: number;
+          while ((nlIdx = buf.indexOf("\n")) >= 0) {
+            const line = buf.slice(0, nlIdx).trim();
+            buf = buf.slice(nlIdx + 1);
+            if (!line) continue;
+            let evt: ChatEvent;
+            try { evt = JSON.parse(line) as ChatEvent; }
+            catch { continue; }
+            switch (evt.type) {
+              case "start":
+                setStream((s) => s ? {
+                  ...s, model: evt.model, grounded: evt.grounded,
+                } : s);
+                break;
+              case "reasoning":
+                setStream((s) => s ? {
+                  ...s,
+                  phase: "reasoning",
+                  reasoning: s.reasoning + evt.delta,
+                  tokenCount: s.tokenCount + 1,
+                } : s);
+                break;
+              case "content":
+                setStream((s) => {
+                  if (!s) return s;
+                  const next2: StreamState = {
+                    ...s,
+                    phase: "replying",
+                    reply: s.reply + evt.delta,
+                    tokenCount: s.tokenCount + 1,
+                  };
+                  return next2;
+                });
+                // collapse reasoning when first content token arrives
+                setReasoningCollapsed(true);
+                break;
+              case "done":
+                terminalSeen = true;
+                doneModel = evt.model;
+                doneLatency = evt.latency_ms;
+                doneGrounded = evt.grounded;
+                break;
+              case "error":
+                terminalSeen = true;
+                errorText = evt.error;
+                break;
+            }
+          }
+        }
+
+        if (errorText) {
+          setError(errorText);
+        } else if (terminalSeen) {
+          const finalReply = streamRef.current?.reply?.trim() ?? "";
+          if (!finalReply) {
+            setError("the model returned an empty reply");
+          } else {
+            setMessages((m) => [
+              ...m,
+              {
+                role: "assistant",
+                content: finalReply,
+                model: doneModel ?? undefined,
+                latency: doneLatency ?? undefined,
+                grounded: doneGrounded || undefined,
+                reasoning: streamRef.current?.reasoning?.trim() || undefined,
+              },
+            ]);
+            if (doneModel) setModel(doneModel);
+            if (doneLatency !== null) setLastLatency(doneLatency);
+          }
         } else {
-          setError(String(r.error || "the model is unreachable"));
+          setError("stream ended unexpectedly");
         }
       } catch (e) {
-        setError((e as Error).message);
+        const err = e as Error;
+        if (err.name === "AbortError") {
+          // user aborted — don't surface an error, just stop
+        } else {
+          setError(err.message);
+        }
       } finally {
+        setStream(null);
         setBusy(false);
+        abortRef.current = null;
       }
     },
     [messages, busy],
@@ -183,7 +331,6 @@ export function ChatRoom() {
       ? (spotChange! / spot.prev_close) * 100
       : null;
 
-  // live driver entries in the order we want to show them
   const driverRows = drivers?.ok && drivers.live
     ? (Object.keys(DRIVER_META).map((code) => {
         const meta = DRIVER_META[code];
@@ -227,7 +374,7 @@ export function ChatRoom() {
           <div className="leading-tight">
             <div className="gdc-script text-[22px] leading-none text-[#f0e6d2]">The Desk</div>
             <div className="gdc-spec mt-1 text-[8.5px] uppercase tracking-[0.18em] text-[#76828e]">
-              20-yr gold veteran · free Zen models · grounded w/ live data
+              20-yr gold veteran · free Zen models · live reasoning stream
             </div>
           </div>
 
@@ -433,6 +580,10 @@ export function ChatRoom() {
                       }`}
                     >
                       <MarkdownLite text={m.content} />
+                      {/* Per-message collapsible reasoning (after a reply is finalized) */}
+                      {m.role === "assistant" && m.reasoning && m.reasoning.length > 0 && (
+                        <ReasoningCollapse summary={m.reasoning} />
+                      )}
                       {m.role === "assistant" && (m.model || m.latency !== undefined) && (
                         <div className="gdc-data mt-2 border-t border-white/[0.05] pt-1.5 text-[8.5px] text-[#76828e]">
                           {m.model && <span>{m.model}</span>}
@@ -446,7 +597,18 @@ export function ChatRoom() {
                     </div>
                   </div>
                 ))}
-                {busy && (
+
+                {/* ----- LIVE STREAM PANEL (reasoning + reply) ----- */}
+                {stream && (
+                  <LiveStreamPanel
+                    stream={stream}
+                    reasoningCollapsed={reasoningCollapsed}
+                    onToggleCollapse={() => setReasoningCollapsed((v) => !v)}
+                  />
+                )}
+
+                {/* fallback "thinking" badge before stream arrives */}
+                {busy && !stream && (
                   <div className="flex justify-start">
                     <div className="mr-2.5 mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-[#e8b440]/40 bg-gradient-to-b from-[#e8b440]/25 to-[#1a1408]/40">
                       <span className="gdc-display text-[10px] font-semibold text-[#e8b440]">Au</span>
@@ -454,7 +616,7 @@ export function ChatRoom() {
                     <div className="flex items-center gap-2 rounded-2xl rounded-bl-md border border-white/[0.09] bg-white/[0.045] px-4 py-3 backdrop-blur-md">
                       <span className="gdc-live-dot h-1.5 w-1.5 rounded-full bg-[#e8b440]" />
                       <span className="text-[11px] italic text-[#9aa5b0]">
-                        the desk is thinking… (free model, can take ~10-30s)
+                        opening secure channel to the model…
                       </span>
                     </div>
                   </div>
@@ -529,6 +691,156 @@ export function ChatRoom() {
   );
 }
 
+/* ----------------------------- live stream panel ----------------------------- */
+
+function LiveStreamPanel({
+  stream,
+  reasoningCollapsed,
+  onToggleCollapse,
+}: {
+  stream: StreamState;
+  reasoningCollapsed: boolean;
+  onToggleCollapse: () => void;
+}) {
+  const elapsed = ((performance.now() - stream.startedAt) / 1000).toFixed(1);
+  const phaseLabel = stream.phase === "reasoning" ? "REASONING" : "REPLYING";
+  const phaseColor =
+    stream.phase === "reasoning" ? "#e8b440" : "#3fb950";
+  const hasReply = stream.reply.length > 0;
+
+  return (
+    <div className="gdc-reasoning-enter flex justify-start">
+      <div className="mr-2.5 mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-[#e8b440]/40 bg-gradient-to-b from-[#e8b440]/25 to-[#1a1408]/40 shadow-[0_0_16px_rgba(232,180,64,0.25)]">
+        <span className="gdc-display text-[10px] font-semibold text-[#e8b440]">Au</span>
+      </div>
+      <div className="max-w-[88%] flex-1">
+        {/* HEADER STRIP — always visible */}
+        <div
+          className={`relative flex items-center gap-2 rounded-t-2xl border border-b-0 px-4 py-2 ${
+            stream.phase === "reasoning"
+              ? "border-[#e8b440]/35 bg-[#e8b440]/[0.05] gdc-reasoning-live"
+              : "border-[#3fb950]/30 bg-[#3fb950]/[0.04]"
+          }`}
+        >
+          {/* shimmer line across the top */}
+          {stream.phase === "reasoning" && (
+            <div className="gdc-reasoning-sheen" aria-hidden />
+          )}
+          {/* phase chip */}
+          <span
+            className="gdc-data inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[8.5px] font-semibold uppercase tracking-[0.16em]"
+            style={{
+              color: phaseColor,
+              borderColor: phaseColor + "55",
+              backgroundColor: phaseColor + "14",
+            }}
+          >
+            {phaseLabel}
+          </span>
+          {/* three breathing dots while reasoning */}
+          {stream.phase === "reasoning" && !hasReply && (
+            <span className="flex items-center gap-0.5" aria-hidden>
+              <span className="gdc-think-dot-1 h-1 w-1 rounded-full bg-[#e8b440]" />
+              <span className="gdc-think-dot-2 h-1 w-1 rounded-full bg-[#e8b440]" />
+              <span className="gdc-think-dot-3 h-1 w-1 rounded-full bg-[#e8b440]" />
+            </span>
+          )}
+          {/* model + elapsed */}
+          {stream.model && (
+            <span className="gdc-data text-[8.5px] text-[#aab4bf]">
+              <span className="text-[#76828e]">model </span>
+              <span className="text-[#f4f7fa]">{stream.model}</span>
+            </span>
+          )}
+          <span className="gdc-data text-[8.5px] text-[#76828e]">
+            {elapsed}s
+          </span>
+          {stream.tokenCount > 0 && (
+            <span className="gdc-data text-[8.5px] text-[#76828e]">
+              · {stream.tokenCount} tok
+            </span>
+          )}
+          {/* collapse toggle */}
+          {hasReply && (
+            <button
+              onClick={onToggleCollapse}
+              className="gdc-data ml-auto cursor-pointer text-[8.5px] uppercase tracking-[0.14em] text-[#76828e] transition-colors hover:text-[#e8b440]"
+            >
+              {reasoningCollapsed ? "▾ show reasoning" : "▴ hide reasoning"}
+            </button>
+          )}
+        </div>
+
+        {/* REASONING BODY (collapses when reply starts) */}
+        <div
+          className={`gdc-reasoning-collapsed relative ${
+            reasoningCollapsed ? "is-collapsed" : ""
+          } border-l-2 border-l-[#e8b440]/45 bg-[#1a1408]/30 px-4 py-3 ${
+            hasReply ? "rounded-b-0 border-b-0" : "rounded-b-2xl border-b border-[#e8b440]/35"
+          }`}
+        >
+          {/* breathing gold rule on the left */}
+          <span
+            className="gdc-reasoning-rule pointer-events-none absolute left-0 top-3 bottom-3 w-[2px] rounded-full bg-[#e8b440]/60"
+            aria-hidden
+          />
+          <div className="gdc-data whitespace-pre-wrap break-words pl-3 text-[10.5px] leading-relaxed text-[#d4b96a]">
+            {stream.reasoning ? (
+              <>
+                <span className="gdc-token-in">{stream.reasoning}</span>
+                {stream.phase === "reasoning" && (
+                  <span className="gdc-reasoning-caret" aria-hidden />
+                )}
+              </>
+            ) : (
+              <span className="italic text-[#76828e]">
+                reasoning… (free model, first tokens can take 5-15s)
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* REPLY BODY (always visible once reply starts) */}
+        {hasReply && (
+          <div className="whitespace-pre-wrap break-words rounded-b-2xl border border-[#3fb950]/25 bg-white/[0.05] px-4 py-3 text-[12.5px] leading-relaxed text-[#e9edf2] backdrop-blur-md">
+            <span className="gdc-token-in">{stream.reply}</span>
+            {stream.phase === "replying" && (
+              <span className="gdc-reasoning-caret" aria-hidden style={{
+                background: "linear-gradient(180deg, #b9f6c0, #3fb950)",
+                boxShadow: "0 0 8px rgba(63, 185, 80, 0.65)",
+              }} />
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------- per-message collapsible reasoning ----------------------------- */
+
+function ReasoningCollapse({ summary }: { summary: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mt-2.5 border-t border-white/[0.06] pt-2">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="gdc-data flex cursor-pointer items-center gap-1.5 text-[8.5px] uppercase tracking-[0.14em] text-[#76828e] transition-colors hover:text-[#e8b440]"
+      >
+        <span aria-hidden>{open ? "▾" : "▸"}</span>
+        reasoning · {summary.length} chars
+      </button>
+      {open && (
+        <div className="mt-2 border-l-2 border-[#e8b440]/35 pl-3">
+          <div className="gdc-data max-h-[260px] overflow-y-auto whitespace-pre-wrap break-words text-[10px] leading-relaxed text-[#d4b96a]">
+            {summary}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ----------------------------- helpers ----------------------------- */
 
 function StatChip({
@@ -563,7 +875,6 @@ function Row({ label, value }: { label: string; value: string }) {
 
 /** Tiny markdown renderer — bold + inline code + line breaks only (no XSS surface). */
 function MarkdownLite({ text }: { text: string }) {
-  // split on lines, then split each line into segments by ** ** and ` ` ` `
   const lines = text.split(/\n/);
   return (
     <>
@@ -578,7 +889,6 @@ function MarkdownLite({ text }: { text: string }) {
 }
 
 function renderInline(text: string): ReactNode {
-  // tokenize on **bold** and `code`
   const tokens: ReactNode[] = [];
   const re = /(\*\*[^*]+\*\*|`[^`]+`)/g;
   let last = 0;

@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 from ..data.feeds import fetch_news, fetch_spot
-from .zen_client import LLMUnavailable, complete
+from .zen_client import LLMUnavailable, complete, complete_stream
 from .zen_sync import load_catalog, sync_catalog
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -120,6 +120,54 @@ def chat(
     return {
         "ok": True,
         "reply": reply.strip(),
+        "model": chosen,
+        "latency_ms": int((time.time() - started) * 1000),
+        "grounded": bool(context),
+    }
+
+
+def chat_stream(
+    messages: list[dict],
+    data_root: str | Path = "data",
+    model: str | None = None,
+    timeout: float = 90.0,
+    max_tokens: int = 1800,
+):
+    """Streaming version of chat(). Yields event dicts in order:
+
+      {"type": "start",  "model": str, "grounded": bool}    — once, first
+      {"type": "reasoning", "delta": str}                   — many, may not appear
+      {"type": "content",   "delta": str}                   — many
+      {"type": "done",    "model": str, "latency_ms": int, "grounded": bool}  — once, last
+      {"type": "error",   "error": str}                     — terminal
+
+    The terminal event is always either `done` or `error`, never both.
+    """
+    chosen = resolve_model(data_root, model)
+    context = build_context(data_root)
+    payload = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": context},
+    ] + [
+        {"role": m.get("role", "user"), "content": str(m.get("content", ""))[:4000]}
+        for m in (messages or [])[-20:]
+    ]
+    started = time.time()
+    yield {"type": "start", "model": chosen, "grounded": bool(context)}
+    try:
+        for kind, delta in complete_stream(
+            payload, chosen, timeout=timeout,
+            temperature=0.4, max_tokens=max_tokens,
+        ):
+            yield {"type": kind, "delta": delta}
+    except LLMUnavailable as e:
+        yield {"type": "error", "error": f"LLM_UNAVAILABLE: {e}"}
+        return
+    except Exception as e:
+        yield {"type": "error", "error": f"{type(e).__name__}: {e}"}
+        return
+    yield {
+        "type": "done",
         "model": chosen,
         "latency_ms": int((time.time() - started) * 1000),
         "grounded": bool(context),
