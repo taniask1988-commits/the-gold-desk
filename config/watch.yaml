@@ -1,0 +1,12 @@
+# =============================================================================
+# watch.yaml — L2 WATCHLIST (opt-in; set GOLD_DESK_AUTONOMY=L2)
+# =============================================================================
+# One watch pass researches each asset at `depth` and journals a report.
+# Schedule via crontab (no scheduler framework by design):
+#   15 8,16 * * 1-5  cd ~/gold-desk && python -m gold_desk.cli watch --once
+# =============================================================================
+
+assets: [XAUUSD, BTC]
+interval_hours: 8
+quiet_hours_utc: [21, 7]      # no watch passes inside this window
+depth: 1                      # research fan-out depth per asset

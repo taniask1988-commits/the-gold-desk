@@ -1,0 +1,32 @@
+# =============================================================================
+# assets.yaml — ASSET REGISTRY (human-owned, like the constitution)
+# =============================================================================
+# The research layer covers gold AND crypto via keyless public APIs
+# (CoinGecko / DefiLlama / Binance). Adding a token = adding a row.
+# Proposals/tickets remain XAUUSD-only until the constitution changes.
+# =============================================================================
+
+assets:
+  XAUUSD:
+    class: metal
+    spot_tool: feeds          # yahoo GC=F -> PAXG fallback (data/feeds.py)
+    ohlc_symbol: "GC=F"
+    fallback: "PAXGUSDT"
+    proposable: true          # L3 proposal drafting allowed for gold only
+  BTC:
+    class: crypto
+    spot_tool: coingecko
+    id: bitcoin
+    ohlc_symbol: "BTC/USDT"
+  ETH:
+    class: crypto
+    spot_tool: coingecko
+    id: ethereum
+    ohlc_symbol: "ETH/USDT"
+  SOL:
+    class: crypto
+    spot_tool: coingecko
+    id: solana
+    ohlc_symbol: "SOL/USDT"
+# tokens: add {id: <coingecko-id>, contracts: {eth: "0x..."}} —
+# token_search() resolves names->ids at runtime for unknown tokens.

@@ -48,7 +48,20 @@ EVENT_KINDS = [
     "Fill", "Skip", "TicketExpired", "ReflectionWritten", "KillSwitch",
     "ProcessStart", "ProcessRecovered", "EodSummary",
     "AccountCorruptRecovered",
+    # --- agent sidecar kinds (P0 §2.3) ---
+    # These are NOT bar events: they never carry a reason_code (the
+    # one-terminal-code-per-bar invariant is untouched — pinned by test).
+    "AgentRunStarted", "AgentStep", "AgentToolCall",
+    "AgentRunFinished", "ResearchReport", "ResearchSourceFetched",
+    "ProposalDrafted", "BudgetExceeded",
 ]
+
+# Agent-sidecar kinds must never carry a reason code (L13-adjacent invariant)
+AGENT_KINDS = {
+    "AgentRunStarted", "AgentStep", "AgentToolCall",
+    "AgentRunFinished", "ResearchReport", "ResearchSourceFetched",
+    "ProposalDrafted", "BudgetExceeded",
+}
 
 
 @dataclass

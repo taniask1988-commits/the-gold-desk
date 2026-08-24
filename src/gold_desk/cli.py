@@ -5,6 +5,7 @@
     python -m gold_desk.cli demo [--days 30] [--seed 7] [--data-root DIR]
     python -m gold_desk.cli replay   --date YYYY-MM-DD [--data-root DIR]
     python -m gold_desk.cli eod      --date YYYY-MM-DD [--data-root DIR]
+    python -m gold_desk.cli events   [--kind K] [--limit N] [--json]
     python -m gold_desk.cli zen      [--refresh]     # free-model catalog status
     python -m gold_desk.cli veto-bench [--model ID] [--scenario clean|news|stale]
                                                     # OFFLINE veto research bench
@@ -13,6 +14,11 @@
     python -m gold_desk.cli chat     [--json] [--message "..." | --stdin]
                                                     # chat with The Desk expert
     python -m gold_desk.cli drivers  [--json]        # real driver values (free feeds)
+    python -m gold_desk.cli ask     "question" [--model ID] [--max-steps N]
+                                                    # agent loop with desk+web tools
+    python -m gold_desk.cli research ASSET [--depth 2] [--refresh]
+                                                    # cited deep-research report
+    python -m gold_desk.cli watch    [--once] [--force]  # L2 watchlist pass
 """
 from __future__ import annotations
 
@@ -83,6 +89,28 @@ def cmd_replay(args) -> int:
 def cmd_eod(args) -> int:
     from .eod import eod_summary
     print(eod_summary(args.data_root, args.date))
+    return 0
+
+
+def cmd_events(args) -> int:
+    """Journal events feed (used by the web deck + agent panel)."""
+    from .events import Journal
+    events = Journal.read_events(args.data_root)
+    if args.kind:
+        events = [e for e in events if e.get("kind") == args.kind]
+    if args.reason_code:
+        events = [e for e in events if e.get("reason_code") == args.reason_code]
+    events = events[-args.limit:]
+    if args.json:
+        print(json.dumps({"ok": True, "count": len(events),
+                          "events": events}, ensure_ascii=False))
+        return 0
+    print(f"JOURNAL EVENTS — last {len(events)}")
+    print("=" * 60)
+    for e in reversed(events[-args.limit:]):
+        rc = e.get("reason_code") or ""
+        print(f"  {e['ts'][:19]} {e['kind']:20s} {rc:18s} "
+              f"{str(e.get('payload', ''))[:60]}")
     return 0
 
 
@@ -257,6 +285,100 @@ def cmd_drivers(args) -> int:
     return 0
 
 
+def _agent_registry():
+    """Full research registry: desk tools + crypto tools + web tools."""
+    from .agent.desk_tools import desk_registry
+    from .agent.assets import asset_tools
+    from .agent.browse import browse_tools
+    reg = desk_registry()
+    for t in asset_tools():
+        reg.register(t)
+    for t in browse_tools():
+        reg.register(t)
+    return reg
+
+
+def cmd_ask(args) -> int:
+    from .agent.loop import run_agent
+    result = run_agent(
+        args.question,
+        _agent_registry(),
+        data_root=args.data_root,
+        model=args.model,
+        max_steps=args.max_steps,
+        max_minutes=args.max_minutes,
+    )
+    if args.json:
+        print(json.dumps({
+            "ok": result.ok, "answer": result.answer, "model": result.model,
+            "steps": result.steps, "tool_calls": result.tool_calls,
+            "elapsed_ms": result.elapsed_ms, "status": result.status,
+            "detail": result.detail, "run_id": result.run_id,
+            "transcript": result.transcript_path,
+        }, ensure_ascii=False, indent=1))
+        return 0 if result.ok else 1
+    print()
+    print(result.answer)
+    print()
+    print(f"  [{result.model} · {result.steps} steps · "
+          f"{result.tool_calls} tool calls · {result.elapsed_ms}ms · "
+          f"status={result.status}]")
+    if result.detail:
+        print(f"  detail: {result.detail}")
+    print()
+    return 0 if result.ok else 1
+
+
+def cmd_research(args) -> int:
+    from .agent.research import research
+    out = research(args.asset, data_root=args.data_root,
+                   depth=args.depth, model=args.model,
+                   refresh=args.refresh)
+    if args.json:
+        print(json.dumps(out, ensure_ascii=False, indent=1,
+                         default=str))
+        return 0 if out.get("ok") else 1
+    if out.get("ok"):
+        print("RESEARCH COMPLETE")
+        print("=" * 60)
+        print(f"asset    : {out['asset']}")
+        print(f"report   : {out['report_path']}")
+        print(f"sources  : {len(out.get('sources') or [])}")
+        print(f"model    : {out.get('model')}")
+        print(f"elapsed  : {out.get('elapsed_ms')} ms")
+        ver = (out.get("verification") or {}).get("claims") or []
+        if ver:
+            print("verified claims:")
+            for c in ver:
+                mark = "OK " if c.get("verdict") == "verified" else "?? "
+                print(f"  {mark}{c['claim'][:70]}")
+    else:
+        print(f"research failed: {out.get('status')} — {out.get('detail')}")
+    return 0 if out.get("ok") else 1
+
+
+def cmd_watch(args) -> int:
+    from .agent.watch import watch_once, autonomy_level
+    if args.force or args.once:
+        out = watch_once(data_root=args.data_root, force=args.force)
+        if args.json:
+            print(json.dumps(out, ensure_ascii=False, default=str))
+            return 0 if out.get("ok") else 1
+        level = autonomy_level()
+        print(f"WATCH PASS (autonomy L{level})")
+        print("=" * 60)
+        for r in out.get("assets") or []:
+            mark = "OK " if r.get("ok") else "ERR"
+            print(f"  {mark} {r['asset']:8s} {r.get('path') or r.get('status')}")
+        if out.get("status"):
+            print(f"  status: {out['status']}")
+        return 0 if out.get("ok") else 1
+    print("watch runs one pass with --once (or schedule it via crontab:")
+    print("  15 8,16 * * 1-5  cd ~/gold-desk && "
+          "python -m gold_desk.cli watch --once")
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="gold-desk",
                                      description="Gold Decision Harness v1")
@@ -286,6 +408,15 @@ def main(argv=None) -> int:
     p_eod.add_argument("--date", required=True)
     p_eod.add_argument("--data-root", default=str(REPO_ROOT / "data"))
     p_eod.set_defaults(func=cmd_eod)
+
+    p_eve = sub.add_parser("events", help="journal events feed (web deck)")
+    p_eve.add_argument("--json", action="store_true")
+    p_eve.add_argument("--kind", default=None,
+                       help="filter by event kind (e.g. AgentRunFinished)")
+    p_eve.add_argument("--reason-code", default=None, dest="reason_code")
+    p_eve.add_argument("--limit", type=int, default=100)
+    p_eve.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_eve.set_defaults(func=cmd_events)
 
     p_zen = sub.add_parser("zen", help="OpenCode Zen free-model catalog")
     p_zen.add_argument("--refresh", action="store_true",
@@ -335,6 +466,33 @@ def main(argv=None) -> int:
     p_drv.add_argument("--json", action="store_true")
     p_drv.add_argument("--data-root", default=str(REPO_ROOT / "data"))
     p_drv.set_defaults(func=cmd_drivers)
+
+    p_ask = sub.add_parser("ask", help="agent loop: desk + web tools, $0")
+    p_ask.add_argument("question")
+    p_ask.add_argument("--model", default=None)
+    p_ask.add_argument("--max-steps", type=int, default=12)
+    p_ask.add_argument("--max-minutes", type=float, default=10.0)
+    p_ask.add_argument("--json", action="store_true")
+    p_ask.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_ask.set_defaults(func=cmd_ask)
+
+    p_res = sub.add_parser("research", help="cited deep-research report")
+    p_res.add_argument("asset")
+    p_res.add_argument("--depth", type=int, default=2)
+    p_res.add_argument("--model", default=None)
+    p_res.add_argument("--refresh", action="store_true",
+                        help="bypass the http cache where possible")
+    p_res.add_argument("--json", action="store_true")
+    p_res.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_res.set_defaults(func=cmd_research)
+
+    p_watch = sub.add_parser("watch", help="L2 watchlist pass (opt-in)")
+    p_watch.add_argument("--once", action="store_true")
+    p_watch.add_argument("--force", action="store_true",
+                         help="run even below L2 / inside quiet hours")
+    p_watch.add_argument("--json", action="store_true")
+    p_watch.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_watch.set_defaults(func=cmd_watch)
 
     args = parser.parse_args(argv)
     return args.func(args)

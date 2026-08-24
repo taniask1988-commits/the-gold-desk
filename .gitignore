@@ -6,7 +6,21 @@ __pycache__/
 .venv/
 
 # Harness runtime data (regenerate: python -m gold_desk.cli demo --days 90)
-/data/
+/data/*
+!/data/.gitkeep
+# agent runtime artifacts (research reports, fetch cache, run transcripts)
+!/data/research/
+!/data/cache/
+!/data/agent_runs/
+/data/research/*
+!/data/research/.gitkeep
+/data/cache/*
+!/data/cache/.gitkeep
+!/data/cache/http/
+/data/cache/http/*
+!/data/cache/http/.gitkeep
+/data/agent_runs/*
+!/data/agent_runs/.gitkeep
 
 # Node / Next.js
 node_modules/

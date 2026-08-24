@@ -7,10 +7,13 @@ name = "gold-desk"
 version = "1.0.0"
 description = "Gold Decision Harness v1 — silent, fail-closed, human-in-the-loop XAUUSD H1 desk"
 requires-python = ">=3.11"
-dependencies = ["PyYAML>=6.0"]
+dependencies = ["PyYAML>=6.0", "ddgs>=9.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+browser = ["playwright>=1.40"]      # T2 headless rendering (optional)
+fetch = ["trafilatura>=1.8"]        # better T0 extraction (optional)
+crypto = ["ccxt>=4.0"]              # uniform exchange OHLCV (optional)
 
 [project.scripts]
 gold-desk-cli = "gold_desk.cli:main"

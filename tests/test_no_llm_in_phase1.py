@@ -151,3 +151,14 @@ def test_canonical_constitution_fails_closed(tmp_path):
     events = Journal.read_events(root)
     assert not [e for e in events if e["kind"] == "TicketEvent"]
     assert not [e for e in events if e["kind"] == "SetupCandidate"]
+
+
+def test_live_path_imports_no_agent_sidecar():
+    """L13 — sidecar isolation: the live bar loop never imports the agent."""
+    for mod in LIVE_MODULES + ["account", "demo", "cli"]:
+        p = REPO / "src" / "gold_desk" / f"{mod}.py"
+        if not p.exists():
+            continue
+        src = p.read_text()
+        assert "gold_desk.agent" not in src, (
+            f"{mod}.py references the agent sidecar (L13 violation)")

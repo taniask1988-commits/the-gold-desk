@@ -13,6 +13,7 @@ import { ReplayPanel } from "./ReplayPanel";
 import { ConstitutionPanel, LawsMarquee } from "./ConstitutionPanel";
 import { ZenPanel } from "./ZenPanel";
 import { NewsPanel } from "./NewsPanel";
+import AgentPanel from "./AgentPanel";
 
 export function CommandDeck() {
   const { overview, bars, tickets, drivers, driverValues, composite, replay, dayEvents, day, setDay, error } =
@@ -88,6 +89,9 @@ export function CommandDeck() {
 
           {/* Row 3.5: OpenCode Zen free models + veto research bench */}
           <ZenPanel />
+
+          {/* Row 3.6: research sidecar — agent reports + audit trail */}
+          <AgentPanel />
 
           {/* Row 4: constitution */}
           <ConstitutionPanel

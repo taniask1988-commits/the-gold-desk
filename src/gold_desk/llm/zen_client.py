@@ -1,9 +1,12 @@
 """Keyless OpenAI-compatible client for OpenCode Zen (OPENCODE_HERMES_SETUP §1).
 
-- base URL  : OPENCODE_ZEN_BASE_URL (default https://opencode.ai/zen/v1)
-- api key   : OPENCODE_ZEN_API_KEY (placeholder) — Zen's free tier is KEYLESS;
-              per the Hermes setup the Authorization header is STRIPPED at
-              request time (paid-only on Zen), so we simply never send it.
+- base URL  : GOLD_DESK_LLM_BASE_URL (falls back to OPENCODE_ZEN_BASE_URL;
+              default https://opencode.ai/zen/v1) — any OpenAI-compatible
+              endpoint works by setting the alias (P0 §2.1)
+- api key   : GOLD_DESK_LLM_API_KEY (falls back to OPENCODE_ZEN_API_KEY;
+              placeholder) — the Authorization header is sent ONLY when a
+              non-placeholder key is explicitly set; Zen's free tier is
+              KEYLESS so by default nothing is sent.
 - identity  : official OpenCode client User-Agent (opencode/1.18.18)
 
 Fail-closed by design (L5): every failure raises a typed error; the caller
@@ -18,6 +21,7 @@ import re
 import urllib.error
 import urllib.request
 
+from .json_repair import extract_json_object
 from .zen_sync import USER_AGENT
 
 DEFAULT_BASE_URL = "https://opencode.ai/zen/v1"
@@ -32,11 +36,13 @@ class LLMInvalidJSON(RuntimeError):
 
 
 def base_url() -> str:
-    # Defense in depth: if OPENCODE_ZEN_BASE_URL is set but empty/whitespace,
-    # fall back to the default instead of producing a relative URL like
-    # "/chat/completions" that urllib rejects with
-    #   ValueError: unknown url type: '/chat/completions'
-    raw = os.environ.get("OPENCODE_ZEN_BASE_URL", "").strip()
+    # P0 §2.1 — GOLD_DESK_LLM_BASE_URL is the generic alias; falls back to
+    # OPENCODE_ZEN_BASE_URL, then the Zen default.
+    raw = (os.environ.get("GOLD_DESK_LLM_BASE_URL")
+           or os.environ.get("OPENCODE_ZEN_BASE_URL") or "").strip()
+    # Defense in depth: if set but empty/whitespace, fall back to the default
+    # instead of producing a relative URL like "/chat/completions" that
+    # urllib rejects with ValueError: unknown url type.
     if not raw:
         return DEFAULT_BASE_URL.rstrip("/")
     if not (raw.startswith("http://") or raw.startswith("https://")):
@@ -46,9 +52,26 @@ def base_url() -> str:
 
 
 def api_key() -> str:
-    # Hermes requires a non-empty key to consider the provider authenticated;
-    # the header itself is stripped, so the value is a placeholder.
-    return os.environ.get("OPENCODE_ZEN_API_KEY", "placeholder")
+    # GOLD_DESK_LLM_API_KEY is the generic alias (P0 §2.1); falls back to
+    # OPENCODE_ZEN_API_KEY, then the placeholder. Hermes requires a non-empty
+    # key to consider the provider authenticated; the header itself is only
+    # sent when a real key is set (see auth_headers).
+    return (os.environ.get("GOLD_DESK_LLM_API_KEY")
+            or os.environ.get("OPENCODE_ZEN_API_KEY") or "placeholder")
+
+
+def auth_headers() -> dict:
+    """Authorization header — sent ONLY when a non-placeholder key is set.
+
+    Zen's free tier is keyless: with the default placeholder (or no env var)
+    the header is absent, exactly like the original Hermes setup. A real key
+    (for any other OpenAI-compatible endpoint) is forwarded as a Bearer.
+    """
+    key = (os.environ.get("GOLD_DESK_LLM_API_KEY")
+           or os.environ.get("OPENCODE_ZEN_API_KEY") or "").strip()
+    if not key or key == "placeholder":
+        return {}
+    return {"Authorization": f"Bearer {key}"}
 
 
 def _is_transient(code: int) -> bool:
@@ -86,8 +109,9 @@ def complete(
     headers = {
         "Content-Type": "application/json",
         "User-Agent": USER_AGENT,
-        # Authorization deliberately absent: Zen free tier is keyless
     }
+    # Authorization only when a real key is set — Zen free tier is keyless
+    headers.update(auth_headers())
 
     last_exc: Exception | None = None
     backoff_s = 0.6
@@ -125,63 +149,13 @@ def complete(
     raise LLMUnavailable(f"zen exhausted retries: {last_exc!r}")
 
 
-def _iter_json_objects(text: str):
-    """Yield balanced {...} substrings (innermost-last ordering is not
-    guaranteed; caller prefers the LAST parseable object — models state the
-    final answer at the end)."""
-    depth = 0
-    start = -1
-    in_str = False
-    escape = False
-    for i, ch in enumerate(text):
-        if escape:
-            escape = False
-            continue
-        if ch == "\\" and in_str:
-            escape = True
-            continue
-        if ch == '"':
-            in_str = not in_str
-            continue
-        if in_str:
-            continue
-        if ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            if depth > 0:
-                depth -= 1
-                if depth == 0 and start >= 0:
-                    yield text[start:i + 1]
-
-
-def _extract_json_object(text: str) -> dict:
-    """Best-effort strict extraction: last balanced object that parses."""
-    candidates = []
-    for cand in _iter_json_objects(text):
-        try:
-            parsed = json.loads(cand)
-        except json.JSONDecodeError:
-            # retry with relaxed quotes (reasoning dumps use ' or none)
-            relaxed = cand.replace("'", '"')
-            try:
-                parsed = json.loads(relaxed)
-            except json.JSONDecodeError:
-                continue
-        if isinstance(parsed, dict):
-            candidates.append(parsed)
-    if not candidates:
-        raise LLMInvalidJSON(f"no JSON object found: {text[:120]!r}")
-    return candidates[-1]
-
-
 def complete_json(
     messages: list[dict],
     model: str,
     timeout: float = 30.0,
     temperature: float = 0.0,
     max_tokens: int = 500,
+    retries: int = 3,
 ) -> dict:
     """Completion restricted to a single JSON object.
 
@@ -191,7 +165,8 @@ def complete_json(
     the documented fallback. Anything unparseable is LLMInvalidJSON,
     which the veto path treats as VETO (fail closed).
     """
-    body = complete(messages, model, timeout, temperature, max_tokens)
+    body = complete(messages, model, timeout, temperature, max_tokens,
+                    retries=retries)
     choices = body.get("choices") or []
     if not choices:
         raise LLMInvalidJSON("no choices in response")
@@ -201,7 +176,10 @@ def complete_json(
         content = message.get("reasoning_content")  # fallback: capped models
     if not content or not isinstance(content, str):
         raise LLMInvalidJSON("empty content")
-    return _extract_json_object(content)
+    try:
+        return extract_json_object(content)
+    except ValueError as e:
+        raise LLMInvalidJSON(str(e)) from e
 
 
 def complete_stream(
@@ -237,6 +215,7 @@ def complete_stream(
         "User-Agent": USER_AGENT,
         "Accept": "text/event-stream",
     }
+    headers.update(auth_headers())
 
     backoff_s = 0.8
     for attempt in range(2):

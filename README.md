@@ -23,7 +23,7 @@ money is a property of a setup — after it survives the exam.
 | Phase | What | State |
 |---|---|---|
 | 0 | Constitution + simulator contract | ✅ built, numbers **BLOCKED** (yours to commit) |
-| 1 | Deterministic desk: pipeline, one GUESS setup, gate, journal, Telegram tickets, recovery, replay, EOD | ✅ built, 121 tests green |
+| 1 | Deterministic desk: pipeline, one GUESS setup, gate, journal, Telegram tickets, recovery, replay, EOD | ✅ built, 146 tests green |
 | 1.5 | Frozen simulator battery on the setup | 🔶 skeleton (`sim/`) — refuses verdicts while numbers are BLOCKED |
 | 2 | Single-shot context veto (LLM) | 🔒 stub only (raises); unlocks at `identity.phase: 2` |
 | 3+ | Not in this plan | — |
@@ -51,7 +51,7 @@ gold-desk help     # every command
 ```
 
 The installer clones to `~/gold-desk`, creates an isolated venv, installs
-dependencies, **runs the 121-test matrix as self-verification**, generates the
+dependencies, **runs the 146-test matrix as self-verification**, generates the
 90-day demo journal, installs web-deck dependencies, and puts the global
 `gold-desk` command on your PATH. No accounts, no keys, completely free.
 (Manual alternative: `git clone <repo> && cd ~/gold-desk && bash install.sh`)
@@ -64,7 +64,7 @@ the-gold-desk/
 ├── src/gold_desk/              # the deterministic desk (Python)
 ├── sim/  prompts/  config/     # Doc 1.5 exam, Doc 4 prompts, templates
 ├── tui/desk_tui.py             # terminal UI (pure stdlib curses)
-├── tests/                      # 121 tests = the §16 matrix + audit-fix suite
+├── tests/                      # 146 tests = the §16 matrix + audit-fix suite
 ├── web/                        # GOLD DESK COMMAND — frosted-glass web deck
 │   └── (Next.js 16 + TypeScript + Tailwind 4)
 └── docs/                       # market-driver research + verification screenshots
@@ -89,7 +89,7 @@ bun run dev          # http://localhost:3000
 | `gold-desk` | web command deck (auto port, opens browser) |
 | `gold-desk tui` | terminal UI |
 | `gold-desk demo [days] [seed]` | regenerate the demo journal |
-| `gold-desk test` | run the test matrix (121 tests) |
+| `gold-desk test` | run the test matrix (146 tests) |
 | `gold-desk zen` | sync free OpenCode Zen models |
 | `gold-desk doctor` | installation health check |
 | `gold-desk update` | pull latest + refresh launcher |
@@ -180,7 +180,7 @@ python -m gold_desk.cli validate          # what's BLOCKED and what to paste
 python -m gold_desk.cli demo --days 30    # synthetic end-to-end run
 python -m gold_desk.cli replay --date 2026-06-10
 python -m gold_desk.cli eod --date 2026-06-10
-python -m pytest                           # 121 tests, <1s
+python -m pytest                           # 146 tests, <1s
 ```
 
 (If you didn't install the package, prefix commands with
@@ -235,7 +235,7 @@ src/gold_desk/
   replay.py eod.py demo.py cli.py
 sim/contract.md runner.py report.py   # Doc 1.5 — the exam, offline, INCOMPLETE
 prompts/                       # empty until Phase 2 (law)
-tests/                         # 121 tests = §16 matrix + loop invariants + audit-fix suite
+tests/                         # 146 tests = §16 matrix + loop invariants + audit-fix suite
 data/                          # runtime journal (gitignored)
 ```
 
@@ -356,3 +356,54 @@ The heavyweight default (`x-preview-f-free`) reasons deeply — it caught the
 emitting JSON (fail-closed VETO, 25–75s). `hy3-free` answers fast but missed the
 CPI-in-12-minutes veto. This is exactly the data the bench exists to collect
 before any model is trusted at Phase 2.
+
+---
+
+## AUTONOMOUS RESEARCH DESK — the agent sidecar (SUPERPOWERS PLAN)
+
+The desk now has an analyst brain: a pi-pattern agent (messages + tools +
+one loop + one provider call — no LangChain/CrewAI/AutoGen mass) that
+researches **any** asset or token on the live internet, synthesizes cited
+deep-research reports, and can run autonomously on a watchlist — while the
+live bar loop stays byte-for-byte deterministic (L10/L13).
+
+### Quickstart
+```bash
+# one-question agent with desk + web tools (free Zen model, $0)
+python -m gold_desk.cli ask "what changed in gold positioning this week?"
+
+# cited deep-research report on any asset
+python -m gold_desk.cli research XAUUSD --depth 2
+python -m gold_desk.cli research BTC --depth 1
+
+# L2 watchlist pass (opt-in autonomy; also cron-able)
+GOLD_DESK_AUTONOMY=L2 python -m gold_desk.cli watch --once
+```
+
+### What was added (~1,200 LOC total, no framework)
+| Piece | Role |
+|---|---|
+| `src/gold_desk/agent/loop.py` | the pi-style engine: messages, tool registry, step caps, transcript-before-result |
+| `src/gold_desk/agent/tools.py` | `@tool` decorator, JSON schemas from type hints, read-only registry |
+| `src/gold_desk/agent/providers.py` | tool-aware chat over any OpenAI-compatible endpoint (reuses zen_client transport) |
+| `src/gold_desk/agent/budgets.py` | env-driven daily step/minute/tool-call caps + kill switch; ledger survives restarts |
+| `src/gold_desk/agent/transcript.py` | full audit trail: `data/agent_runs/<ulid>.jsonl` + journal events |
+| `src/gold_desk/agent/desk_tools.py` | Tools v1: spot/OHLC/indicators/news/drivers/journal/account(scrubbed) |
+| `src/gold_desk/agent/browse.py` | tiered internet: T0 urllib+extractor → T1 r.jina.ai → T2 playwright (optional); ddgs web_search; per-host politeness; robots.txt; day cache |
+| `src/gold_desk/agent/assets.py` | asset registry (config/assets.yaml): gold + BTC/ETH/SOL via CoinGecko/DefiLlama/Binance, keyless |
+| `src/gold_desk/agent/research.py` | plan → fan-out → verify → synthesize → cited markdown report with front-matter contract |
+| `src/gold_desk/agent/watch.py` | L2 watchlist scheduler config; L3 proposal drafting (opt-in) |
+| `web/src/app/api/desk/research` + `AgentPanel.tsx` | research reports + agent audit trail on the web deck |
+| `docs/AGENT_LAWS.md` | the sidecar's constitution: L11–L14, test-pinned |
+
+### Safety laws (enforced in code — see `docs/AGENT_LAWS.md`)
+- **L11** web text is data, never instructions (UNTRUSTED_WEB_CONTENT fences; injection regression test)
+- **L12** research payloads are scrubbed — no balances/equity/PnL ever leave the machine
+- **L13** sidecar isolation — the orchestrator imports nothing from `gold_desk.agent` (AST-pinned)
+- **L14** proposals are not tickets — only `ticket.py` mints IDs; agent drafts are origin-tagged
+
+### Dependency policy (pi-light, enforced)
+Added: `ddgs` (tiny, keyless metasearch) — the only mandatory new dep.
+Optional extras: `[browser]` playwright, `[fetch]` trafilatura,
+`[crypto]` ccxt. Forbidden: LangChain/LlamaIndex/CrewAI/AutoGen, vector
+DBs, queues, docker-compose. See `docs/AGENT_LAWS.md` for the full ladder.
