@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Bodoni_Moda, Inter, Geist_Mono } from "next/font/google";
+import { Bodoni_Moda, Inter, Geist_Mono, Mr_Dafoe, Cormorant_Garamond } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "@/components/ui/toaster";
 
@@ -24,6 +24,23 @@ const geistMono = Geist_Mono({
   display: "swap",
 });
 
+// Handwritten signature script — brand mark only (per Oakley-style inspiration)
+const dafoe = Mr_Dafoe({
+  variable: "--font-dafoe",
+  subsets: ["latin"],
+  weight: "400",
+  display: "swap",
+});
+
+// Elegant italic serif — accent flourish on hero numerals & quotes
+const cormorant = Cormorant_Garamond({
+  variable: "--font-cormorant",
+  subsets: ["latin"],
+  style: ["italic", "normal"],
+  weight: ["300", "400", "500"],
+  display: "swap",
+});
+
 export const metadata: Metadata = {
   title: "GOLD DESK COMMAND — XAUUSD H1 Decision Harness",
   description:
@@ -42,7 +59,7 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <body
-        className={`${bodoni.variable} ${inter.variable} ${geistMono.variable} antialiased bg-background text-foreground`}
+        className={`${bodoni.variable} ${inter.variable} ${geistMono.variable} ${dafoe.variable} ${cormorant.variable} antialiased bg-background text-foreground`}
       >
         {children}
         <Toaster />

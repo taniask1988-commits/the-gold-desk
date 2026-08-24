@@ -59,8 +59,8 @@ export function DriverBoard({
       <div className="gdc-sheen" aria-hidden style={{ "--sheen-delay": "4.8s", "--sheen-dur": "10.5s" } as React.CSSProperties} />
       <div className="flex items-center justify-between border-b border-white/[0.07] px-4 py-2">
         <div className="flex items-baseline gap-3">
-          <span className="gdc-display text-[17px] italic text-[#f4f7fa]">Market drivers</span>
-          <span className="gdc-kicker">what institutions watch</span>
+          <span className="gdc-accent text-[20px] text-[#f4f7fa]">Market drivers</span>
+          <span className="gdc-spec">what institutions watch</span>
         </div>
         <span
           className={`gdc-chip ${liveCount > 0 ? "border-[#3fb950]/35 text-[#3fb950]" : "border-[#d29922]/30 text-[#d29922]"}`}
@@ -82,8 +82,8 @@ export function DriverBoard({
           return (
             <div key={t} className="rounded-2xl border border-white/[0.05] bg-white/[0.02] p-3 backdrop-blur-sm">
               <div className="mb-2 flex items-baseline justify-between">
-                <span className="gdc-display text-[13.5px] italic leading-none text-[#e8b440]">{meta.label}</span>
-                <span className="text-[9.5px] italic text-[#8a95a1]">{meta.note}</span>
+                <span className="gdc-accent text-[14.5px] leading-none text-[#e8b440]">{meta.label}</span>
+                <span className="gdc-spec-tight">{meta.note}</span>
               </div>
               <div className="space-y-1.5">
                 {list.map((d) => {
@@ -108,7 +108,7 @@ export function DriverBoard({
                           </span>
                         </div>
                         <div className="flex items-center justify-between gap-2">
-                          <span className="truncate text-[9px] text-[#8a95a1]">{d.display} — {d.why}</span>
+                          <span className="gdc-spec-tight truncate">{d.display} — {d.why}</span>
                           <span
                             className="gdc-chip shrink-0 px-1.5 py-0 text-[8px]"
                             style={{ color: c, borderColor: c + "40", background: c + "0d" }}
@@ -129,7 +129,7 @@ export function DriverBoard({
           );
         })}
       </div>
-      <div className="border-t border-white/[0.07] px-4 py-2 text-[9px] font-medium text-[#8a95a1]">
+      <div className="gdc-spec-tight border-t border-white/[0.07] px-4 py-2">
         Taxonomy — docs/MARKET_DRIVERS.md · {DRIVERS.length} drivers · tier-weighted composite in the header ·{" "}
         {liveCount > 0
           ? `${liveCount} live (Treasury, Yahoo, CFTC, computed) · ${DRIVERS.length - liveCount} simulated (no free feed)`

@@ -28,18 +28,18 @@ export function HeaderBar({
     composite >= 60 ? "#3fb950" : composite <= 40 ? "#f85149" : "#d29922";
 
   return (
-    <header className="sticky top-0 z-50 border-b border-white/[0.08] bg-[#08090d]/70 backdrop-blur-2xl">
+    <header className="sticky top-0 z-50 border-b border-white/[0.08] bg-[#08090d]/72 backdrop-blur-2xl">
       <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-x-5 gap-y-2 px-4 py-3 sm:px-7">
         <div className="flex items-center gap-3.5">
           <div className="relative flex h-9 w-9 items-center justify-center rounded-xl border border-[#e8b440]/40 bg-gradient-to-b from-[#e8b440]/25 to-[#e8b440]/5 shadow-[0_0_28px_rgba(232,180,64,0.30)]">
             <span className="gdc-display text-[16px] font-semibold text-[#e8b440] gdc-glow-gold">Au</span>
           </div>
           <div className="leading-none">
-            <h1 className="gdc-display text-[19px] font-semibold tracking-[0.02em] text-white">
-              Gold Desk Command
+            <h1 className="gdc-script text-[40px] leading-none text-[#f0e6d2] sm:text-[44px]">
+              Gold Desk
             </h1>
-            <div className="mt-1.5 flex items-center gap-2 text-[9.5px] font-medium tracking-[0.18em] text-[#8a95a1] uppercase">
-              <span>XAUUSD · H1</span>
+            <div className="mt-1.5 gdc-spec flex items-center gap-2" style={{ opacity: 0.55, fontSize: "9.5px" }}>
+              <span>Command · XAUUSD · H1</span>
               <span className="h-[3px] w-[3px] rounded-full bg-[#e8b440]/60" />
               <span>Fail-closed</span>
               <span className="h-[3px] w-[3px] rounded-full bg-[#e8b440]/60" />
@@ -56,7 +56,7 @@ export function HeaderBar({
               chatOpen ? "bg-[#e8b440]/[0.12] text-[#e8b440]" : "text-[#e8b440]"
             }`}
           >
-            <span className="gdc-display text-[12px] italic">The Desk</span>
+            <span className="gdc-accent text-[14px]">The Desk</span>
             <span aria-hidden>✦</span> chat
           </button>
           <span className="gdc-chip text-[#aab4bf]">

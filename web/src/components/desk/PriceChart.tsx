@@ -52,10 +52,10 @@ export function PriceChart({ bars, replayBars }: { bars: BarDTO[]; replayBars?: 
       <div className="gdc-sheen" aria-hidden style={{ "--sheen-delay": "1.2s", "--sheen-dur": "8.5s" } as React.CSSProperties} />
       <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-white/[0.07] px-5 py-2.5">
         <div className="flex items-baseline gap-3">
-          <span className="gdc-display text-[17px] italic text-[#f4f7fa]">Price, hourly</span>
-          <span className="gdc-kicker">XAU/USD · last {tail.length} bars</span>
+          <span className="gdc-accent text-[20px] text-[#f4f7fa]">Price, hourly</span>
+          <span className="gdc-spec">XAU/USD · last {tail.length} bars</span>
         </div>
-        <div className="flex items-center gap-3 text-[8.5px] font-semibold uppercase tracking-[0.18em] text-[#76828e]">
+        <div className="gdc-spec flex items-center gap-3">
           <span className="flex items-center gap-1.5"><span className="h-2 w-3 bg-[#3fb950]/20" />London 07–12</span>
           <span className="flex items-center gap-1.5"><span className="h-2 w-3 bg-[#e8b440]/15" />LDN·NY 12–16</span>
           <span>{min.toFixed(0)} – {max.toFixed(0)}</span>

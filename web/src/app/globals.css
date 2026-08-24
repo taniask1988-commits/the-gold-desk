@@ -121,22 +121,49 @@
   }
 }
 
-/* ================= GOLD DESK — FROSTED GLASS SYSTEM ================= */
+/* ============================================================
+   GOLD DESK COMMAND — FROSTED GLASS + LAB-BRUTALIST SYSTEM
+   (per owner's Oakley-style lab/manifesto inspiration image)
+   - sandblasted grain (high-frequency noise overlay)
+   - radial vignette (center darker, edges cool grey)
+   - brutalist extra-light uppercase spec type
+   - handwritten script brand mark
+   - thermal accent glow line beneath focal points
+   - crosshair reticle on focal elements (precision feel)
+   - no hard borders; separation by spacing only
+   ============================================================ */
 
 .gdc-root {
-  /* three-tier editorial font system (per owner inspiration images):
-     serif display = brand + hero numbers · Inter = UI · mono = terminal data */
+  /* five-tier editorial font system:
+     Bodoni Moda = serif display (hero numerals, panel titles)
+     Cormorant Garamond = elegant italic serif accent (quotes, italics)
+     Mr Dafoe = handwritten signature script (brand mark only)
+     Inter = UI body + brutalist spec type (kickers, meta)
+     Geist Mono = terminal data only (wire, codes, timestamps) */
   --font-display: var(--font-bodoni), "Didot", "Bodoni MT", "Playfair Display", Georgia, serif;
+  --font-accent: var(--font-cormorant), "Cormorant", "EB Garamond", Georgia, serif;
+  --font-script: var(--font-dafoe), "Mr Dafoe", "Allura", cursive;
   --font-body: var(--font-inter), "Inter", system-ui, -apple-system, sans-serif;
   --font-data: var(--font-geist-mono), ui-monospace, "SF Mono", monospace;
+
+  /* palette */
   --gold: #e8b440;
   --gold-bright: #ffd873;
+  --gold-deep: #d29922;
+  --thermal: #ff5b1f;          /* single fire-orange thermal accent (per inspiration) */
+  --thermal-soft: #ff7a45;
   --ink: #f4f7fa;
   --ink-dim: #a5afba;
   --ink-faint: #76828e;
+  --ink-spec: #8a95a1;         /* spec-meta labels (lighter for brutalist spec type) */
   --line: rgba(255, 255, 255, 0.09);
   --line-gold: rgba(232, 180, 64, 0.25);
-  background: linear-gradient(180deg, #07080d, #05060a 45%, #06070c);
+  --line-thermal: rgba(255, 91, 31, 0.35);
+
+  /* deeper void at center (radial vignette per inspiration) */
+  background:
+    radial-gradient(ellipse 80% 70% at 50% 38%, #04050a 0%, #06080e 38%, #0a0e15 72%, #0e131c 100%),
+    linear-gradient(180deg, #07080d, #05060a 45%, #06070c);
   color: var(--ink);
   font-family: var(--font-body);
   letter-spacing: -0.006em;
@@ -156,14 +183,61 @@
   font-variation-settings: "opsz" 60;
   font-feature-settings: "lnum";
 }
+/* elegant italic serif accent — for hero quotes, italic panel titles */
+.gdc-accent {
+  font-family: var(--font-accent);
+  font-weight: 400;
+  font-style: italic;
+  letter-spacing: 0.005em;
+}
+/* handwritten signature script — brand mark ONLY (per Oakley "Oakley" script) */
+.gdc-script {
+  font-family: var(--font-script);
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 1;
+  color: #f0e6d2;
+  text-shadow:
+    0 2px 6px rgba(0,0,0,0.55),
+    0 0 24px rgba(232,180,64,0.18);
+  transform: scaleY(1.08);
+  transform-origin: left center;
+}
 .gdc-data { font-family: var(--font-data); font-feature-settings: "tnum"; }
+
+/* brutalist spec type — extra-light uppercase, wide letter-spacing, fine print
+   used for kickers, meta labels, status lines (per inspiration "MANIFESTO") */
+.gdc-spec {
+  font-family: var(--font-body);
+  font-size: 10.5px;
+  font-weight: 300;
+  letter-spacing: 0.32em;
+  text-transform: uppercase;
+  color: #8a949f;
+  line-height: 1.4;
+  text-shadow:
+    1px 1px 0 rgba(255,255,255,0.05),
+    -1px -1px 0 rgba(0,0,0,0.35);
+}
+.gdc-spec-tight {
+  font-family: var(--font-body);
+  font-size: 10.5px;
+  font-weight: 300;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: #9aa3ad;
+  text-shadow:
+    1px 1px 0 rgba(255,255,255,0.04),
+    -1px -1px 0 rgba(0,0,0,0.3);
+}
+/* legacy kicker alias kept for back-compat with older component code */
 .gdc-kicker {
   font-family: var(--font-body);
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.24em;
+  font-size: 9.5px;
+  font-weight: 200;
+  letter-spacing: 0.28em;
   text-transform: uppercase;
-  color: #8a95a1;
+  color: var(--ink-spec);
 }
 
 /* ---------- aurora field behind the glass ---------- */
@@ -239,29 +313,44 @@
   -webkit-mask-image: radial-gradient(ellipse 95% 80% at 50% 20%, black 30%, transparent 98%);
   mask-image: radial-gradient(ellipse 95% 80% at 50% 20%, black 30%, transparent 98%);
 }
+
+/* sandblasted grain — higher-frequency, more visible than v1 (per inspiration) */
 .gdc-aurora .gdc-noise {
-  position: absolute; inset: 0; opacity: 0.6;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.014'/%3E%3C/svg%3E");
+  position: absolute; inset: 0; opacity: 0.9;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='1.4' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.10'/%3E%3C/svg%3E");
+  mix-blend-mode: overlay;
+}
+/* viewport-wide extra grain layer (stronger, fixed, atop everything below glass)
+   gives the sandblasted tactile feel per the Oakley inspiration image */
+.gdc-grain::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  opacity: 0.7;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n2'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='1.8' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n2)' opacity='0.10'/%3E%3C/svg%3E");
 }
 
-/* ---------- frosted glass panel ---------- */
+/* ---------- frosted glass panel (deeper, more sandblasted) ---------- */
 .gdc-panel {
   position: relative;
   border-radius: 24px;
-  border: 1px solid rgba(255, 255, 255, 0.13);
+  border: 1px solid rgba(255, 255, 255, 0.10);
   background:
-    linear-gradient(165deg, rgba(255,255,255,0.11), rgba(255,255,255,0.045) 42%, rgba(255,255,255,0.02)),
-    rgba(11, 14, 20, 0.24);
-  -webkit-backdrop-filter: blur(26px) saturate(175%);
-  backdrop-filter: blur(26px) saturate(175%);
+    linear-gradient(165deg, rgba(255,255,255,0.09), rgba(255,255,255,0.038) 42%, rgba(255,255,255,0.012)),
+    rgba(8, 11, 17, 0.42);
+  -webkit-backdrop-filter: blur(32px) saturate(180%);
+  backdrop-filter: blur(32px) saturate(180%);
   box-shadow:
-    0 24px 60px -28px rgba(0, 0, 0, 0.65),
-    0 4px 16px -6px rgba(0, 0, 0, 0.35),
+    0 24px 60px -28px rgba(0, 0, 0, 0.7),
+    0 4px 16px -6px rgba(0, 0, 0, 0.4),
     inset 0 1px 0 rgba(255, 255, 255, 0.16),
-    inset 1px 0 0 rgba(255, 255, 255, 0.06),
-    inset -1px 0 0 rgba(0, 0, 0, 0.16),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.30),
-    inset 0 0 22px rgba(255, 255, 255, 0.045);
+    inset 1px 0 0 rgba(255, 255, 255, 0.05),
+    inset -1px 0 0 rgba(0, 0, 0, 0.20),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.36),
+    inset 0 0 30px rgba(255, 255, 255, 0.035);
   transition: border-color 0.35s ease, transform 0.35s ease, box-shadow 0.35s ease;
 }
 .gdc-panel::after {
@@ -276,27 +365,27 @@
   content: "";
   position: absolute;
   left: 10%; right: 10%; top: -1px; height: 1px;
-  background: linear-gradient(90deg, transparent 8%, rgba(255,255,255,0.75) 50%, transparent 92%);
+  background: linear-gradient(90deg, transparent 8%, rgba(255,255,255,0.65) 50%, transparent 92%);
   pointer-events: none;
 }
 .gdc-panel:hover {
-  border-color: rgba(255, 255, 255, 0.15);
+  border-color: rgba(255, 255, 255, 0.14);
   transform: translateY(-1px);
   box-shadow:
-    0 28px 68px -30px rgba(0, 0, 0, 0.7),
-    0 4px 18px -6px rgba(0, 0, 0, 0.35),
+    0 28px 68px -30px rgba(0, 0, 0, 0.74),
+    0 4px 18px -6px rgba(0, 0, 0, 0.4),
     0 0 0 1px rgba(232, 180, 64, 0.05),
-    inset 0 1px 0 rgba(255, 255, 255, 0.20),
-    inset 1px 0 0 rgba(255, 255, 255, 0.07),
-    inset -1px 0 0 rgba(0, 0, 0, 0.16),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.30),
-    inset 0 0 26px rgba(255, 255, 255, 0.05);
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    inset 1px 0 0 rgba(255, 255, 255, 0.06),
+    inset -1px 0 0 rgba(0, 0, 0, 0.18),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.32),
+    inset 0 0 32px rgba(255, 255, 255, 0.045);
 }
 @media (max-width: 640px) {
   .gdc-panel {
     border-radius: 20px;
-    -webkit-backdrop-filter: blur(14px) saturate(140%);
-    backdrop-filter: blur(14px) saturate(140%);
+    -webkit-backdrop-filter: blur(18px) saturate(150%);
+    backdrop-filter: blur(18px) saturate(150%);
   }
 }
 
@@ -338,8 +427,134 @@
 .gdc-panel { text-shadow: 0 1px 2px rgba(3, 5, 9, 0.45); }
 .gdc-panel b, .gdc-panel strong { text-shadow: 0 1px 2px rgba(3, 5, 9, 0.7); }
 
+/* ---------- thermal glow line — horizontal fire band beneath focal points ----------
+   (per inspiration: blurred thermal line beneath the goggles; here it
+   underlines hero numerals, charts, and the constitution) */
+.gdc-thermal-line {
+  position: relative;
+}
+.gdc-thermal-line::after {
+  content: "";
+  position: absolute;
+  left: 10%; right: 10%;
+  bottom: -3px;
+  height: 2px;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    rgba(255, 91, 31, 0.65) 22%,
+    rgba(232, 180, 64, 0.85) 50%,
+    rgba(255, 91, 31, 0.65) 78%,
+    transparent 100%);
+  filter: blur(0.5px);
+  opacity: 1;
+  pointer-events: none;
+  box-shadow:
+    0 0 6px rgba(255, 91, 31, 0.55),
+    0 0 14px rgba(232, 180, 64, 0.4);
+}
+.gdc-thermal-line::before {
+  content: "";
+  position: absolute;
+  left: 20%; right: 20%;
+  bottom: -16px;
+  height: 30px;
+  background: radial-gradient(ellipse at 50% 0%,
+    rgba(255, 91, 31, 0.32) 0%,
+    rgba(232, 180, 64, 0.22) 35%,
+    transparent 70%);
+  filter: blur(10px);
+  opacity: 0.85;
+  pointer-events: none;
+}
+
+/* ---------- crosshair reticle — small "+" on focal points ----------
+   precision-targeting aesthetic per inspiration image.
+   Parent must be position: relative. The reticle sits at the element center. */
+.gdc-crosshair {
+  position: relative;
+}
+.gdc-crosshair::before,
+.gdc-crosshair::after {
+  content: "";
+  position: absolute;
+  background: rgba(244, 247, 250, 0.95);
+  pointer-events: none;
+  opacity: 1;
+  z-index: 3;
+  box-shadow: 0 0 6px rgba(244,247,250,0.7), 0 0 12px rgba(244,247,250,0.3);
+}
+.gdc-crosshair::before {
+  top: 50%; left: 50%;
+  width: 22px; height: 1px;
+  transform: translate(-50%, -50%);
+}
+.gdc-crosshair::after {
+  top: 50%; left: 50%;
+  width: 1px; height: 22px;
+  transform: translate(-50%, -50%);
+}
+.gdc-crosshair--gold {
+  position: relative;
+}
+.gdc-crosshair--gold::before,
+.gdc-crosshair--gold::after {
+  content: "";
+  position: absolute;
+  background: rgba(244, 247, 250, 0.95);
+  pointer-events: none;
+  opacity: 1;
+  z-index: 3;
+  box-shadow: 0 0 6px rgba(244,247,250,0.75), 0 0 14px rgba(232,180,64,0.45);
+}
+.gdc-crosshair--gold::before {
+  top: 50%; left: 50%;
+  width: 26px; height: 1px;
+  transform: translate(-50%, -50%);
+}
+.gdc-crosshair--gold::after {
+  top: 50%; left: 50%;
+  width: 1px; height: 26px;
+  transform: translate(-50%, -50%);
+}
+/* radial lens behind hero numeral (per VLM: scope-lens depth) */
+.gdc-lens {
+  position: relative;
+}
+.gdc-lens::before {
+  content: "";
+  position: absolute;
+  inset: -22px -32px -28px -32px;
+  z-index: 0;
+  background: radial-gradient(ellipse at 50% 50%,
+    rgba(232, 180, 64, 0.10) 0%,
+    rgba(255, 91, 31, 0.06) 30%,
+    transparent 72%);
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+/* ---------- manifesto spec-grid (3-col, no borders, spacing-only separation) ---------- */
+.gdc-spec-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 28px 32px;
+  padding-top: 4px;
+}
+.gdc-spec-grid > div {
+  position: relative;
+}
+.gdc-spec-grid > div::before {
+  /* tiny horizontal mark at top — replaces border, gives the "spec sheet" feel */
+  content: "";
+  position: absolute;
+  top: -10px; left: 0;
+  width: 18px; height: 1px;
+  background: rgba(232, 180, 64, 0.45);
+}
+
 /* ---------- glows ---------- */
 .gdc-glow-gold { text-shadow: 0 0 20px rgba(232, 180, 64, 0.5); }
+.gdc-glow-thermal { text-shadow: 0 0 22px rgba(255, 91, 31, 0.55), 0 0 8px rgba(232, 180, 64, 0.4); }
 .gdc-glow-green { text-shadow: 0 0 16px rgba(63, 185, 80, 0.45); }
 .gdc-glow-red { text-shadow: 0 0 16px rgba(248, 81, 73, 0.45); }
 
@@ -353,6 +568,7 @@ main > div:nth-child(2) .gdc-panel { animation-delay: 0.10s; }
 main > div:nth-child(3) .gdc-panel { animation-delay: 0.17s; }
 main > div:nth-child(4) .gdc-panel { animation-delay: 0.24s; }
 main > div:nth-child(5) .gdc-panel { animation-delay: 0.31s; }
+main > div:nth-child(6) .gdc-panel { animation-delay: 0.38s; }
 header.sticky { animation: gdc-rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) backwards; }
 
 @keyframes gdc-blink { 0%, 60% { opacity: 1; } 61%, 100% { opacity: 0.25; } }
@@ -368,8 +584,16 @@ header.sticky { animation: gdc-rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) backward
 @keyframes gdc-typewrite { from { max-height: 0; opacity: 0; } to { max-height: 60px; opacity: 1; } }
 .gdc-feed-line { animation: gdc-typewrite 0.28s ease-out; overflow: hidden; }
 
+/* thermal line subtle pulse */
+@keyframes gdc-thermal-pulse {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
+.gdc-thermal-line::before { animation: gdc-thermal-pulse 4.5s ease-in-out infinite; }
+
 @media (prefers-reduced-motion: reduce) {
-  .gdc-aurora .orb, .gdc-marquee-track, .gdc-live-dot, main .gdc-panel, header.sticky {
+  .gdc-aurora .orb, .gdc-marquee-track, .gdc-live-dot, main .gdc-panel, header.sticky,
+  .gdc-thermal-line::before {
     animation: none !important;
   }
   .gdc-panel, .gdc-chip { transition: none !important; }
@@ -386,8 +610,4 @@ header.sticky { animation: gdc-rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) backward
 }
 .gdc-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.2); background-clip: padding-box; }
 
-/* force-recompile: 1787497191 */
-
-/* cache-bust 1787497352 */
-
-/* cb 1787497451 */
+/* cache-bust 1787548200 (lab-brutalist v2) */

@@ -43,11 +43,11 @@ export function ConstitutionPanel({
   phase: number;
 }) {
   return (
-    <div className="gdc-panel overflow-hidden">
+    <div className="gdc-panel gdc-thermal-line overflow-hidden">
       <div className="flex items-center justify-between border-b border-white/[0.07] px-4 py-2">
         <div className="flex items-baseline gap-3">
-          <span className="gdc-display text-[17px] italic text-[#f4f7fa]">Constitution &amp; laws</span>
-          <span className="gdc-kicker">human-owned · hashed · immutable</span>
+          <span className="gdc-accent text-[20px] text-[#f4f7fa]">Constitution &amp; laws</span>
+          <span className="gdc-spec">human-owned · hashed · immutable</span>
         </div>
         <span className="gdc-chip text-[#d29922] border-[#d29922]/30">
           {blockedCount > 0 ? `FAIL-CLOSED · ${blockedCount} BLOCKED` : "TRADE-CAPABLE"}
@@ -55,7 +55,7 @@ export function ConstitutionPanel({
       </div>
       <div className="grid gap-3 p-3 md:grid-cols-2">
         <div className="rounded-2xl border border-white/[0.05] bg-white/[0.02] p-4 backdrop-blur-sm">
-          <div className="mb-2 text-[9px] tracking-[0.16em] text-[#98a3af]">DOC 1 · STATUS</div>
+          <div className="gdc-spec mb-2">DOC 1 · STATUS</div>
           <div className="space-y-1.5 text-[10.5px]">
             <div className="flex justify-between">
               <span className="text-[#aab4bf]">content hash</span>
@@ -81,7 +81,7 @@ export function ConstitutionPanel({
           </div>
         </div>
         <div className="rounded-2xl border border-white/[0.05] bg-white/[0.02] p-4 backdrop-blur-sm">
-          <div className="mb-2 text-[9px] tracking-[0.16em] text-[#98a3af]">THE 15 LAWS (ENFORCED IN CODE)</div>
+          <div className="gdc-spec mb-2">THE 15 LAWS (ENFORCED IN CODE)</div>
           <div className="gdc-scroll max-h-[168px] space-y-[3px] overflow-y-auto pr-1">
             {LAWS.map(([id, text]) => (
               <div key={id} className="flex gap-2 text-[9.5px] leading-relaxed">
