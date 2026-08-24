@@ -1,9 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { memo, useState } from "react";
 import { REASON_COLORS, type ReplayDTO } from "./useDeskData";
 
-export function ReplayPanel({
+function ReplayPanelImpl({
   replay, days, day, setDay,
 }: {
   replay: ReplayDTO | null;
@@ -28,7 +28,7 @@ export function ReplayPanel({
         <select
           value={day}
           onChange={(e) => setDay(e.target.value)}
-          className="gdc-scroll ml-auto max-w-[10rem] cursor-pointer rounded-full border border-white/[0.12] bg-white/[0.05] px-3 py-1 text-[10px] text-[#e9edf2] backdrop-blur-md outline-none transition-colors focus:border-[#e8b440]/40 hover:border-white/[0.2]"
+          className="gdc-scroll ml-auto max-w-[10rem] cursor-pointer rounded-full border border-white/[0.12] bg-[#0f1219] px-3 py-1 text-[10px] text-[#e9edf2] outline-none transition-colors focus:border-[#c8a04b]/40 hover:border-white/[0.2]"
         >
           {days.map((d) => (
             <option key={d} value={d}>
@@ -41,7 +41,7 @@ export function ReplayPanel({
       </div>
       <div className="gdc-scroll max-h-[340px] flex-1 overflow-y-auto">
         <table className="gdc-data w-full text-[10px] tabular-nums">
-          <thead className="sticky top-0 bg-[#0b0e13]/85 text-[#8a95a1] backdrop-blur-xl">
+          <thead className="sticky top-0 bg-[#0b0e13]/95 text-[#8a95a1]">
             <tr className="border-b border-white/[0.07] text-left">
               <th className="px-3 py-1.5 font-normal">BAR (UTC)</th>
               <th className="px-1 py-1.5 font-normal">O</th>
@@ -59,7 +59,7 @@ export function ReplayPanel({
                 <tr
                   key={b.decisionTs}
                   onClick={() => setSel(isSel ? null : b.decisionTs)}
-                  className={`cursor-pointer border-b border-white/[0.05] transition-colors hover:bg-white/[0.03] ${isSel ? "bg-[#e8b440]/[0.07]" : ""}`}
+                  className={`cursor-pointer border-b border-white/[0.05] transition-colors hover:bg-white/[0.03] ${isSel ? "bg-[#c8a04b]/[0.07]" : ""}`}
                 >
                   <td className="px-3 py-1 text-[#aab4bf]">{b.decisionTs.slice(11, 16)}</td>
                   <td className="px-1 py-1">{b.o.toFixed(2)}</td>
@@ -98,3 +98,5 @@ export function ReplayPanel({
     </div>
   );
 }
+
+export const ReplayPanel = memo(ReplayPanelImpl);

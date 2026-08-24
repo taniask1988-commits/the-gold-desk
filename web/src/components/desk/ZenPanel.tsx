@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useState } from "react";
 
 interface ZenModel {
   context_window: number | null;
@@ -37,7 +37,7 @@ const SCENARIOS: Array<{ id: string; label: string; hint: string }> = [
   { id: "stale", label: "STALE TS", hint: "future-dated calendar — expect VETO" },
 ];
 
-export function ZenPanel() {
+function ZenPanelImpl() {
   const [catalog, setCatalog] = useState<ZenCatalog | null>(null);
   const [bench, setBench] = useState<BenchRun[]>([]);
   const [scenario, setScenario] = useState("news");
@@ -85,7 +85,6 @@ export function ZenPanel() {
 
   return (
     <div className="gdc-panel overflow-hidden">
-      <div className="gdc-sheen" aria-hidden style={{ "--sheen-delay": "2.9s", "--sheen-dur": "11s" } as React.CSSProperties} />
       <div className="flex flex-wrap items-center gap-2 border-b border-white/[0.07] px-4 py-2">
         <div className="flex flex-wrap items-baseline gap-3">
           <span className="gdc-display text-[17px] italic text-[#f4f7fa]">OpenCode Zen</span>
@@ -108,9 +107,9 @@ export function ZenPanel() {
 
       <div className="grid gap-3 p-3 lg:grid-cols-[1fr_1.25fr]">
         {/* catalog */}
-        <div className="rounded-2xl border border-white/[0.05] bg-white/[0.02] p-3 backdrop-blur-sm">
+        <div className="rounded-2xl border border-white/[0.05] bg-white/[0.02] p-3">
           <div className="mb-2 flex items-baseline justify-between">
-            <span className="gdc-kicker !text-[#e8b440]">
+            <span className="gdc-kicker !text-[#c8a04b]">
               Auto-discovered catalog
             </span>
             <span className="text-[8.5px] text-[#98a3af]">
@@ -127,11 +126,11 @@ export function ZenPanel() {
                 <div
                   key={id}
                   className={`flex items-center gap-2 rounded px-1.5 py-1 text-[10px] transition-colors ${
-                    isDef ? "bg-[#e8b440]/[0.07] text-[#e8b440]" : "text-[#aab4bf] hover:bg-white/[0.03]"
+                    isDef ? "bg-[#c8a04b]/[0.07] text-[#c8a04b]" : "text-[#aab4bf] hover:bg-white/[0.03]"
                   }`}
                 >
                   <span className="gdc-data truncate text-[10px]">{id}</span>
-                  {isDef && <span className="gdc-chip border-[#e8b440]/30 px-1 py-0 text-[7.5px] text-[#e8b440]">DEFAULT</span>}
+                  {isDef && <span className="gdc-chip border-[#c8a04b]/30 px-1 py-0 text-[7.5px] text-[#c8a04b]">DEFAULT</span>}
                   <span className="ml-auto flex shrink-0 items-center gap-1.5 text-[8.5px]">
                     {m.supports_reasoning && <span className="text-[#39c5cf]">REASONING</span>}
                     {m.deprecated && <span className="text-[#d29922]">DEPRECATED</span>}
@@ -153,9 +152,9 @@ export function ZenPanel() {
         </div>
 
         {/* bench */}
-        <div className="rounded-2xl border border-white/[0.05] bg-white/[0.02] p-3 backdrop-blur-sm">
+        <div className="rounded-2xl border border-white/[0.05] bg-white/[0.02] p-3">
           <div className="mb-2 flex flex-wrap items-center gap-2">
-            <span className="gdc-kicker !text-[#e8b440]">
+            <span className="gdc-kicker !text-[#c8a04b]">
               Veto research bench
             </span>
             <div className="ml-auto flex items-center gap-1">
@@ -164,9 +163,9 @@ export function ZenPanel() {
                   key={s.id}
                   title={s.hint}
                   onClick={() => setScenario(s.id)}
-                  className={`rounded-full border px-2.5 py-0.5 text-[9px] transition-all ${
+                  className={`rounded-full border px-2.5 py-0.5 text-[9px] transition-colors ${
                     scenario === s.id
-                      ? "border-[#e8b440]/35 bg-[#e8b440]/[0.08] text-[#e8b440] shadow-[0_0_14px_rgba(232,180,64,0.18)]"
+                      ? "border-[#c8a04b]/35 bg-[#c8a04b]/[0.08] text-[#c8a04b]"
                       : "border-white/[0.07] text-[#98a3af] hover:border-white/[0.14] hover:text-[#aab4bf]"
                   }`}
                 >
@@ -176,7 +175,7 @@ export function ZenPanel() {
               <button
                 onClick={runDry}
                 disabled={running}
-                className="gdc-chip cursor-pointer border-[#e8b440]/30 text-[#e8b440] transition-all hover:bg-[#e8b440]/[0.07] disabled:opacity-40"
+                className="gdc-chip cursor-pointer border-[#c8a04b]/30 text-[#c8a04b] transition-colors hover:bg-[#c8a04b]/[0.07] disabled:opacity-40"
               >
                 {running ? ".RUNNING… free model thinking…" : "▶ RUN DRY VETO"}
               </button>
@@ -184,7 +183,7 @@ export function ZenPanel() {
           </div>
 
           {last && (
-            <div className="mb-2 rounded-xl border border-white/[0.09] bg-white/[0.035] p-2.5 text-[10px] backdrop-blur-sm">
+            <div className="mb-2 rounded-xl border border-white/[0.09] bg-white/[0.035] p-2.5 text-[10px]">
               <div className="flex items-center gap-2">
                 <span
                   className="gdc-chip font-bold"
@@ -215,7 +214,7 @@ export function ZenPanel() {
 
           <div className="gdc-scroll max-h-[150px] overflow-y-auto pr-1">
             <table className="gdc-data w-full text-[9.5px] tabular-nums">
-              <thead className="sticky top-0 bg-[#0b0e13]/85 text-left text-[#8a95a1] backdrop-blur-xl">
+              <thead className="sticky top-0 bg-[#0b0e13]/95 text-left text-[#8a95a1]">
                 <tr>
                   <th className="py-1 font-normal">TS</th>
                   <th className="py-1 font-normal">SCENARIO</th>
@@ -265,3 +264,5 @@ export function ZenPanel() {
     </div>
   );
 }
+
+export const ZenPanel = memo(ZenPanelImpl);

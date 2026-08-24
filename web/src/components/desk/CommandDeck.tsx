@@ -40,20 +40,8 @@ export function CommandDeck() {
   }
 
   return (
-    <div className="gdc-root gdc-grain flex min-h-screen flex-col">
-      {/* aurora field — the light the glass frosts over */}
-      <div className="gdc-aurora" aria-hidden>
-        <div className="band band-a" />
-        <div className="band band-b" />
-        <div className="band band-c" />
-        <div className="orb orb-gold" />
-        <div className="orb orb-teal" />
-        <div className="orb orb-ember" />
-        <div className="gdc-dots" />
-        <div className="gdc-noise" />
-      </div>
-
-      <div className="relative z-10 flex min-h-screen flex-col">
+    <div className="gdc-root flex min-h-screen flex-col">
+      <div className="flex min-h-screen flex-col">
         <HeaderBar
           phase={1}
           demo={overview?.demo ?? false}
@@ -111,7 +99,7 @@ export function CommandDeck() {
 
         <footer className="mt-auto">
           <LawsMarquee />
-          <div className="gdc-spec-tight border-t border-white/[0.06] bg-white/[0.015] px-4 py-3 text-center backdrop-blur-xl">
+          <div className="gdc-spec-tight border-t border-[#1a1f2c] bg-[#0f1219] px-4 py-3 text-center">
             GOLD DESK COMMAND v1 · READ-ONLY TELEMETRY OVER AN APPEND-ONLY JOURNAL ·
             USUALLY DO NOTHING · EVERYTHING IS JOURNALED · NOTHING IS PROMOTED BY NARRATIVE
           </div>

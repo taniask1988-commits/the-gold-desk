@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import type { DriverDTO, DriverValuesDTO } from "./useDeskData";
 import { DRIVERS, stanceFor } from "@/lib/desk/drivers";
 
@@ -16,6 +16,8 @@ function DriverSpark({ data, stance }: { data: number[]; stance: string }) {
     </svg>
   );
 }
+
+const DriverSparkMemo = memo(DriverSpark);
 
 const TIER_META: Record<number, { label: string; note: string }> = {
   1: { label: "TIER 1 · MACRO REGIME", note: "moves gold for weeks" },
@@ -74,7 +76,7 @@ function useMergeReal(drivers: DriverDTO[], values: DriverValuesDTO | null) {
   return merged;
 }
 
-export function DriverBoard({
+function DriverBoardImpl({
   drivers, driverValues,
 }: {
   drivers: DriverDTO[];
@@ -85,7 +87,6 @@ export function DriverBoard({
   const liveCount = merged.filter((d) => d.live).length;
   return (
     <div className="gdc-panel overflow-hidden">
-      <div className="gdc-sheen" aria-hidden style={{ "--sheen-delay": "4.8s", "--sheen-dur": "10.5s" } as React.CSSProperties} />
       <div className="flex items-center justify-between border-b border-white/[0.07] px-4 py-2">
         <div className="flex items-baseline gap-3">
           <span className="gdc-accent text-[20px] text-[#f4f7fa]">Market drivers</span>
@@ -109,9 +110,9 @@ export function DriverBoard({
           const list = merged.filter((d) => d.tier === t);
           const meta = TIER_META[t];
           return (
-            <div key={t} className="rounded-2xl border border-white/[0.05] bg-white/[0.02] p-3 backdrop-blur-sm">
+            <div key={t} className="rounded-2xl border border-white/[0.05] bg-white/[0.02] p-3">
               <div className="mb-2 flex items-baseline justify-between">
-                <span className="gdc-accent text-[14.5px] leading-none text-[#e8b440]">{meta.label}</span>
+                <span className="gdc-accent text-[14.5px] leading-none text-[#c8a04b]">{meta.label}</span>
                 <span className="gdc-spec-tight">{meta.note}</span>
               </div>
               <div className="space-y-1.5">
@@ -121,7 +122,7 @@ export function DriverBoard({
                   return (
                     <div
                       key={d.id}
-                      className="group flex items-center gap-3 rounded-lg border border-transparent px-2 py-1.5 transition-all hover:border-white/[0.09] hover:bg-white/[0.04]"
+                      className="group flex items-center gap-3 rounded-lg border border-transparent px-2 py-1.5 transition-colors hover:border-white/[0.09] hover:bg-white/[0.04]"
                       title={d.why}
                     >
                       <span className="gdc-data w-6 shrink-0 text-[9px] font-semibold text-[#8a95a1]">{d.id}</span>
@@ -149,7 +150,7 @@ export function DriverBoard({
                           </span>
                         </div>
                       </div>
-                      <DriverSpark data={d.history} stance={d.stance} />
+                      <DriverSparkMemo data={d.history} stance={d.stance} />
                     </div>
                   );
                 })}
@@ -167,3 +168,5 @@ export function DriverBoard({
     </div>
   );
 }
+
+export const DriverBoard = memo(DriverBoardImpl);

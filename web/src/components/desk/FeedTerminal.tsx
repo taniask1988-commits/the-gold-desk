@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { REASON_COLORS, type DeskEventDTO } from "./useDeskData";
 
 const KIND_COLORS: Record<string, string> = {
@@ -9,7 +9,7 @@ const KIND_COLORS: Record<string, string> = {
   NoSetup: "#6b7681",
   SetupCandidate: "#39c5cf",
   VetoDecision: "#8b949e",
-  GateDecision: "#e8b440",
+  GateDecision: "#c8a04b",
   TicketEvent: "#ffd873",
   TicketSendAttempt: "#8b949e",
   TicketSent: "#ffd873",
@@ -23,7 +23,7 @@ const KIND_COLORS: Record<string, string> = {
   KillSwitch: "#f85149",
 };
 
-export function FeedTerminal({
+function FeedTerminalImpl({
   events, day, live, setLive, speed, setSpeed,
 }: {
   events: DeskEventDTO[];
@@ -97,7 +97,7 @@ export function FeedTerminal({
               key={s}
               onClick={() => setSpeed(s)}
               disabled={!live}
-              className={`gdc-chip cursor-pointer disabled:opacity-40 ${speed === s ? "border-[#e8b440]/30 text-[#e8b440]" : "text-[#98a3af]"}`}
+              className={`gdc-chip cursor-pointer disabled:opacity-40 ${speed === s ? "border-[#c8a04b]/30 text-[#c8a04b]" : "text-[#98a3af]"}`}
             >
               {s}×
             </button>
@@ -109,9 +109,9 @@ export function FeedTerminal({
           <button
             key={k}
             onClick={() => setFilter(k)}
-            className={`shrink-0 rounded-full border px-2.5 py-0.5 text-[9px] transition-all ${
+            className={`shrink-0 rounded-full border px-2.5 py-0.5 text-[9px] transition-colors ${
               filter === k
-                ? "border-[#e8b440]/35 bg-[#e8b440]/[0.08] text-[#e8b440] shadow-[0_0_14px_rgba(232,180,64,0.18)]"
+                ? "border-[#c8a04b]/35 bg-[#c8a04b]/[0.08] text-[#c8a04b]"
                 : "border-white/[0.07] text-[#98a3af] hover:border-white/[0.14] hover:text-[#aab4bf]"
             }`}
           >
@@ -133,7 +133,7 @@ export function FeedTerminal({
             (e.payload.channel as string) ??
             (e.payload.bar ? `O:${e.payload.bar.o} C:${e.payload.bar.c}` : "");
           return (
-            <div key={e.event_id} className="gdc-feed-line flex gap-2 py-[1px] hover:bg-white/[0.03]">
+            <div key={e.event_id} className="flex gap-2 py-[1px] hover:bg-white/[0.03]">
               <span className="shrink-0 text-[#8a95a1]">{(e.decision_ts ?? e.ts).slice(11, 19)}</span>
               <span className="w-[6.5rem] shrink-0 truncate text-[9px] font-semibold" style={{ color: KIND_COLORS[e.kind] ?? "#8b949e", fontFamily: "var(--font-body)" }}>
                 {e.kind}
@@ -154,9 +154,12 @@ export function FeedTerminal({
           <span>{live && revealed >= total ? "↺ restarting…" : ""}</span>
         </div>
         <div className="mt-1 h-[3px] w-full overflow-hidden rounded bg-white/[0.06]">
-          <div className="h-full bg-gradient-to-r from-[#7a5c1a] to-[#e8b440] transition-all" style={{ width: `${progress}%` }} />
+          {/* transform scaleX — GPU-cheap, no width animation */}
+          <div className="h-full origin-left bg-[#c8a04b]" style={{ transform: `scaleX(${Math.max(0, Math.min(1, progress / 100))})` }} />
         </div>
       </div>
     </div>
   );
 }
+
+export const FeedTerminal = memo(FeedTerminalImpl);

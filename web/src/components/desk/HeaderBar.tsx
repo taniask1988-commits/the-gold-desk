@@ -1,9 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useState } from "react";
 import { sessionOfHour } from "./useDeskData";
 
-export function HeaderBar({
+function HeaderBarImpl({
   phase, demo, hash, composite, spanDays,
 }: {
   phase: number;
@@ -65,11 +65,11 @@ export function HeaderBar({
   const chatOpen = !!(chatWin && !chatWin.closed);
 
   return (
-    <header className="sticky top-0 z-50 border-b border-white/[0.08] bg-[#08090d]/72 backdrop-blur-2xl">
+    <header className="sticky top-0 z-50 border-b border-[#1a1f2c] bg-[#08090d]">
       <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-x-5 gap-y-2 px-4 py-3 sm:px-7">
         <div className="flex items-center gap-3.5">
-          <div className="relative flex h-9 w-9 items-center justify-center rounded-xl border border-[#e8b440]/40 bg-gradient-to-b from-[#e8b440]/25 to-[#e8b440]/5 shadow-[0_0_28px_rgba(232,180,64,0.30)]">
-            <span className="gdc-display text-[16px] font-semibold text-[#e8b440] gdc-glow-gold">Au</span>
+          <div className="relative flex h-9 w-9 items-center justify-center rounded-xl border border-[#c8a04b]/40 bg-[#0f1219]">
+            <span className="gdc-display text-[16px] font-semibold text-[#c8a04b]">Au</span>
           </div>
           <div className="leading-none">
             <h1 className="gdc-script text-[40px] leading-none text-[#f0e6d2] sm:text-[44px]">
@@ -89,8 +89,8 @@ export function HeaderBar({
           <button
             onClick={launchChat}
             aria-label="Open The Desk chat in a separate window"
-            className={`gdc-chip cursor-pointer border-[#e8b440]/35 transition-all hover:bg-[#e8b440]/[0.12] ${
-              chatOpen ? "bg-[#e8b440]/[0.12] text-[#e8b440]" : "text-[#e8b440]"
+            className={`gdc-chip cursor-pointer border-[#c8a04b]/35 transition-colors hover:bg-[#c8a04b]/[0.12] ${
+              chatOpen ? "bg-[#c8a04b]/[0.12] text-[#c8a04b]" : "text-[#c8a04b]"
             }`}
           >
             <span className="gdc-accent text-[14px]">The Desk</span>
@@ -103,7 +103,7 @@ export function HeaderBar({
             <span className="gdc-live-dot h-1.5 w-1.5 rounded-full bg-[#3fb950]" />
             Phase {phase} · No LLM
           </span>
-          <span className="gdc-chip border-[#e8b440]/30 text-[#e8b440]">{session}</span>
+          <span className="gdc-chip border-[#c8a04b]/30 text-[#c8a04b]">{session}</span>
           <span className="gdc-chip gdc-data text-[#aab4bf]">
             <span className="text-[#f4f7fa]">{utc}</span>
             <span className="text-[#76828e]">UTC</span>
@@ -127,3 +127,5 @@ export function HeaderBar({
     </header>
   );
 }
+
+export const HeaderBar = memo(HeaderBarImpl);

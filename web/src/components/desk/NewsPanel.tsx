@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useState } from "react";
 
 interface NewsItem {
   title: string;
@@ -18,7 +18,7 @@ function ago(published: string): string {
   return `${Math.floor(h / 24)}d ago`;
 }
 
-export function NewsPanel() {
+function NewsPanelImpl() {
   const [items, setItems] = useState<NewsItem[]>([]);
   const [ok, setOk] = useState<boolean | null>(null);
 
@@ -42,7 +42,6 @@ export function NewsPanel() {
 
   return (
     <div className="gdc-panel overflow-hidden">
-      <div className="gdc-sheen" aria-hidden style={{ "--sheen-delay": "5.5s", "--sheen-dur": "12s" } as React.CSSProperties} />
       <div className="flex flex-wrap items-baseline gap-3 border-b border-white/[0.08] px-5 py-2.5">
         <div className="flex items-baseline gap-3">
           <span className="gdc-display text-[17px] italic text-[#f4f7fa]">The tape</span>
@@ -82,3 +81,5 @@ export function NewsPanel() {
     </div>
   );
 }
+
+export const NewsPanel = memo(NewsPanelImpl);

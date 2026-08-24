@@ -1,9 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { memo, useState } from "react";
 import { REASON_COLORS } from "./useDeskData";
 
-export function ReasonHistogram({
+function ReasonHistogramImpl({
   dayHist, allHist, scope, setScope,
 }: {
   dayHist: Record<string, number>;
@@ -28,9 +28,9 @@ export function ReasonHistogram({
             <button
               key={s}
               onClick={() => setScope(s)}
-              className={`rounded-full border px-2.5 py-0.5 text-[9px] transition-all ${
+              className={`rounded-full border px-2.5 py-0.5 text-[9px] transition-colors ${
                 scope === s
-                  ? "border-[#e8b440]/35 bg-[#e8b440]/[0.08] text-[#e8b440] shadow-[0_0_14px_rgba(232,180,64,0.18)]"
+                  ? "border-[#c8a04b]/35 bg-[#c8a04b]/[0.08] text-[#c8a04b]"
                   : "border-white/[0.07] text-[#98a3af] hover:border-white/[0.14] hover:text-[#aab4bf]"
               }`}
             >
@@ -45,7 +45,8 @@ export function ReasonHistogram({
         )}
         {entries.map(([code, n]) => {
           const color = REASON_COLORS[code] ?? "#8b949e";
-          const w = (n / max) * 100;
+          // transform scaleX — GPU-cheap, no width animation
+          const fillPct = (n / max);
           return (
             <div
               key={code}
@@ -58,8 +59,8 @@ export function ReasonHistogram({
               </span>
               <div className="relative h-[14px] flex-1 overflow-hidden rounded-full bg-white/[0.05] ring-1 ring-inset ring-white/[0.05]">
                 <div
-                  className="h-full rounded-full transition-all duration-500"
-                  style={{ width: `${w}%`, background: `linear-gradient(90deg, ${color}55, ${color})`, boxShadow: hover === code ? `0 0 12px ${color}44` : "none" }}
+                  className="absolute inset-y-0 left-0 origin-left rounded-full"
+                  style={{ width: "100%", transform: `scaleX(${fillPct})`, background: `linear-gradient(90deg, ${color}55, ${color})` }}
                 />
               </div>
               <span className="gdc-display-num w-12 shrink-0 text-right text-[15px]" style={{ color }}>
@@ -78,3 +79,5 @@ export function ReasonHistogram({
     </div>
   );
 }
+
+export const ReasonHistogram = memo(ReasonHistogramImpl);

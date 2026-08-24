@@ -187,7 +187,10 @@ export function useDeskData() {
         .catch(() => {});
     };
     void load();
-    const iv = setInterval(() => void load(), 4200);
+    // 5s polling — satisfies the performance budget (no faster than 5s on
+    // any front-end data path). The deterministic-sim tick drift looks fine
+    // at this cadence and it dramatically cuts React re-renders vs 4.2s.
+    const iv = setInterval(() => void load(), 5_000);
     return () => { dead = true; clearInterval(iv); };
   }, [activeDay]);
 

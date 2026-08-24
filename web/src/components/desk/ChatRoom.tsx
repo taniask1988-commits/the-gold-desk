@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  memo,
   useCallback,
   useEffect,
   useRef,
@@ -218,6 +219,34 @@ export function ChatRoom() {
           );
         }
 
+        // Legacy-compat: older route builds answer with a single JSON
+        // envelope ({ok, reply, model, latency_ms, grounded}) instead of the
+        // NDJSON event stream. Detect by content-type and finish in one step
+        // so the chat popup works against either route version.
+        const ctype = res.headers.get("content-type") ?? "";
+        if (ctype.includes("application/json")) {
+          const j = (await res.json()) as {
+            ok?: boolean; reply?: string; model?: string;
+            latency_ms?: number; grounded?: boolean; error?: string;
+          };
+          if (!j.ok || typeof j.reply !== "string" || !j.reply.trim()) {
+            throw new Error(j.error || "the model returned an empty reply");
+          }
+          setMessages((m) => [
+            ...m,
+            {
+              role: "assistant",
+              content: j.reply!.trim(),
+              model: j.model,
+              latency: j.latency_ms,
+              grounded: j.grounded || undefined,
+            },
+          ]);
+          if (j.model) setModel(j.model);
+          if (typeof j.latency_ms === "number") setLastLatency(j.latency_ms);
+          return;
+        }
+
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buf = "";
@@ -342,33 +371,26 @@ export function ChatRoom() {
 
   const hoursToNfp = drivers?.ok ? drivers.live?.D9?.value ?? null : null;
 
+  // stable callback so the memoized LiveStreamPanel doesn't re-render on
+  // unrelated parent state changes (e.g. left-rail polling ticks).
+  const onToggleCollapse = useCallback(() => {
+    setReasoningCollapsed((v) => !v);
+  }, []);
+
   /* ------------------------------- render ------------------------------- */
 
   return (
-    <div className="gdc-root gdc-grain flex h-screen flex-col overflow-hidden">
-      {/* aurora field */}
-      <div className="gdc-aurora" aria-hidden>
-        <div className="band band-a" />
-        <div className="band band-b" />
-        <div className="band band-c" />
-        <div className="orb orb-gold" />
-        <div className="orb orb-teal" />
-        <div className="orb orb-ember" />
-        <div className="gdc-dots" />
-        <div className="gdc-noise" />
-      </div>
-
-      <div className="relative z-10 flex h-screen flex-col">
+    <div className="gdc-root flex h-screen flex-col overflow-hidden">
+      <div className="flex h-screen flex-col">
         {/* ===== TOP BAR ===== */}
-        <header className="gdc-panel-flat flex shrink-0 items-center gap-3 border-b border-white/[0.08] px-5 py-3">
-          {/* vault-dial avatar */}
-          <div className="relative flex h-11 w-11 items-center justify-center" aria-hidden>
-            <div className="absolute inset-0 rounded-full border border-[#e8b440]/45 bg-gradient-to-b from-[#e8b440]/25 to-[#1a1408]/40 shadow-[0_0_28px_rgba(232,180,64,0.35)]" />
-            <div className="absolute inset-0 rounded-full" style={{
-              background:
-                "conic-gradient(from -90deg, rgba(232,180,64,0.18) 0deg, transparent 30deg, rgba(232,180,64,0.35) 90deg, transparent 120deg, rgba(232,180,64,0.18) 180deg, transparent 210deg, rgba(232,180,64,0.35) 270deg, transparent 300deg)",
-            }} />
-            <span className="gdc-display relative z-10 text-[18px] font-semibold text-[#e8b440] gdc-glow-gold">Au</span>
+        <header className="flex shrink-0 items-center gap-3 border-b border-[#1a1f2c] bg-[#0f1219] px-5 py-3">
+          {/* vault-dial avatar — static SVG dial, no animation */}
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center" aria-hidden>
+            <svg viewBox="0 0 44 44" className="h-11 w-11">
+              <circle cx="22" cy="22" r="21" fill="#0f1219" stroke="#c8a04b" strokeOpacity="0.45" />
+              <circle cx="22" cy="22" r="17" fill="none" stroke="#c8a04b" strokeOpacity="0.25" strokeDasharray="2 4" />
+              <text x="22" y="28" textAnchor="middle" className="gdc-display" fontSize="17" fill="#c8a04b">Au</text>
+            </svg>
           </div>
 
           <div className="leading-tight">
@@ -400,7 +422,7 @@ export function ChatRoom() {
                   window.location.href = "/";
                 }
               }}
-              className="gdc-chip cursor-pointer border-[#e8b440]/35 text-[#e8b440] transition-all hover:bg-[#e8b440]/[0.12]"
+              className="gdc-chip cursor-pointer border-[#c8a04b]/35 text-[#c8a04b] transition-colors hover:bg-[#c8a04b]/[0.12]"
               aria-label="Back to main deck"
             >
               <span aria-hidden>←</span> main deck
@@ -568,15 +590,15 @@ export function ChatRoom() {
                     className={m.role === "user" ? "flex justify-end" : "flex justify-start"}
                   >
                     {m.role === "assistant" && (
-                      <div className="mr-2.5 mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-[#e8b440]/40 bg-gradient-to-b from-[#e8b440]/25 to-[#1a1408]/40 shadow-[0_0_16px_rgba(232,180,64,0.25)]">
-                        <span className="gdc-display text-[10px] font-semibold text-[#e8b440]">Au</span>
+                      <div className="mr-2.5 mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-[#c8a04b]/40 bg-[#0f1219]">
+                        <span className="gdc-display text-[10px] font-semibold text-[#c8a04b]">Au</span>
                       </div>
                     )}
                     <div
                       className={`max-w-[88%] whitespace-pre-wrap break-words rounded-2xl px-4 py-3 text-[12.5px] leading-relaxed ${
                         m.role === "user"
-                          ? "rounded-br-md border border-[#e8b440]/30 bg-[#e8b440]/[0.10] text-[#f4f7fa]"
-                          : "rounded-bl-md border border-white/[0.09] bg-white/[0.045] text-[#e9edf2] backdrop-blur-md"
+                          ? "rounded-br-md border border-[#c8a04b]/30 bg-[#c8a04b]/[0.10] text-[#f4f7fa]"
+                          : "rounded-bl-md border border-[#1a1f2c] bg-[#0f1219] text-[#e9edf2]"
                       }`}
                     >
                       <MarkdownLite text={m.content} />
@@ -603,18 +625,18 @@ export function ChatRoom() {
                   <LiveStreamPanel
                     stream={stream}
                     reasoningCollapsed={reasoningCollapsed}
-                    onToggleCollapse={() => setReasoningCollapsed((v) => !v)}
+                    onToggleCollapse={onToggleCollapse}
                   />
                 )}
 
                 {/* fallback "thinking" badge before stream arrives */}
                 {busy && !stream && (
                   <div className="flex justify-start">
-                    <div className="mr-2.5 mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-[#e8b440]/40 bg-gradient-to-b from-[#e8b440]/25 to-[#1a1408]/40">
-                      <span className="gdc-display text-[10px] font-semibold text-[#e8b440]">Au</span>
+                    <div className="mr-2.5 mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-[#c8a04b]/40 bg-[#0f1219]">
+                      <span className="gdc-display text-[10px] font-semibold text-[#c8a04b]">Au</span>
                     </div>
-                    <div className="flex items-center gap-2 rounded-2xl rounded-bl-md border border-white/[0.09] bg-white/[0.045] px-4 py-3 backdrop-blur-md">
-                      <span className="gdc-live-dot h-1.5 w-1.5 rounded-full bg-[#e8b440]" />
+                    <div className="flex items-center gap-2 rounded-2xl rounded-bl-md border border-[#1a1f2c] bg-[#0f1219] px-4 py-3">
+                      <span className="gdc-live-dot h-1.5 w-1.5 rounded-full bg-[#c8a04b]" />
                       <span className="text-[11px] italic text-[#9aa5b0]">
                         opening secure channel to the model…
                       </span>
@@ -640,7 +662,7 @@ export function ChatRoom() {
                     <button
                       key={s}
                       onClick={() => void send(s)}
-                      className="rounded-xl border border-white/[0.09] bg-white/[0.035] px-3 py-2 text-left text-[10.5px] text-[#9aa5b0] backdrop-blur-sm transition-all hover:border-[#e8b440]/35 hover:text-[#e8b440]"
+                      className="rounded-xl border border-[#1a1f2c] bg-[#0f1219] px-3 py-2 text-left text-[10.5px] text-[#9aa5b0] transition-colors hover:border-[#c8a04b]/35 hover:text-[#c8a04b]"
                     >
                       {s}
                     </button>
@@ -655,7 +677,7 @@ export function ChatRoom() {
                 e.preventDefault();
                 void send(input);
               }}
-              className="mx-auto w-full max-w-[760px] shrink-0 border-t border-white/[0.08] bg-[#08090d]/40 px-5 py-3 backdrop-blur-xl"
+              className="mx-auto w-full max-w-[760px] shrink-0 border-t border-[#1a1f2c] bg-[#0f1219] px-5 py-3"
             >
               <div className="flex items-end gap-2">
                 <textarea
@@ -669,7 +691,7 @@ export function ChatRoom() {
                   }}
                   rows={1}
                   placeholder="Ask the desk… (Shift+Enter for newline)"
-                  className="gdc-scroll max-h-32 min-h-[44px] flex-1 resize-none rounded-xl border border-white/[0.12] bg-white/[0.05] px-4 py-3 text-[12.5px] text-[#f4f7fa] placeholder:text-[#76828e] backdrop-blur-md outline-none transition-colors focus:border-[#e8b440]/40"
+                  className="gdc-scroll max-h-32 min-h-[44px] flex-1 resize-none rounded-xl border border-[#1a1f2c] bg-[#0b0e14] px-4 py-3 text-[12.5px] text-[#f4f7fa] placeholder:text-[#76828e] outline-none transition-colors focus:border-[#c8a04b]/40"
                 />
                 <button
                   type="submit"
@@ -692,8 +714,11 @@ export function ChatRoom() {
 }
 
 /* ----------------------------- live stream panel ----------------------------- */
+/* Editorial-flat: no sheen, no box-shadow pulse, no per-token blur. Only the
+   gold breathing rule (gdc-breathe) + live-dot blink while tokens stream in.
+   NDJSON streaming behavior is unchanged — only visuals got lighter. */
 
-function LiveStreamPanel({
+function LiveStreamPanelImpl({
   stream,
   reasoningCollapsed,
   onToggleCollapse,
@@ -704,28 +729,23 @@ function LiveStreamPanel({
 }) {
   const elapsed = ((performance.now() - stream.startedAt) / 1000).toFixed(1);
   const phaseLabel = stream.phase === "reasoning" ? "REASONING" : "REPLYING";
-  const phaseColor =
-    stream.phase === "reasoning" ? "#e8b440" : "#3fb950";
+  const phaseColor = stream.phase === "reasoning" ? "#c8a04b" : "#3fb950";
   const hasReply = stream.reply.length > 0;
 
   return (
-    <div className="gdc-reasoning-enter flex justify-start">
-      <div className="mr-2.5 mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-[#e8b440]/40 bg-gradient-to-b from-[#e8b440]/25 to-[#1a1408]/40 shadow-[0_0_16px_rgba(232,180,64,0.25)]">
-        <span className="gdc-display text-[10px] font-semibold text-[#e8b440]">Au</span>
+    <div className="flex justify-start">
+      <div className="mr-2.5 mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-[#c8a04b]/40 bg-[#0f1219]">
+        <span className="gdc-display text-[10px] font-semibold text-[#c8a04b]">Au</span>
       </div>
       <div className="max-w-[88%] flex-1">
         {/* HEADER STRIP — always visible */}
         <div
-          className={`relative flex items-center gap-2 rounded-t-2xl border border-b-0 px-4 py-2 ${
+          className={`flex items-center gap-2 rounded-t-2xl border border-b-0 px-4 py-2 ${
             stream.phase === "reasoning"
-              ? "border-[#e8b440]/35 bg-[#e8b440]/[0.05] gdc-reasoning-live"
-              : "border-[#3fb950]/30 bg-[#3fb950]/[0.04]"
+              ? "border-[#c8a04b]/35 bg-[#0f1219]"
+              : "border-[#3fb950]/30 bg-[#0f1219]"
           }`}
         >
-          {/* shimmer line across the top */}
-          {stream.phase === "reasoning" && (
-            <div className="gdc-reasoning-sheen" aria-hidden />
-          )}
           {/* phase chip */}
           <span
             className="gdc-data inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[8.5px] font-semibold uppercase tracking-[0.16em]"
@@ -737,13 +757,9 @@ function LiveStreamPanel({
           >
             {phaseLabel}
           </span>
-          {/* three breathing dots while reasoning */}
+          {/* single live dot while reasoning */}
           {stream.phase === "reasoning" && !hasReply && (
-            <span className="flex items-center gap-0.5" aria-hidden>
-              <span className="gdc-think-dot-1 h-1 w-1 rounded-full bg-[#e8b440]" />
-              <span className="gdc-think-dot-2 h-1 w-1 rounded-full bg-[#e8b440]" />
-              <span className="gdc-think-dot-3 h-1 w-1 rounded-full bg-[#e8b440]" />
-            </span>
+            <span className="gdc-live-dot h-1.5 w-1.5 rounded-full bg-[#c8a04b]" aria-hidden />
           )}
           {/* model + elapsed */}
           {stream.model && (
@@ -764,51 +780,54 @@ function LiveStreamPanel({
           {hasReply && (
             <button
               onClick={onToggleCollapse}
-              className="gdc-data ml-auto cursor-pointer text-[8.5px] uppercase tracking-[0.14em] text-[#76828e] transition-colors hover:text-[#e8b440]"
+              className="gdc-data ml-auto cursor-pointer text-[8.5px] uppercase tracking-[0.14em] text-[#76828e] transition-colors hover:text-[#c8a04b]"
             >
               {reasoningCollapsed ? "▾ show reasoning" : "▴ hide reasoning"}
             </button>
           )}
         </div>
 
-        {/* REASONING BODY (collapses when reply starts) */}
-        <div
-          className={`gdc-reasoning-collapsed relative ${
-            reasoningCollapsed ? "is-collapsed" : ""
-          } border-l-2 border-l-[#e8b440]/45 bg-[#1a1408]/30 px-4 py-3 ${
-            hasReply ? "rounded-b-0 border-b-0" : "rounded-b-2xl border-b border-[#e8b440]/35"
-          }`}
-        >
-          {/* breathing gold rule on the left */}
-          <span
-            className="gdc-reasoning-rule pointer-events-none absolute left-0 top-3 bottom-3 w-[2px] rounded-full bg-[#e8b440]/60"
-            aria-hidden
-          />
-          <div className="gdc-data whitespace-pre-wrap break-words pl-3 text-[10.5px] leading-relaxed text-[#d4b96a]">
-            {stream.reasoning ? (
-              <>
-                <span className="gdc-token-in">{stream.reasoning}</span>
-                {stream.phase === "reasoning" && (
-                  <span className="gdc-reasoning-caret" aria-hidden />
-                )}
-              </>
-            ) : (
-              <span className="italic text-[#76828e]">
-                reasoning… (free model, first tokens can take 5-15s)
-              </span>
-            )}
+        {/* REASONING BODY — conditionally rendered (no max-height transition) */}
+        {!reasoningCollapsed && (
+          <div
+            className={`relative border-l-2 border-l-[#c8a04b]/45 bg-[#0f1219] px-4 py-3 ${
+              hasReply ? "rounded-b-0 border-b-0" : "rounded-b-2xl border-b border-[#c8a04b]/35"
+            }`}
+          >
+            {/* breathing gold rule on the left — the one allowed breathing animation */}
+            <span
+              className="gdc-breathe pointer-events-none absolute bottom-3 left-0 top-3 w-[2px] rounded-full bg-[#c8a04b]/70"
+              aria-hidden
+            />
+            <div className="gdc-data whitespace-pre-wrap break-words pl-3 text-[10.5px] leading-relaxed text-[#d4b96a]">
+              {stream.reasoning ? (
+                <>
+                  {stream.reasoning}
+                  {stream.phase === "reasoning" && (
+                    <span
+                      className="gdc-live-dot ml-0.5 inline-block h-[0.9em] w-[0.55ch] translate-y-[0.15em] rounded-[1px] bg-[#c8a04b]/80 align-baseline"
+                      aria-hidden
+                    />
+                  )}
+                </>
+              ) : (
+                <span className="italic text-[#76828e]">
+                  reasoning… (free model, first tokens can take 5-15s)
+                </span>
+              )}
+            </div>
           </div>
-        </div>
+        )}
 
         {/* REPLY BODY (always visible once reply starts) */}
         {hasReply && (
-          <div className="whitespace-pre-wrap break-words rounded-b-2xl border border-[#3fb950]/25 bg-white/[0.05] px-4 py-3 text-[12.5px] leading-relaxed text-[#e9edf2] backdrop-blur-md">
-            <span className="gdc-token-in">{stream.reply}</span>
+          <div className="whitespace-pre-wrap break-words rounded-b-2xl border border-[#3fb950]/25 bg-[#0f1219] px-4 py-3 text-[12.5px] leading-relaxed text-[#e9edf2]">
+            {stream.reply}
             {stream.phase === "replying" && (
-              <span className="gdc-reasoning-caret" aria-hidden style={{
-                background: "linear-gradient(180deg, #b9f6c0, #3fb950)",
-                boxShadow: "0 0 8px rgba(63, 185, 80, 0.65)",
-              }} />
+              <span
+                className="gdc-live-dot ml-0.5 inline-block h-[0.9em] w-[0.55ch] translate-y-[0.15em] rounded-[1px] bg-[#3fb950]/80 align-baseline"
+                aria-hidden
+              />
             )}
           </div>
         )}
@@ -817,21 +836,23 @@ function LiveStreamPanel({
   );
 }
 
+const LiveStreamPanel = memo(LiveStreamPanelImpl);
+
 /* ----------------------------- per-message collapsible reasoning ----------------------------- */
 
-function ReasoningCollapse({ summary }: { summary: string }) {
+function ReasoningCollapseImpl({ summary }: { summary: string }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="mt-2.5 border-t border-white/[0.06] pt-2">
       <button
         onClick={() => setOpen((v) => !v)}
-        className="gdc-data flex cursor-pointer items-center gap-1.5 text-[8.5px] uppercase tracking-[0.14em] text-[#76828e] transition-colors hover:text-[#e8b440]"
+        className="gdc-data flex cursor-pointer items-center gap-1.5 text-[8.5px] uppercase tracking-[0.14em] text-[#76828e] transition-colors hover:text-[#c8a04b]"
       >
         <span aria-hidden>{open ? "▾" : "▸"}</span>
         reasoning · {summary.length} chars
       </button>
       {open && (
-        <div className="mt-2 border-l-2 border-[#e8b440]/35 pl-3">
+        <div className="mt-2 border-l-2 border-[#c8a04b]/35 pl-3">
           <div className="gdc-data max-h-[260px] overflow-y-auto whitespace-pre-wrap break-words text-[10px] leading-relaxed text-[#d4b96a]">
             {summary}
           </div>
@@ -841,40 +862,21 @@ function ReasoningCollapse({ summary }: { summary: string }) {
   );
 }
 
+const ReasoningCollapse = memo(ReasoningCollapseImpl);
+
 /* ----------------------------- helpers ----------------------------- */
 
-function StatChip({
-  label,
-  value,
-  decimals = 2,
-  suffix = "",
-}: {
-  label: string;
-  value: number | null | undefined;
-  decimals?: number;
-  suffix?: string;
-}) {
-  return (
-    <div className="flex items-center justify-between rounded-md border border-white/[0.06] bg-white/[0.025] px-2 py-1">
-      <span className="gdc-data text-[8.5px] uppercase tracking-[0.1em] text-[#76828e]">{label}</span>
-      <span className="gdc-display-num text-[10px] text-[#f4f7fa]">
-        {value !== null && value !== undefined ? `${value.toFixed(decimals)}${suffix}` : "—"}
-      </span>
-    </div>
-  );
-}
-
-function Row({ label, value }: { label: string; value: string }) {
+const Row = memo(function Row({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-baseline justify-between">
       <span className="gdc-data text-[#76828e]">{label}</span>
       <span className="gdc-data text-[#f4f7fa]">{value}</span>
     </div>
   );
-}
+});
 
 /** Tiny markdown renderer — bold + inline code + line breaks only (no XSS surface). */
-function MarkdownLite({ text }: { text: string }) {
+const MarkdownLite = memo(function MarkdownLite({ text }: { text: string }) {
   const lines = text.split(/\n/);
   return (
     <>
@@ -886,7 +888,7 @@ function MarkdownLite({ text }: { text: string }) {
       ))}
     </>
   );
-}
+});
 
 function renderInline(text: string): ReactNode {
   const tokens: ReactNode[] = [];
@@ -905,7 +907,7 @@ function renderInline(text: string): ReactNode {
       );
     } else if (seg.startsWith("`")) {
       tokens.push(
-        <code key={k++} className="gdc-data rounded bg-white/[0.08] px-1 py-0.5 text-[11px] text-[#e8b440]">
+        <code key={k++} className="gdc-data rounded bg-white/[0.08] px-1 py-0.5 text-[11px] text-[#c8a04b]">
           {seg.slice(1, -1)}
         </code>,
       );
