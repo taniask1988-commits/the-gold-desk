@@ -41,14 +41,31 @@ def api_key() -> str:
     return os.environ.get("OPENCODE_ZEN_API_KEY", "placeholder")
 
 
+def _is_transient(code: int) -> bool:
+    """Codes that are typically transient on Zen's free shared infra and
+    worth a single retry with backoff: 429 (rate limit), 500/502/503/504
+    (gateway/overload), 400 (some endpoints return 400 for transient
+    payload-validation races against the model router)."""
+    return code in (400, 429, 500, 502, 503, 504)
+
+
 def complete(
     messages: list[dict],
     model: str,
     timeout: float = 30.0,
     temperature: float = 0.0,
     max_tokens: int = 500,
+    retries: int = 3,
 ) -> dict:
-    """One chat completion. Returns the full response body. Raises typed errors."""
+    """One chat completion. Returns the full response body. Raises typed errors.
+
+    Zen's free shared infra will occasionally return 400/429/5xx under load;
+    we retry up to `retries` times with exponential backoff (0.6s, 1.4s, 3.0s)
+    before surfacing LLMUnavailable. This keeps the chat UX resilient to
+    transient overload without ever retrying into a fake success.
+    """
+    import time as _time
+
     body = json.dumps({
         "model": model,
         "messages": messages,
@@ -56,24 +73,46 @@ def complete(
         "max_tokens": max_tokens,
         "stream": False,
     }).encode("utf-8")
-    req = urllib.request.Request(
-        f"{base_url()}/chat/completions",
-        data=body,
-        headers={
-            "Content-Type": "application/json",
-            "User-Agent": USER_AGENT,
-            # Authorization deliberately absent: Zen free tier is keyless
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        raise LLMUnavailable(f"zen http {e.code}") from e
-    except TimeoutError as e:
-        raise LLMUnavailable("zen timeout") from e
-    except Exception as e:  # noqa: BLE001 — any transport failure = unavailable
-        raise LLMUnavailable(f"zen transport: {type(e).__name__}") from e
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": USER_AGENT,
+        # Authorization deliberately absent: Zen free tier is keyless
+    }
+
+    last_exc: Exception | None = None
+    backoff_s = 0.6
+    for attempt in range(max(1, retries)):
+        req = urllib.request.Request(
+            f"{base_url()}/chat/completions",
+            data=body,           # body is reused; urllib doesn't stream it
+            headers=headers,
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            last_exc = e
+            if _is_transient(e.code) and attempt < retries - 1:
+                _time.sleep(backoff_s)
+                backoff_s *= 2.2
+                continue
+            raise LLMUnavailable(f"zen http {e.code}") from e
+        except TimeoutError as e:
+            last_exc = e
+            if attempt < retries - 1:
+                _time.sleep(backoff_s)
+                backoff_s *= 2.2
+                continue
+            raise LLMUnavailable("zen timeout") from e
+        except Exception as e:  # noqa: BLE001 — any transport failure = unavailable
+            last_exc = e
+            if attempt < retries - 1:
+                _time.sleep(backoff_s)
+                backoff_s *= 2.2
+                continue
+            raise LLMUnavailable(f"zen transport: {type(e).__name__}") from e
+    # Defensive: should be unreachable
+    raise LLMUnavailable(f"zen exhausted retries: {last_exc!r}")
 
 
 def _iter_json_objects(text: str):

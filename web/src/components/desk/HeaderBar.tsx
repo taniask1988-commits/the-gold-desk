@@ -1,19 +1,18 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { sessionOfHour } from "./useDeskData";
 
 export function HeaderBar({
-  phase, demo, hash, composite, spanDays, onChat, chatOpen,
+  phase, demo, hash, composite, spanDays,
 }: {
   phase: number;
   demo: boolean;
   hash: string | null;
   composite: number;
   spanDays: number;
-  onChat: () => void;
-  chatOpen: boolean;
 }) {
+  const [chatWin, setChatWin] = useState<Window | null>(null);
   const [now, setNow] = useState<Date | null>(null);
   useEffect(() => {
     // clock starts client-side only (no hydration mismatch)
@@ -26,6 +25,44 @@ export function HeaderBar({
   const session = sessionOfHour(hour);
   const biasColor =
     composite >= 60 ? "#3fb950" : composite <= 40 ? "#f85149" : "#d29922";
+
+  const launchChat = useCallback(() => {
+    // focus the existing chat window if it's still alive; otherwise launch a new one
+    if (chatWin && !chatWin.closed) {
+      chatWin.focus();
+      return;
+    }
+    // Hermes-style trading agent window: 1280x860 popup with chrome stripped
+    const w = 1280;
+    const h = 860;
+    const left = Math.max(0, (window.screen.availWidth - w) / 2);
+    const top = Math.max(0, (window.screen.availHeight - h) / 2);
+    const features = [
+      `width=${w}`,
+      `height=${h}`,
+      `left=${left}`,
+      `top=${top}`,
+      "noopener=no",
+      "menubar=no",
+      "toolbar=no",
+      "location=no",
+      "status=no",
+      "resizable=yes",
+      "scrollbars=no",
+    ].join(",");
+    const win = window.open("/chat", "gold-desk-chat", features);
+    setChatWin(win);
+    if (win) {
+      const tick = setInterval(() => {
+        if (win.closed) {
+          setChatWin(null);
+          clearInterval(tick);
+        }
+      }, 1000);
+    }
+  }, [chatWin]);
+
+  const chatOpen = !!(chatWin && !chatWin.closed);
 
   return (
     <header className="sticky top-0 z-50 border-b border-white/[0.08] bg-[#08090d]/72 backdrop-blur-2xl">
@@ -50,14 +87,17 @@ export function HeaderBar({
 
         <div className="ml-auto flex flex-wrap items-center gap-2 text-[10px]">
           <button
-            onClick={onChat}
-            aria-label="Chat with The Desk"
+            onClick={launchChat}
+            aria-label="Open The Desk chat in a separate window"
             className={`gdc-chip cursor-pointer border-[#e8b440]/35 transition-all hover:bg-[#e8b440]/[0.12] ${
               chatOpen ? "bg-[#e8b440]/[0.12] text-[#e8b440]" : "text-[#e8b440]"
             }`}
           >
             <span className="gdc-accent text-[14px]">The Desk</span>
             <span aria-hidden>✦</span> chat
+            {chatOpen && (
+              <span className="gdc-live-dot ml-1 h-1.5 w-1.5 rounded-full bg-[#3fb950]" />
+            )}
           </button>
           <span className="gdc-chip text-[#aab4bf]">
             <span className="gdc-live-dot h-1.5 w-1.5 rounded-full bg-[#3fb950]" />

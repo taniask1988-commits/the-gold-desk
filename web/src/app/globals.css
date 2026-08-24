@@ -389,6 +389,20 @@
   }
 }
 
+/* ---------- flat panel (header bars / narrow rails; no lift on hover) ---------- */
+.gdc-panel-flat {
+  position: relative;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.012)),
+    rgba(8, 11, 17, 0.55);
+  -webkit-backdrop-filter: blur(40px) saturate(220%);
+  backdrop-filter: blur(40px) saturate(220%);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.06) inset,
+    0 -1px 0 rgba(0, 0, 0, 0.30) inset;
+}
+
 /* ---------- glass chip ---------- */
 .gdc-chip {
   display: inline-flex;
