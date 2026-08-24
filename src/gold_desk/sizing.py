@@ -69,14 +69,7 @@ def size_with_constitution(
     if any(is_blocked(v) for v in needed):
         return SizingResult(False, code="SIZE_INVALID",
                             detail="constitution broker/risk fields BLOCKED")
-    # tick_value: USD value of one full price unit (1.00) per lot
-    tick_size = b.get("tick_size")
-    tick_value = b.get("tick_value")
-    if not is_blocked(tick_size) and not is_blocked(tick_value) \
-            and float(tick_size) > 0 and float(tick_value) > 0:
-        point_value = float(tick_value) / float(tick_size)
-    else:
-        point_value = float(b["contract_size"])
+    point_value = point_value_from_constitution(constitution)
     return compute_lots(
         equity=equity,
         risk_pct=constitution.risk_pct,          # type: ignore[arg-type]
@@ -86,3 +79,26 @@ def size_with_constitution(
         min_lot=float(b["min_lot"]),
         max_lot=float(b["max_lot"]),
     )
+
+
+def point_value_from_constitution(constitution: Constitution) -> float:
+    """USD value of a 1.00 price move per lot, derived from the constitution.
+
+    Order: tick_value / tick_size if both present and positive (this is the
+    USD value of one full price unit per lot); else fall back to contract_size.
+    For the demo overlay (tick_size=0.01, tick_value=1.0) this is 100 — same
+    as contract_size=100, so existing demo balances stay reproducible.
+    Returns 100.0 (the historical default) when the broker block is absent or
+    fully BLOCKED, so the paper account can still operate in tests/sim.
+    """
+    b = constitution.broker
+    from .version import is_blocked
+    contract = b.get("contract_size")
+    if is_blocked(contract):
+        return 100.0
+    tick_size = b.get("tick_size")
+    tick_value = b.get("tick_value")
+    if (not is_blocked(tick_size) and not is_blocked(tick_value)
+            and float(tick_size) > 0 and float(tick_value) > 0):
+        return float(tick_value) / float(tick_size)
+    return float(contract)

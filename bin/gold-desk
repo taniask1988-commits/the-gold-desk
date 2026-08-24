@@ -148,7 +148,14 @@ doctor() {
   local SPOT
   SPOT="$(cli price --json 2>/dev/null | head -c 400 || true)"
   if echo "$SPOT" | grep -q '"ok": *true'; then
-    ok "live feeds   : $(echo "$SPOT" | "$VENV_PY" -c 'import json,sys; d=json.load(sys.stdin); print(f"{d["price"]:.2f} USD/oz via {d["source"].split(" ")[0]}")' 2>/dev/null || echo reachable)"
+    # L2: rewritten to avoid nested backslash-escaped quotes. The previous
+    # form used an f-string delimited by double quotes with double-quoted
+    # dict keys inside the expression (`f"{d["price"]:.2f}"`) — that is a
+    # Python 3.12+ feature (PEP 701); on Python 3.10/3.11 it is a SyntaxError
+    # that the trailing `2>/dev/null || echo reachable` was silently masking.
+    # This %-format form parses cleanly on every supported version, no
+    # escaping required inside either the shell or python string.
+    ok "live feeds   : $(echo "$SPOT" | "$VENV_PY" -c "import json,sys; d=json.load(sys.stdin); print('%.2f USD/oz via %s' % (d['price'], d['source'].split()[0]))" 2>/dev/null || echo reachable)"
   else
     printf "  ${GOLD}!${OFF} live feeds unreachable (display-only feature)\n"
   fi
@@ -185,7 +192,7 @@ $(printf "${GOLD}${BOLD}")  gold-desk$(printf "${OFF}") — the silent XAUUSD H1
   $(printf "${GOLD}")gold-desk$(printf "${OFF}")                    launch the web command deck
   $(printf "${GOLD}")gold-desk tui$(printf "${OFF}")                 launch the terminal UI
   $(printf "${GOLD}")gold-desk demo$(printf "${OFF}") [days] [seed]  regenerate the demo journal
-  $(printf "${GOLD}")gold-desk test$(printf "${OFF}")                run the frozen test matrix (92 tests)
+  $(printf "${GOLD}")gold-desk test$(printf "${OFF}")                run the test matrix (121 tests)
   $(printf "${GOLD}")gold-desk chat$(printf "${OFF}")              talk to The Desk expert (free models)
   $(printf "${GOLD}")gold-desk price$(printf "${OFF}")             live gold spot (free feeds)
   $(printf "${GOLD}")gold-desk news$(printf "${OFF}")              live gold headlines (free RSS)

@@ -60,6 +60,7 @@ export interface Ticket {
   target: number;
   lots: number;
   risk_pct: number;
+  risk_money?: number;          // H2: persisted at gate time; readers use this
   time_stop_ts: string;
   invalidation: string;
   setup_id: string;

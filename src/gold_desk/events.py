@@ -29,8 +29,17 @@ REASON_CODES = [
     "LLM_UNAVAILABLE", "GATE_REJECT", "TICKET_EXPIRED", "HUMAN_SKIP",
     "FILL", "CONSTITUTION_BLOCKED", "DEGRADED", "TZ_MISALIGN",
     "SOURCE_MISMATCH", "IGNORED_LATE_RESPONSE", "SPREAD_BLOWOUT",
+    "ACCOUNT_CORRUPT_RECOVERED",
     "TICKET_SENT",
 ]
+
+# LLM_INVALID_JSON is declared for completeness but is folded into LLM_VETO
+# at runtime: the veto_llm path (src/gold_desk/llm/veto_llm.py) converts any
+# invalid-JSON / schema-failed model response into a binary VETO decision,
+# which the orchestrator then journals as LLM_VETO. So LLM_INVALID_JSON never
+# appears as the terminal reason_code of any bar in the journal — it's kept
+# in REASON_CODES so histogram tooling can still recognise the code if a
+# downstream consumer ever emits it directly.
 
 EVENT_KINDS = [
     "BarReceived", "DataQualityFailed", "FilterReject", "NoSetup",
@@ -38,6 +47,7 @@ EVENT_KINDS = [
     "TicketEvent", "TicketSendAttempt", "TicketSent", "HumanResponse",
     "Fill", "Skip", "TicketExpired", "ReflectionWritten", "KillSwitch",
     "ProcessStart", "ProcessRecovered", "EodSummary",
+    "AccountCorruptRecovered",
 ]
 
 

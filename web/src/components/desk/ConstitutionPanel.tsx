@@ -39,9 +39,13 @@ export function ConstitutionPanel({
   hash, blockedCount, phase,
 }: {
   hash: string | null;
-  blockedCount: number;
-  phase: number;
+  // M4: null while loading or when the harness is unreachable — show a
+  // loading/unknown state instead of a hardcoded "30 BLOCKED" number.
+  blockedCount: number | null;
+  phase: number | null;
 }) {
+  const blockedUnknown = blockedCount === null;
+  const blocked = blockedCount ?? 0;
   return (
     <div className="gdc-panel gdc-thermal-line overflow-hidden">
       <div className="flex items-center justify-between border-b border-white/[0.07] px-4 py-2">
@@ -49,8 +53,20 @@ export function ConstitutionPanel({
           <span className="gdc-accent text-[20px] text-[#f4f7fa]">Constitution &amp; laws</span>
           <span className="gdc-spec">human-owned · hashed · immutable</span>
         </div>
-        <span className="gdc-chip text-[#d29922] border-[#d29922]/30">
-          {blockedCount > 0 ? `FAIL-CLOSED · ${blockedCount} BLOCKED` : "TRADE-CAPABLE"}
+        <span
+          className={`gdc-chip ${
+            blockedUnknown
+              ? "text-[#76828e] border-[#76828e]/30"
+              : blocked > 0
+                ? "text-[#d29922] border-[#d29922]/30"
+                : "text-[#3fb950] border-[#3fb950]/30"
+          }`}
+        >
+          {blockedUnknown
+            ? "LOADING…"
+            : blocked > 0
+              ? `FAIL-CLOSED · ${blocked} BLOCKED`
+              : "TRADE-CAPABLE"}
         </span>
       </div>
       <div className="grid gap-3 p-3 md:grid-cols-2">
@@ -63,7 +79,9 @@ export function ConstitutionPanel({
             </div>
             <div className="flex justify-between">
               <span className="text-[#aab4bf]">phase</span>
-              <span className="text-[#e9edf2]">{phase} — zero LLM in the live loop</span>
+              <span className="text-[#e9edf2]">
+                {phase === null ? "—" : phase} — zero LLM in the live loop
+              </span>
             </div>
             <div className="flex justify-between">
               <span className="text-[#aab4bf]">execution boundary</span>

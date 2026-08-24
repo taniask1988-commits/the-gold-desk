@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import type { DriverDTO, DriverValuesDTO } from "./useDeskData";
 import { DRIVERS, stanceFor } from "@/lib/desk/drivers";
 
@@ -23,26 +24,54 @@ const TIER_META: Record<number, { label: string; note: string }> = {
   4: { label: "TIER 4 · MICROSTRUCTURE", note: "this hour, tradeable or not" },
 };
 
-function mergeReal(drivers: DriverDTO[], values: DriverValuesDTO | null): DriverDTO[] {
-  if (!values?.live) return drivers;
-  return drivers.map((d) => {
-    const real = values.live[d.id];
-    if (!real || typeof real.value !== "number") return d;
-    const def = DRIVERS.find((x) => x.id === d.id);
-    const overrideVal =
-      d.id === "D5" && typeof real.display_k === "number"
-        ? real.display_k
-        : real.value;
-    return {
-      ...d,
-      value: overrideVal,
-      stance: def ? stanceFor(def, overrideVal) : d.stance,
-      formatted: def ? def.format(overrideVal) : d.formatted,
-      delta: overrideVal - d.value,
-      live: true,
-      source: real.source,
-    };
-  });
+/**
+ * M5: the delta column shows the change in the LIVE series, not noise vs the
+ * simulated baseline. The previous implementation computed
+ * `overrideVal - d.value` (live minus SIMULATED), which produced a constant
+ * offset that looked like signal but was meaningless noise.
+ *
+ * Implementation: the merged-with-deltas array lives in component state. The
+ * `prevLiveRef` is only READ inside the effect (never during render) and
+ * holds the previous round's live values so the next round can compute
+ * `delta = newLive - prevLive` (or 0 on the very first reading). The ref is
+ * safe to mutate inside the effect — that's the canonical pattern.
+ */
+function useMergeReal(drivers: DriverDTO[], values: DriverValuesDTO | null) {
+  const [merged, setMerged] = useState<DriverDTO[]>(drivers);
+  const prevLiveRef = useRef<Record<string, number>>({});
+  useEffect(() => {
+    if (!values?.live) { setMerged(drivers); return; }
+    const prev = prevLiveRef.current;  // snapshot from last round
+    const next = drivers.map((d) => {
+      const real = values.live[d.id];
+      if (!real || typeof real.value !== "number") return d;
+      const def = DRIVERS.find((x) => x.id === d.id);
+      const overrideVal =
+        d.id === "D5" && typeof real.display_k === "number"
+          ? real.display_k
+          : real.value;
+      const prevVal = prev[d.id];
+      const delta = prevVal === undefined ? 0 : overrideVal - prevVal;
+      return {
+        ...d,
+        value: overrideVal,
+        stance: def ? stanceFor(def, overrideVal) : d.stance,
+        formatted: def ? def.format(overrideVal) : d.formatted,
+        delta,
+        live: true,
+        source: real.source,
+      };
+    });
+    // record this round's live values for the next delta computation
+    const nextPrev: Record<string, number> = {};
+    for (const [id, v] of Object.entries(values.live)) {
+      if (typeof v.value === "number") nextPrev[id] =
+        id === "D5" && typeof v.display_k === "number" ? v.display_k : v.value;
+    }
+    prevLiveRef.current = nextPrev;
+    setMerged(next);
+  }, [values, drivers]);
+  return merged;
 }
 
 export function DriverBoard({
@@ -52,7 +81,7 @@ export function DriverBoard({
   driverValues: DriverValuesDTO | null;
 }) {
   const tiers = [1, 2, 3, 4];
-  const merged = mergeReal(drivers, driverValues);
+  const merged = useMergeReal(drivers, driverValues);
   const liveCount = merged.filter((d) => d.live).length;
   return (
     <div className="gdc-panel overflow-hidden">

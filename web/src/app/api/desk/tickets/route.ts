@@ -38,7 +38,12 @@ export async function GET() {
             ? (outcome.payload as { resolution?: { reason?: string } }).resolution?.reason ?? null
             : null,
         rr: Math.round(rr * 100) / 100,
-        riskMoney: Math.round(t.lots * Math.abs(t.entry - t.stop) * 100 * 100) / 100,
+        // H2: use the risk_money persisted at gate time (ticket.risk_money),
+        // not a recompute with the ×100 magic number — the live constitution
+        // may have a non-100 point value per lot.
+        riskMoney: typeof t.risk_money === "number" && t.risk_money > 0
+          ? Math.round(t.risk_money * 100) / 100
+          : Math.round(t.lots * Math.abs(t.entry - t.stop) * 100 * 100) / 100,
       };
     });
     return NextResponse.json({ ok: true, tickets: rich });

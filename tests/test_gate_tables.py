@@ -15,7 +15,8 @@ NOW = MONDAY.replace(hour=8) + timedelta(hours=0)
 
 
 def gate(constitution, cand=None, acct=None, market=None, quote=None, now=None,
-         kill_switch=False, degraded=False, atr14=4.0):
+         kill_switch=False, degraded=False, atr14=4.0,
+         spread_at_candidate=None, engine_spec_hash=None):
     return evaluate_gate(
         constitution,
         cand or good_candidate(),
@@ -24,6 +25,8 @@ def gate(constitution, cand=None, acct=None, market=None, quote=None, now=None,
         quote or good_quote(),
         now or NOW,
         atr14=atr14, kill_switch=kill_switch, degraded=degraded,
+        spread_at_candidate=spread_at_candidate,
+        engine_spec_hash=engine_spec_hash,
     )
 
 
@@ -49,8 +52,14 @@ TABLE = [
      lambda kw: kw.update(market=good_market(bar_close_ts="2026-06-01T05:00:00Z")),
      "STALE_DATA"),
     ("SPREAD", lambda kw: kw.update(quote=good_quote(spread=0.55)), "SPREAD"),
-    ("SPREAD_WIDENED", lambda kw: kw.update(
-        quote=good_quote(spread=0.60)), "SPREAD"),  # >1.5x candidate-time 0.30 not hit; plain cap hit
+    # SPREAD_WIDENED: spread=0.40 is below the 0.45 absolute cap, but with
+    # spread_at_candidate=0.20, the widening (0.40 > 0.20 * 1.5 = 0.30) fires
+    # the renamed SPREAD_BLOWOUT reject (M3).
+    ("SPREAD_BLOWOUT",
+     lambda kw: kw.update(
+         cand=good_candidate(spread_at_candidate=0.20),
+         quote=good_quote(spread=0.40), spread_at_candidate=0.20),
+     "SPREAD_BLOWOUT"),
     ("BUDGET",
      lambda kw: kw.update(acct=good_account(daily_pnl=-150.0)), "BUDGET"),
     ("MAX_TRADES", lambda kw: kw.update(acct=good_account(trades_today=2)),
@@ -102,3 +111,34 @@ def test_max_lot_refused_not_clipped():
     huge = make_constitution(**{"broker.max_lot": 0.02})
     decision = gate(huge)
     assert decision.action == "REJECT" and decision.code == "SIZE_INVALID"
+
+
+# ---- H3: spec_hash guard -----------------------------------------------------
+
+def test_spec_hash_mismatch_rejects_with_source_mismatch():
+    """A candidate whose spec_hash differs from the engine's currently-loaded
+    setup version is rejected with SOURCE_MISMATCH (was a silent no-op before
+    the H3 fix — `cand.spec_hash != cand.spec_hash` always evaluated False)."""
+    cand = good_candidate(spec_hash="a" * 64)
+    decision = gate(make_constitution(), cand=cand,
+                   engine_spec_hash="b" * 64)
+    assert decision.action == "REJECT"
+    assert decision.code == "SOURCE_MISMATCH"
+    assert "spec_hash" in decision.reasons[0]
+
+
+def test_spec_hash_match_approves():
+    """When engine_spec_hash equals cand.spec_hash, the guard does NOT reject
+    — the candidate flows through to approval."""
+    cand = good_candidate(spec_hash="a" * 64)
+    decision = gate(make_constitution(), cand=cand,
+                   engine_spec_hash="a" * 64)
+    assert decision.action == "APPROVE"
+
+
+def test_spec_hash_guard_silent_when_engine_hash_unset():
+    """If the orchestrator doesn't pass engine_spec_hash (None), the guard
+    must not fire — backwards compatible with old callers."""
+    cand = good_candidate(spec_hash="a" * 64)
+    decision = gate(make_constitution(), cand=cand, engine_spec_hash=None)
+    assert decision.action == "APPROVE"

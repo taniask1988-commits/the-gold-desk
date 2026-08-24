@@ -66,13 +66,43 @@ class PaperAccount:
 
 
 class PaperAccountStore:
-    def __init__(self, root: str | Path, starting_balance: float, journal: Journal):
+    def __init__(self, root: str | Path, starting_balance: float, journal: Journal,
+                 point_value_per_lot: float = 100.0):
         self.root = Path(root)
         self.journal = journal
         self.path = self.root / "account.json"
+        # Point value per lot: USD value of a 1.00 price move per lot. Derived
+        # from the constitution's tick_value/tick_size (or contract_size when
+        # the tick fields are absent). Default 100.0 keeps demo data backwards-
+        # compatible. See sizing.point_value_from_constitution().
+        self.point_value_per_lot = float(point_value_per_lot)
         if self.path.exists():
-            data = json.loads(self.path.read_text())
-            self.account = PaperAccount(**data)
+            try:
+                data = json.loads(self.path.read_text())
+                # adopt whatever point value was persisted (so a reloaded
+                # account keeps using its original contract, not the caller's)
+                self.point_value_per_lot = float(data.pop("point_value_per_lot",
+                                                           self.point_value_per_lot))
+                self.account = PaperAccount(**data)
+            except (json.JSONDecodeError, TypeError, ValueError) as e:
+                # L6: corrupt account.json — start fresh and journal the
+                # recovery so the operator sees it instead of silent loss.
+                self.journal.emit(
+                    "AccountCorruptRecovered",
+                    {"path": str(self.path), "error": str(e),
+                     "recovered_to": "fresh account at starting_balance"},
+                    reason_code="ACCOUNT_CORRUPT_RECOVERED",
+                )
+                # rename the corrupt file aside so we don't loop on it
+                backup = self.path.with_suffix(".json.corrupt")
+                try:
+                    self.path.rename(backup)
+                except Exception:
+                    pass
+                self.account = PaperAccount(
+                    balance=starting_balance, equity=starting_balance,
+                    high_water=starting_balance,
+                )
         else:
             self.account = PaperAccount(
                 balance=starting_balance, equity=starting_balance,
@@ -91,7 +121,7 @@ class PaperAccountStore:
             worst = min(bar.low, pos.stop) if pos.side == "buy" else max(bar.high, pos.stop)
             best = max(bar.high, pos.target) if pos.side == "buy" else min(bar.low, pos.target)
             # conservative equity: use worst case for open positions
-            floating += direction * (worst - pos.entry) * pos.lots * 100.0
+            floating += direction * (worst - pos.entry) * pos.lots * self.point_value_per_lot
         acct.equity = acct.balance + floating
         acct.high_water = max(acct.high_water, acct.equity)
 
@@ -121,7 +151,7 @@ class PaperAccountStore:
                 exit_price, reason = bar.close, "time_stop"
             if exit_price is None:
                 continue
-            pnl = direction * (exit_price - pos.entry) * pos.lots * 100.0
+            pnl = direction * (exit_price - pos.entry) * pos.lots * self.point_value_per_lot
             pnl -= pos.commission_paid
             acct.balance += pnl
             acct.daily_pnl += pnl
@@ -148,7 +178,7 @@ class PaperAccountStore:
             if not pos.open:
                 continue
             direction = 1 if pos.side == "buy" else -1
-            pnl = direction * (bar.close - pos.entry) * pos.lots * 100.0
+            pnl = direction * (bar.close - pos.entry) * pos.lots * self.point_value_per_lot
             pnl -= pos.commission_paid
             self.account.balance += pnl
             self.account.daily_pnl += pnl
@@ -166,4 +196,6 @@ class PaperAccountStore:
         return closed
 
     def _persist(self) -> None:
-        self.path.write_text(json.dumps(asdict(self.account), sort_keys=True, indent=2))
+        data = asdict(self.account)
+        data["point_value_per_lot"] = self.point_value_per_lot
+        self.path.write_text(json.dumps(data, sort_keys=True, indent=2))

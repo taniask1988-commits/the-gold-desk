@@ -10,7 +10,7 @@
 #    GOLD_DESK_DIR    install path   (default: ~/gold-desk)
 #    GOLD_DESK_BIN    launcher dir   (default: ~/.local/bin)
 #    GOLD_DESK_SKIP_WEB=1   skip web deck dependency install
-#    GOLD_DESK_SKIP_TESTS=1 skip the 92-test self-verification
+#    GOLD_DESK_SKIP_TESTS=1 skip the test-suite self-verification
 # ============================================================================
 set -euo pipefail
 

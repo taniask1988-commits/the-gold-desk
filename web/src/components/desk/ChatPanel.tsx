@@ -50,10 +50,17 @@ export function ChatPanel({
       const next: Msg[] = [...messages, { role: "user", content: question }];
       setMessages(next);
       try {
+        // L13: strip the seeded greeting (the initial assistant message
+        // before the user sent anything) before POSTing the transcript so
+        // the model doesn't see it as a prior assistant turn. We keep
+        // everything from the first user message onwards — the chat
+        // history the user actually initiated.
+        const firstUser = next.findIndex((m) => m.role === "user");
+        const transcript = firstUser >= 0 ? next.slice(firstUser) : next;
         const r = await fetch("/api/desk/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messages: next }),
+          body: JSON.stringify({ messages: transcript }),
         }).then((x) => x.json());
         if (r.ok) {
           setMessages((m) => [

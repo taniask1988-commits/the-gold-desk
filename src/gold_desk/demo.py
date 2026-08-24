@@ -22,6 +22,7 @@ from .data.bars import SyntheticBarSource, SyntheticConfig
 from .events import Journal
 from .orchestrator import HumanSimulator, Orchestrator
 from .recover import recover
+from .sizing import point_value_from_constitution
 from .telegram_io import TelegramIO
 from .clock import utc_now
 
@@ -48,7 +49,8 @@ def run_demo(days: int = 30, seed: int = 7, data_root: Path | None = None,
     telegram = TelegramIO(journal, printer=(lambda s: None) if quiet else print)
     accounts = PaperAccountStore(data_root,
                                  float(constitution.firm.get("account_size") or 10000.0),
-                                 journal)
+                                 journal,
+                                 point_value_per_lot=point_value_from_constitution(constitution))
     human = HumanSimulator(enabled=True, rng_seed=seed + 1)
     orch = Orchestrator(constitution, source, journal, telegram, accounts,
                         human_sim=human, data_root=str(data_root))

@@ -3,7 +3,7 @@ per closed bar, journal-only silence, replay answers 'why this ticket'."""
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -33,26 +33,33 @@ def _run(tmp_path, days=6, human=True):
     orch = Orchestrator(constitution, source, journal, telegram, accounts,
                         human_sim=human_sim, data_root=str(tmp_path))
     bars = source.bars_up_to(datetime(2026, 6, 1, tzinfo=timezone.utc) +
-                             __import__("datetime").timedelta(days=days + 2),
+                             timedelta(days=days + 2),
                              10**9)
     codes = [orch.on_bar_close(b) for b in bars]
     return constitution, journal, accounts, orch, codes, tmp_path
 
 
 def test_every_bar_ends_with_exactly_one_code(tmp_path):
+    """M2: each bar ends with EXACTLY ONE terminal reason_code event. Pre-M2,
+    late-fill bars carried two (IGNORED_LATE_RESPONSE + TICKET_EXPIRED); now
+    the late-approval annotation lives in the payload only and the bar's only
+    journal reason_code is the terminal one emitted by close_bar_reason."""
     _, _, _, _, codes, _ = _run(tmp_path)
     assert codes and all(codes)
     events = Journal.read_events(tmp_path)
     bars = [e for e in events if e["kind"] == "BarReceived"]
     assert len(bars) == len(codes)
-    # each BarReceived has exactly one terminal event with a reason code
+    # each BarReceived has EXACTLY ONE terminal event with a reason code
     for i, code in enumerate(codes):
         dts = bars[i]["decision_ts"]
         terminal = [e for e in events
                     if e.get("decision_ts") == dts and e.get("reason_code")
                     and e["kind"] != "BarReceived"]
-        assert len(terminal) >= 1, f"bar {dts} has no terminal code"
-        assert terminal[-1]["reason_code"] == code
+        assert len(terminal) == 1, (
+            f"bar {dts} has {len(terminal)} terminal codes, expected 1: "
+            f"{[e['reason_code'] for e in terminal]}"
+        )
+        assert terminal[0]["reason_code"] == code
 
 
 def test_setup_produces_candidates_and_tickets(tmp_path):

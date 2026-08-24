@@ -35,7 +35,9 @@ class GateDecision:
 
 REJECT_ORDER = [
     "KILL_SWITCH", "DEGRADED", "CONSTITUTION_BLOCKED", "CONSTITUTION_MISMATCH",
-    "SESSION", "NEWS_UNAVAILABLE", "NEWS_BLACKOUT", "STALE_DATA", "SPREAD",
+    "SOURCE_MISMATCH",
+    "SESSION", "NEWS_UNAVAILABLE", "NEWS_BLACKOUT", "STALE_DATA",
+    "SPREAD", "SPREAD_BLOWOUT",
     "BUDGET", "MAX_TRADES", "CONSEC_LOSS", "OPEN_POSITION", "TICKET_EXPIRED",
     "STOP_TOO_TIGHT", "RR_FLOOR", "SIZE_INVALID",
 ]
@@ -52,6 +54,7 @@ def evaluate_gate(
     kill_switch: bool = False,
     degraded: bool = False,
     spread_at_candidate: float | None = None,
+    engine_spec_hash: str | None = None,
 ) -> GateDecision:
     gate = GateDecision(
         checked_at=iso(now),
@@ -73,8 +76,19 @@ def evaluate_gate(
     if not constitution.trade_capable:
         return reject("CONSTITUTION_BLOCKED",
                       f"{len(constitution.blocked_fields())} constitution fields BLOCKED")
-    if cand.spec_hash and cand.spec_hash != cand.spec_hash:
-        pass  # defensive no-op; spec hash equality vs engine enforced below
+    # H3: source spec-hash guard. Compares the candidate's spec_hash to the
+    # engine's current spec_hash (passed in by the orchestrator). The prior
+    # form `cand.spec_hash != cand.spec_hash` was a self-comparison and
+    # therefore never fired. A mismatch means the candidate was produced
+    # under a different setup version than the one currently loaded — reject.
+    if (engine_spec_hash and cand.spec_hash
+            and cand.spec_hash != engine_spec_hash):
+        return reject("SOURCE_MISMATCH",
+                      f"spec_hash {cand.spec_hash[:8]} != engine {engine_spec_hash[:8]}")
+
+    # fall back to the candidate's recorded spread if caller didn't pass one
+    if spread_at_candidate is None and getattr(cand, "spread_at_candidate", None):
+        spread_at_candidate = float(cand.spread_at_candidate)  # type: ignore[arg-type]
 
     # time: candidate must still be alive
     if parse_ts(cand.expiry_ts) < now:
@@ -105,7 +119,7 @@ def evaluate_gate(
         if quote.spread > max_spread:
             return reject("SPREAD", f"spread {quote.spread} > {max_spread}")
     if spread_at_candidate is not None and quote.spread > spread_at_candidate * 1.5:
-        return reject("SPREAD", "spread widened >1.5x since candidate")
+        return reject("SPREAD_BLOWOUT", "spread widened >1.5x since candidate")
 
     # budget / caps / position — same semantics as cheap filters
     daily_pct = constitution.limits.get("daily_loss_internal_pct")

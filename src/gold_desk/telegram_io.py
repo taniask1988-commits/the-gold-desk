@@ -55,18 +55,30 @@ class TelegramIO:
             return False, f"{type(e).__name__}: {e}"
 
     def send_message(self, text: str, decision_ts: str | None = None) -> str:
-        """Best-effort human message. Returns the channel used."""
+        """Best-effort human message. Returns the channel used.
+
+        L3: when decision_ts is provided (this message is tied to a bar — a
+        ticket send or a kill-switch ack for that bar), the event is
+        TicketSent (a real send to the human for that bar). When decision_ts
+        is None (an untethered broadcast, e.g. an EOD summary not tied to a
+        specific bar), the event is TicketSendAttempt (we tried, may not be
+        the canonical event for any bar). The prior code inverted this
+        conditional, logging TicketSendAttempt for the very things that were
+        confirmed sends.
+        """
         if self.token and self.chat_id:
             ok, detail = self._api_send(text)
             channel = "telegram" if ok else ("console" if self.console_fallback else "none")
             if not ok and self.console_fallback:
                 self.printer(text)
         else:
+            ok = False  # noqa: F841 — kept for readability of the no-token branch
+            detail = None  # noqa: F841
             channel = "console" if self.console_fallback else "none"
             if self.console_fallback:
                 self.printer(text)
         self.journal.emit(
-            "TicketSendAttempt" if decision_ts else "TicketSent",
+            "TicketSent" if decision_ts else "TicketSendAttempt",
             {"channel": channel, "preview": text[:80]},
             decision_ts=decision_ts,
         )
@@ -77,7 +89,15 @@ class TelegramIO:
         """§4.7/§10.3: persist-first ticket send; same id on every retry."""
         if ticket.ticket_id in self._sent_ids:
             return "already-sent"
-        ok, detail = (True, "console") , None
+        # L4: fix the broken tuple unpack. The prior form
+        #   `ok, detail = (True, "console"), None`
+        # unpacked as `ok=(True,"console"), detail=None` — `ok` was a tuple,
+        # which then muddles the `ok and self.token` check below (a non-empty
+        # tuple is truthy). The corrected form initialises both as proper
+        # scalars: ok=True, detail="console" — meaning "we have not yet tried
+        # the network, the assumed channel is console".
+        ok: bool = True
+        detail: str | None = "console"
         if self.token and self.chat_id:
             ok, detail = self._api_send(rendered)
         channel = "telegram" if (ok and self.token) else (

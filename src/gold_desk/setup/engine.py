@@ -41,6 +41,7 @@ class SetupCandidate:
     expiry_ts: str = ""
     invalidation: str = ""
     stop_distance: float = 0.0
+    spread_at_candidate: float = 0.0   # M3: recorded at candidate creation; used by the gate
     features_used: dict = field(default_factory=dict)
     data_hash: str = ""
     spec_hash: str = ""

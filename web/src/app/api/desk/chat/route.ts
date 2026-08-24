@@ -1,5 +1,5 @@
-import { NextRequest } from "next/server";
-import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
+import { NextRequest, NextResponse } from "next/server";
+import { spawn, execFileSync, type ChildProcessWithoutNullStreams } from "child_process";
 import { existsSync } from "fs";
 import path from "path";
 
@@ -21,13 +21,28 @@ function resolveHarness(): string {
   }
   return candidates[candidates.length - 1];
 }
-function resolvePython(): string {
+/**
+ * Python resolution — see README "GOLD_DESK_PYTHON" section.
+ * Order: env override → sandbox venv → repo-local venv → bare python3.
+ * Each candidate is probed for the `yaml` module before use.
+ */
+function resolvePython(harness: string): { py: string; err: string | null } {
   const candidates = [
     process.env.GOLD_DESK_PYTHON,
     "/home/z/.venv/bin/python3",
+    path.join(harness, ".venv", "bin", "python3"),
+    "python3",
   ].filter(Boolean) as string[];
-  for (const c of candidates) if (existsSync(c)) return c;
-  return "python3";
+  for (const c of candidates) {
+    if (c !== "python3" && !existsSync(c)) continue;
+    try {
+      execFileSync(c, ["-c", "import yaml"], { stdio: "ignore", timeout: 5_000 });
+      return { py: c, err: null };
+    } catch {
+      /* probe failed — try the next candidate */
+    }
+  }
+  return { py: "", err: "no python candidate has PyYAML installed (set GOLD_DESK_PYTHON or run: pip install pyyaml)" };
 }
 
 interface ChatMessage { role: "user" | "assistant"; content: string; }
@@ -64,6 +79,20 @@ export async function POST(req: NextRequest) {
       : undefined;
 
   const HARNESS = resolveHarness();
+  const { py: PYTHON, err: pyErr } = resolvePython(HARNESS);
+  if (pyErr) {
+    // emit a single NDJSON error event so the chat client sees a clean fail
+    // rather than a spawn-ENOENT that would surface as "stream ended".
+    const body = JSON.stringify({ type: "error", error: pyErr }) + "\n";
+    return new Response(body, {
+      status: 500,
+      headers: {
+        "Content-Type": "application/x-ndstream; charset=utf-8",
+        "Cache-Control": "no-store, no-transform",
+        "X-Accel-Buffering": "no",
+      },
+    });
+  }
   const args = [
     "-u",  // unbuffered stdout — critical for streaming tokens to the client
     "-m", "gold_desk.cli", "chat",
@@ -73,7 +102,7 @@ export async function POST(req: NextRequest) {
   if (model) args.push("--model", model);
 
   const proc: ChildProcessWithoutNullStreams = spawn(
-    resolvePython(),
+    PYTHON,
     args,
     {
       cwd: HARNESS,

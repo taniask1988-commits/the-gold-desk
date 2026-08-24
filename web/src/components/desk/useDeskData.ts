@@ -40,6 +40,15 @@ export interface OverviewDTO {
   } | null;
   days: string[];
   featuredDay: string | null;
+  // M4: real constitution summary from /api/desk/overview → cli constitution --json.
+  // null while loading or when the harness is unreachable.
+  constitution: {
+    blockedCount: number;
+    phase: number;
+    tradeCapable: boolean;
+    contentHash: string | null;
+    summaryLine: string;
+  } | null;
 }
 
 export interface BarDTO {

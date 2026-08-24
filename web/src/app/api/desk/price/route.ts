@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { execFile } from "child_process";
+import { execFile, execFileSync } from "child_process";
 import { existsSync } from "fs";
 import path from "path";
 
@@ -16,22 +16,42 @@ function resolveHarness(): string {
   }
   return candidates[candidates.length - 1];
 }
-function resolvePython(): string {
+
+/**
+ * Python resolution — see README "GOLD_DESK_PYTHON" section.
+ * Order: env override → sandbox venv → repo-local venv → bare python3.
+ * Each candidate is probed for the `yaml` module before use; a python that
+ * can't `import yaml` returns a clear error rather than a confusing downstream
+ * ModuleNotFoundError.
+ */
+function resolvePython(harness: string): { py: string; err: string | null } {
   const candidates = [
     process.env.GOLD_DESK_PYTHON,
     "/home/z/.venv/bin/python3",
+    path.join(harness, ".venv", "bin", "python3"),
+    "python3",
   ].filter(Boolean) as string[];
   for (const c of candidates) {
-    if (existsSync(c)) return c;
+    if (c !== "python3" && !existsSync(c)) continue;
+    try {
+      execFileSync(c, ["-c", "import yaml"], { stdio: "ignore", timeout: 5_000 });
+      return { py: c, err: null };
+    } catch {
+      /* probe failed — try the next candidate */
+    }
   }
-  return "python3";
+  return { py: "", err: "no python candidate has PyYAML installed (set GOLD_DESK_PYTHON or run: pip install pyyaml)" };
 }
 
 export async function GET() {
   const HARNESS = resolveHarness();
+  const { py: PYTHON, err: pyErr } = resolvePython(HARNESS);
+  if (pyErr) {
+    return NextResponse.json({ ok: false, error: pyErr }, { status: 500 });
+  }
   const result = await new Promise<Record<string, unknown>>((resolve) => {
     execFile(
-      resolvePython(),
+      PYTHON,
       ["-m", "gold_desk.cli", "price", "--json", "--data-root", path.join(HARNESS, "data")],
       { cwd: HARNESS, env: { ...process.env, PYTHONPATH: path.join(HARNESS, "src") }, timeout: 30_000, maxBuffer: 2 * 1024 * 1024 },
       (err, stdout) => {

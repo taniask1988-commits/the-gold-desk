@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { execFile } from "child_process";
+import { execFile, execFileSync } from "child_process";
 import { existsSync } from "fs";
 import path from "path";
 
@@ -23,28 +23,38 @@ function resolveHarness(): string {
 }
 const HARNESS = resolveHarness();
 
-// Python resolution: the harness needs PyYAML. Prefer an explicit override,
-// then a venv python (sandbox), then plain python3 from PATH.
-function resolvePython(): string {
+/**
+ * Python resolution — see README "GOLD_DESK_PYTHON" section.
+ * Order: env override → sandbox venv → repo-local venv → bare python3.
+ * Each candidate is probed for the `yaml` module before use.
+ */
+function resolvePython(harness: string): { py: string; err: string | null } {
   const candidates = [
     process.env.GOLD_DESK_PYTHON,
     "/home/z/.venv/bin/python3",
+    path.join(harness, ".venv", "bin", "python3"),
+    "python3",
   ].filter(Boolean) as string[];
   for (const c of candidates) {
+    if (c !== "python3" && !existsSync(c)) continue;
     try {
-      if (existsSync(c)) return c;
+      execFileSync(c, ["-c", "import yaml"], { stdio: "ignore", timeout: 5_000 });
+      return { py: c, err: null };
     } catch {
-      /* next */
+      /* probe failed — try the next candidate */
     }
   }
-  return "python3";
+  return { py: "", err: "no python candidate has PyYAML installed (set GOLD_DESK_PYTHON or run: pip install pyyaml)" };
 }
-const PYTHON = resolvePython();
+const { py: PYTHON, err: PY_ERR } = resolvePython(HARNESS);
 
 const SCENARIOS = new Set(["clean", "news", "stale"]);
 const MODEL_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
 
 export async function POST(req: NextRequest) {
+  if (PY_ERR) {
+    return NextResponse.json({ ok: false, error: PY_ERR }, { status: 500 });
+  }
   try {
     const body = (await req.json().catch(() => ({}))) as {
       scenario?: string;

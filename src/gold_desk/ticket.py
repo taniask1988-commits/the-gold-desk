@@ -37,6 +37,7 @@ class Ticket:
     target: float = 0.0
     lots: float = 0.0
     risk_pct: float = 0.0
+    risk_money: float = 0.0       # cached from the gate; readers must NOT recompute
     time_stop_ts: str = ""
     invalidation: str = ""
     setup_id: str = ""
@@ -72,6 +73,7 @@ def make_ticket(
         target=cand.target,
         lots=gate.lots,
         risk_pct=gate.risk_pct,
+        risk_money=gate.risk_money,
         time_stop_ts=cand.time_stop_ts,
         invalidation=cand.invalidation,
         setup_id=cand.setup_id,

@@ -1,6 +1,7 @@
 """CLI entrypoints.
 
     python -m gold_desk.cli validate                 # constitution report
+    python -m gold_desk.cli constitution [--json]     # constitution summary
     python -m gold_desk.cli demo [--days 30] [--seed 7] [--data-root DIR]
     python -m gold_desk.cli replay   --date YYYY-MM-DD [--data-root DIR]
     python -m gold_desk.cli eod      --date YYYY-MM-DD [--data-root DIR]
@@ -28,6 +29,36 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 def cmd_validate(args) -> int:
     constitution = load_constitution(REPO_ROOT / "trading_constitution.yaml")
+    print(validation_report(constitution))
+    return 0 if not constitution.problems else 1
+
+
+def cmd_constitution(args) -> int:
+    """Emit a machine-readable constitution summary.
+
+    The web deck's /api/desk/overview route shells out here (with --json) to
+    surface the real BLOCKED count, phase, and trade_capable flag to the
+    ConstitutionPanel — instead of the hardcoded "30 BLOCKED, phase=1" that
+    was there before.
+    """
+    constitution = load_constitution(REPO_ROOT / "trading_constitution.yaml")
+    if args.json:
+        blocked = constitution.blocked_fields()
+        out = {
+            "ok": True,
+            "blocked_count": len(blocked),
+            "blocked_fields": blocked,
+            "phase": constitution.phase,
+            "trade_capable": constitution.trade_capable,
+            "demo": constitution.demo,
+            "instrument": constitution.instrument,
+            "content_hash": constitution.content_hash,
+            "file_hash": constitution.file_hash,
+            "summary_line": constitution.summary_line(),
+            "problems": list(constitution.problems),
+        }
+        print(json.dumps(out, sort_keys=True))
+        return 0
     print(validation_report(constitution))
     return 0 if not constitution.problems else 1
 
@@ -233,6 +264,12 @@ def main(argv=None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("validate").set_defaults(func=cmd_validate)
+
+    p_const = sub.add_parser("constitution",
+                             help="constitution summary (BLOCKED count, phase, trade_capable)")
+    p_const.add_argument("--json", action="store_true",
+                        help="machine-readable result (used by the web deck)")
+    p_const.set_defaults(func=cmd_constitution)
 
     p_demo = sub.add_parser("demo", help="run the synthetic end-to-end demo")
     p_demo.add_argument("--days", type=int, default=30)

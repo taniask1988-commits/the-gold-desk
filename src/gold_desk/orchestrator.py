@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from .account import PaperAccountStore, PaperPosition
 from .clock import iso, parse_ts, session_of
@@ -177,6 +177,12 @@ class Orchestrator:
         if cand is None:
             return terminal("NO_SETUP", "NoSetup")
 
+        # M3: record the spread at candidate-creation time so the risk gate
+        # can detect widening between candidate and gate (passed either via
+        # the cand field or as a kwarg below; the gate falls back to the
+        # candidate's recorded value when the kwarg is absent).
+        cand.spread_at_candidate = quote.spread
+
         self.journal.emit("SetupCandidate", cand.to_dict(),
                           decision_ts=decision_iso,
                           setup_spec_hash=cand.spec_hash, data_hash=cand.data_hash)
@@ -223,6 +229,8 @@ class Orchestrator:
         gate = evaluate_gate(
             self.c, cand, acct, market, quote, decision_ts,
             atr14=atr14, kill_switch=self.kill_switch, degraded=self.degraded,
+            spread_at_candidate=cand.spread_at_candidate,
+            engine_spec_hash=self.engine.spec_hash,
         )
         self.journal.emit("GateDecision", gate.to_dict(), decision_ts=decision_iso,
                           reason_code=None if gate.action == "APPROVE" else "GATE_REJECT")
@@ -281,7 +289,7 @@ class Orchestrator:
         else:
             response = "SKIP"
         delay = (self.c.ticket_expiry_minutes or 10) + 5 if late else 2
-        reply_ts = decision_ts + __import__("datetime").timedelta(minutes=delay)
+        reply_ts = decision_ts + timedelta(minutes=delay)
         self.handle_human_response(ticket, response, reply_ts)
 
     def handle_human_response(self, ticket, response: str, now: datetime) -> str:
@@ -289,12 +297,19 @@ class Orchestrator:
         new_status, price = apply_human_response(ticket, response, now)
         late_approval = (response.strip().upper().startswith("FILL")
                          and new_status == "TICKET_EXPIRED")
+        # M2: HumanResponse events carry NO terminal reason_code — they're
+        # annotations on a bar that already has its terminal code via the
+        # TicketExpired / Fill / Skip event below. Previously this emitted
+        # reason_code="IGNORED_LATE_RESPONSE" on the late-approval path,
+        # which the histogram counted as a second terminal code for that bar.
+        # Now IGNORED_LATE_RESPONSE lives only in the payload, and the bar
+        # ends with exactly one terminal reason code (TICKET_EXPIRED).
         self.journal.emit("HumanResponse", {
             "ticket_id": ticket.ticket_id, "response": response,
             "resulting_status": new_status,
             "accepted": new_status != prior_status and not late_approval,
-        }, decision_ts=ticket.decision_ts,
-            reason_code="IGNORED_LATE_RESPONSE" if late_approval else None)
+            "ignored_late_response": late_approval,
+        }, decision_ts=ticket.decision_ts, reason_code=None)
         if late_approval:
             ticket.status = new_status
             self.store.persist(ticket)
@@ -309,8 +324,7 @@ class Orchestrator:
             self.journal.emit("HumanResponse", {
                 "ticket_id": ticket.ticket_id, "ignored": True,
                 "why": "late, duplicate, or unparseable response",
-            }, decision_ts=ticket.decision_ts,
-                reason_code="IGNORED_LATE_RESPONSE")
+            }, decision_ts=ticket.decision_ts, reason_code=None)
             return prior_status
         ticket.status = new_status
         self.store.persist(ticket)
@@ -355,3 +369,16 @@ class Orchestrator:
     def set_kill_switch(self, active: bool, why: str = "") -> None:
         self.kill_switch = active
         self.journal.emit("KillSwitch", {"active": active, "why": why})
+        # L3: surface the kill-switch change to the human via the broadcast
+        # path (untethered from a specific bar — decision_ts=None). This is
+        # the first real caller of TelegramIO.send_message; without it the
+        # method was dead code with an untested event-kind branch.
+        try:
+            self.telegram.send_message(
+                f"{'KILL SWITCH ENGAGED' if active else 'kill switch released'}"
+                f"{' — ' + why if why else ''}",
+                decision_ts=None,
+            )
+        except Exception:
+            # broadcast must never break the kill-switch state change
+            pass

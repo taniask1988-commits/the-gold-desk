@@ -102,7 +102,11 @@ export function CommandDeck() {
           <ZenPanel />
 
           {/* Row 4: constitution */}
-          <ConstitutionPanel hash={overview?.constitutionHash ?? null} blockedCount={30} phase={1} />
+          <ConstitutionPanel
+            hash={overview?.constitutionHash ?? null}
+            blockedCount={overview?.constitution?.blockedCount ?? null}
+            phase={overview?.constitution?.phase ?? null}
+          />
         </main>
 
         <footer className="mt-auto">

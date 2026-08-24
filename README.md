@@ -23,7 +23,7 @@ money is a property of a setup — after it survives the exam.
 | Phase | What | State |
 |---|---|---|
 | 0 | Constitution + simulator contract | ✅ built, numbers **BLOCKED** (yours to commit) |
-| 1 | Deterministic desk: pipeline, one GUESS setup, gate, journal, Telegram tickets, recovery, replay, EOD | ✅ built, 74 tests green |
+| 1 | Deterministic desk: pipeline, one GUESS setup, gate, journal, Telegram tickets, recovery, replay, EOD | ✅ built, 121 tests green |
 | 1.5 | Frozen simulator battery on the setup | 🔶 skeleton (`sim/`) — refuses verdicts while numbers are BLOCKED |
 | 2 | Single-shot context veto (LLM) | 🔒 stub only (raises); unlocks at `identity.phase: 2` |
 | 3+ | Not in this plan | — |
@@ -51,10 +51,10 @@ gold-desk help     # every command
 ```
 
 The installer clones to `~/gold-desk`, creates an isolated venv, installs
-dependencies, **runs the 92-test matrix as self-verification**, generates the
+dependencies, **runs the 121-test matrix as self-verification**, generates the
 90-day demo journal, installs web-deck dependencies, and puts the global
 `gold-desk` command on your PATH. No accounts, no keys, completely free.
-(Manual alternative: `git clone <repo> && cd the-gold-desk && bash install.sh`)
+(Manual alternative: `git clone <repo> && cd ~/gold-desk && bash install.sh`)
 
 ## Repository layout
 
@@ -64,7 +64,7 @@ the-gold-desk/
 ├── src/gold_desk/              # the deterministic desk (Python)
 ├── sim/  prompts/  config/     # Doc 1.5 exam, Doc 4 prompts, templates
 ├── tui/desk_tui.py             # terminal UI (pure stdlib curses)
-├── tests/                      # 92 tests = the §16 matrix
+├── tests/                      # 121 tests = the §16 matrix + audit-fix suite
 ├── web/                        # GOLD DESK COMMAND — frosted-glass web deck
 │   └── (Next.js 16 + TypeScript + Tailwind 4)
 └── docs/                       # market-driver research + verification screenshots
@@ -89,7 +89,7 @@ bun run dev          # http://localhost:3000
 | `gold-desk` | web command deck (auto port, opens browser) |
 | `gold-desk tui` | terminal UI |
 | `gold-desk demo [days] [seed]` | regenerate the demo journal |
-| `gold-desk test` | run the 92-test matrix |
+| `gold-desk test` | run the test matrix (121 tests) |
 | `gold-desk zen` | sync free OpenCode Zen models |
 | `gold-desk doctor` | installation health check |
 | `gold-desk update` | pull latest + refresh launcher |
@@ -143,6 +143,33 @@ If the error persists after `git pull`: `rm -f ~/src/middleware.ts
 Env overrides: `GOLD_DESK_PORT` (web port, default 3000), `GOLD_DESK_DATA` (journal path), `GOLD_DESK_ROOT`
 (harness root for the veto bench), `GOLD_DESK_PYTHON` (python with PyYAML).
 
+#### `GOLD_DESK_PYTHON` — which Python the web deck shells out to
+
+The Next.js API routes (`/api/desk/{price,news,driver-values,chat,zen/veto-dry}`)
+shell out to a Python interpreter that must have **PyYAML** installed (the
+harness reads `trading_constitution.yaml` on every invocation). The route's
+`resolvePython()` probes candidates in this order:
+
+1. `process.env.GOLD_DESK_PYTHON` — explicit override (highest priority)
+2. `/home/z/.venv/bin/python3` — sandbox / installer venv
+3. `<HARNESS>/.venv/bin/python3` — repo-local venv (created by `install.sh`)
+4. `python3` — bare PATH fallback
+
+Each candidate is probed with `python -c 'import yaml'` before use. If no
+candidate has PyYAML, the route returns HTTP 500 with a clear error
+(`no python candidate has PyYAML installed …`) instead of crashing inside
+the spawned Python with a confusing `ModuleNotFoundError`.
+
+If your `python3` is system Python without PyYAML:
+
+```bash
+# either install PyYAML into the system python
+python3 -m pip install pyyaml
+
+# or point the deck at a python that has it
+export GOLD_DESK_PYTHON=/usr/bin/python3.11    # or wherever your venv lives
+```
+
 ## Quickstart
 
 ```bash
@@ -153,7 +180,7 @@ python -m gold_desk.cli validate          # what's BLOCKED and what to paste
 python -m gold_desk.cli demo --days 30    # synthetic end-to-end run
 python -m gold_desk.cli replay --date 2026-06-10
 python -m gold_desk.cli eod --date 2026-06-10
-python -m pytest                           # 74 tests, <1s
+python -m pytest                           # 121 tests, <1s
 ```
 
 (If you didn't install the package, prefix commands with
@@ -208,7 +235,7 @@ src/gold_desk/
   replay.py eod.py demo.py cli.py
 sim/contract.md runner.py report.py   # Doc 1.5 — the exam, offline, INCOMPLETE
 prompts/                       # empty until Phase 2 (law)
-tests/                         # 74 tests = §16 matrix + loop invariants
+tests/                         # 121 tests = §16 matrix + loop invariants + audit-fix suite
 data/                          # runtime journal (gitignored)
 ```
 
