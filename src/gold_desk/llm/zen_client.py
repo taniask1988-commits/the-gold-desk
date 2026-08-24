@@ -32,7 +32,17 @@ class LLMInvalidJSON(RuntimeError):
 
 
 def base_url() -> str:
-    return os.environ.get("OPENCODE_ZEN_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
+    # Defense in depth: if OPENCODE_ZEN_BASE_URL is set but empty/whitespace,
+    # fall back to the default instead of producing a relative URL like
+    # "/chat/completions" that urllib rejects with
+    #   ValueError: unknown url type: '/chat/completions'
+    raw = os.environ.get("OPENCODE_ZEN_BASE_URL", "").strip()
+    if not raw:
+        return DEFAULT_BASE_URL.rstrip("/")
+    if not (raw.startswith("http://") or raw.startswith("https://")):
+        # treat schemeless values as host-only (legacy config compatibility)
+        raw = f"https://{raw}"
+    return raw.rstrip("/")
 
 
 def api_key() -> str:

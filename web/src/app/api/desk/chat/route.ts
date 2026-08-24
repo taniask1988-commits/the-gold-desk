@@ -77,13 +77,33 @@ export async function POST(req: NextRequest) {
     args,
     {
       cwd: HARNESS,
-      env: {
-        ...process.env,
-        PYTHONPATH: path.join(HARNESS, "src"),
-        PYTHONUNBUFFERED: "1",
-        // keep flakey free-tier endpoints honest
-        OPENCODE_ZEN_BASE_URL: process.env.OPENCODE_ZEN_BASE_URL ?? "",
-      },
+      env: (() => {
+        const env: NodeJS.ProcessEnv = {
+          ...process.env,
+          PYTHONPATH: path.join(HARNESS, "src"),
+          PYTHONUNBUFFERED: "1",
+        };
+        // Only forward OPENCODE_ZEN_BASE_URL if it is actually set to a
+        // non-empty value. If we forwarded an empty string here, Python's
+        // os.environ.get("OPENCODE_ZEN_BASE_URL", DEFAULT) would return ""
+        // (the key exists, just empty), and the URL would become
+        // "/chat/completions" — triggering
+        //   ValueError: unknown url type: '/chat/completions'
+        // from urllib. So: never override the Python default with "".
+        const zenUrl = process.env.OPENCODE_ZEN_BASE_URL;
+        if (zenUrl && zenUrl.trim()) {
+          env.OPENCODE_ZEN_BASE_URL = zenUrl;
+        } else {
+          delete env.OPENCODE_ZEN_BASE_URL;
+        }
+        const zenKey = process.env.OPENCODE_ZEN_API_KEY;
+        if (zenKey && zenKey.trim()) {
+          env.OPENCODE_ZEN_API_KEY = zenKey;
+        } else {
+          delete env.OPENCODE_ZEN_API_KEY;
+        }
+        return env;
+      })(),
       stdio: ["pipe", "pipe", "pipe"],
     },
   );
