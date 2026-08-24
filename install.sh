@@ -72,21 +72,23 @@ VENV_PY="$VENV_DIR/bin/python"
 VENV_LOG="$INSTALL_DIR/.venv-setup.log"
 
 venv_ready() { [ -x "$VENV_PY" ] && "$VENV_PY" -c "import yaml, pytest" >/dev/null 2>&1; }
+# agent extras (web search) — best-effort, not install-blocking
+agent_deps_ready() { "$VENV_PY" -c "import ddgs" >/dev/null 2>&1; }
 
 if [ ! -x "$VENV_PY" ] || ! venv_ready; then
   # A. standard venv (macOS, most Linux)
   rm -rf "$VENV_DIR"
   if "$PY" -m venv "$VENV_DIR" >"$VENV_LOG" 2>&1; then
-    "$VENV_PY" -m pip install --quiet PyYAML pytest >>"$VENV_LOG" 2>&1 || true
+    "$VENV_PY" -m pip install --quiet PyYAML pytest ddgs >>"$VENV_LOG" 2>&1 || true
   fi
   # B. venv --without-pip + system pip targeting it (Debian without python3-venv)
   if ! venv_ready && [ -x "$VENV_PY" ] && "$PY" -m pip --version >/dev/null 2>&1; then
-    "$PY" -m pip --python "$VENV_PY" install --quiet PyYAML pytest >>"$VENV_LOG" 2>&1 || true
+    "$PY" -m pip --python "$VENV_PY" install --quiet PyYAML pytest ddgs >>"$VENV_LOG" 2>&1 || true
   fi
   if ! venv_ready && "$PY" -m pip --version >/dev/null 2>&1; then
     rm -rf "$VENV_DIR"
     if "$PY" -m venv --without-pip "$VENV_DIR" >>"$VENV_LOG" 2>&1; then
-      "$PY" -m pip --python "$VENV_PY" install --quiet PyYAML pytest >>"$VENV_LOG" 2>&1 || true
+      "$PY" -m pip --python "$VENV_PY" install --quiet PyYAML pytest ddgs >>"$VENV_LOG" 2>&1 || true
     fi
   fi
   # C. uv (fast, no ensurepip needed)
@@ -98,7 +100,7 @@ if [ ! -x "$VENV_PY" ] || ! venv_ready; then
   fi
   # D. last resort: bootstrap pip inside the venv via ensurepip alternatives
   if ! venv_ready && [ -x "$VENV_PY" ]; then
-    "$VENV_PY" -m pip install --quiet PyYAML pytest >>"$VENV_LOG" 2>&1 || true
+    "$VENV_PY" -m pip install --quiet PyYAML pytest ddgs >>"$VENV_LOG" 2>&1 || true
   fi
   if ! venv_ready; then
     [ -f "$VENV_LOG" ] && tail -6 "$VENV_LOG" >&2

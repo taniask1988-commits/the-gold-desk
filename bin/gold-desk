@@ -4,6 +4,9 @@
 #
 #  gold-desk              launch the web command deck (auto port)
 #  gold-desk tui          launch the terminal UI
+#  gold-desk ask "…"      one-question research agent (desk + web tools)
+#  gold-desk research ASSET   cited deep-research report (--depth N)
+#  gold-desk watch --once     L2 watchlist pass (opt-in autonomy)
 #  gold-desk demo         regenerate the demo journal
 #  gold-desk test         run the frozen test matrix
 #  gold-desk zen          sync the free OpenCode Zen model catalog
@@ -192,8 +195,11 @@ $(printf "${GOLD}${BOLD}")  gold-desk$(printf "${OFF}") — the silent XAUUSD H1
   $(printf "${GOLD}")gold-desk$(printf "${OFF}")                    launch the web command deck
   $(printf "${GOLD}")gold-desk tui$(printf "${OFF}")                 launch the terminal UI
   $(printf "${GOLD}")gold-desk demo$(printf "${OFF}") [days] [seed]  regenerate the demo journal
-  $(printf "${GOLD}")gold-desk test$(printf "${OFF}")                run the test matrix (121 tests)
+  $(printf "${GOLD}")gold-desk test$(printf "${OFF}")                run the test matrix (150 tests)
   $(printf "${GOLD}")gold-desk chat$(printf "${OFF}")              talk to The Desk expert (free models)
+  $(printf "${GOLD}")gold-desk ask "…"$(printf "${OFF}")            research agent — desk + web tools, cited
+  $(printf "${GOLD}")gold-desk research ASSET$(printf "${OFF}")     cited deep-research report (--depth N)
+  $(printf "${GOLD}")gold-desk watch --once$(printf "${OFF}")       L2 watchlist pass (opt-in autonomy)
   $(printf "${GOLD}")gold-desk price$(printf "${OFF}")             live gold spot (free feeds)
   $(printf "${GOLD}")gold-desk news$(printf "${OFF}")              live gold headlines (free RSS)
   $(printf "${GOLD}")gold-desk zen$(printf "${OFF}")                 sync free OpenCode Zen models

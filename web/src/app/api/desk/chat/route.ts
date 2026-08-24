@@ -48,7 +48,7 @@ function resolvePython(harness: string): { py: string; err: string | null } {
 interface ChatMessage { role: "user" | "assistant"; content: string; }
 
 export async function POST(req: NextRequest) {
-  let body: { messages?: ChatMessage[]; model?: string };
+  let body: { messages?: ChatMessage[]; model?: string; agent?: boolean };
   try {
     body = (await req.json().catch(() => ({}))) as typeof body;
   } catch {
@@ -100,6 +100,8 @@ export async function POST(req: NextRequest) {
     "--data-root", path.join(HARNESS, "data"),
   ];
   if (model) args.push("--model", model);
+  // agent mode: the research agent (desk + web tools) instead of plain chat
+  if (body.agent === true) args.push("--agent", "--max-steps", "10");
 
   const proc: ChildProcessWithoutNullStreams = spawn(
     PYTHON,

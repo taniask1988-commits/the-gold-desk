@@ -338,4 +338,8 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Gold Desk Command TUI")
     ap.add_argument("--data-root", default=str(DEFAULT_DATA))
     args = ap.parse_args()
-    curses.wrapper(main, Path(args.data_root))
+    try:
+        curses.wrapper(main, Path(args.data_root))
+    except KeyboardInterrupt:
+        # Ctrl+C at the getch() prompt — clean exit, no traceback
+        print("\n  desk closed.")

@@ -198,6 +198,20 @@ def cmd_chat(args) -> int:
         else:
             messages = [{"role": "user", "content": args.message or ""}]
 
+        if args.stream and getattr(args, "agent", False):
+            # AGENT MODE: the pi-loop with desk+web tools, streamed as the
+            # same NDJSON protocol plus tool / tool_result events.
+            # events: start | tool | tool_result | reasoning | content | done | error
+            from .agent.chat_stream import agent_chat_stream
+            out = _sys.stdout
+            for evt in agent_chat_stream(messages,
+                                         data_root=args.data_root,
+                                         model=args.model,
+                                         max_steps=getattr(args, "max_steps", 10)):
+                out.write(json.dumps(evt, sort_keys=True) + "\n")
+                out.flush()
+            return 0
+
         if args.stream:
             # NDJSON streaming mode: one JSON event per line, flushed immediately.
             # events: start | reasoning | content | done | error
@@ -458,6 +472,12 @@ def main(argv=None) -> int:
     p_chat.add_argument("--stream", action="store_true",
                         help="with --json: stream NDJSON events "
                              "(start|reasoning|content|done|error)")
+    p_chat.add_argument("--agent", action="store_true",
+                        help="with --json --stream: run the research agent "
+                             "(desk + web tools, cited answers) instead of "
+                             "plain expert chat")
+    p_chat.add_argument("--max-steps", type=int, default=10, dest="max_steps",
+                        help="agent mode: step cap (default 10)")
     p_chat.add_argument("--model", default=None)
     p_chat.add_argument("--data-root", default=str(REPO_ROOT / "data"))
     p_chat.set_defaults(func=cmd_chat)

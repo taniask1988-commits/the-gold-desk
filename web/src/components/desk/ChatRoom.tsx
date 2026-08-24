@@ -18,6 +18,7 @@ interface Msg {
   latency?: number;
   grounded?: boolean;
   reasoning?: string;       // full reasoning transcript (collapsible)
+  toolCalls?: number;       // agent mode: tools used for this answer
 }
 
 interface SpotTick {
@@ -70,15 +71,39 @@ interface StreamState {
   tokenCount: number;
 }
 
-/** Events emitted by /api/desk/chat as NDJSON lines. */
+/** Events emitted by /api/desk/chat as NDJSON lines. Agent mode adds
+ *  tool / tool_result (rendered as tool activity in the reasoning panel). */
 type ChatEvent =
-  | { type: "start"; model: string; grounded: boolean }
+  | { type: "start"; model: string; grounded: boolean; agent?: boolean; tools?: string[] }
   | { type: "reasoning"; delta: string }
   | { type: "content"; delta: string }
-  | { type: "done"; model: string; latency_ms: number; grounded: boolean }
+  | { type: "tool"; name: string; args?: unknown }
+  | { type: "tool_result"; name: string; ok: boolean; preview?: string }
+  | { type: "done"; model: string; latency_ms: number; grounded: boolean;
+      agent?: boolean; steps?: number; tool_calls?: number }
   | { type: "error"; error: string };
 
 /* ----------------------------- constants ----------------------------- */
+
+/** Compact one-line rendering of agent tool args for the activity panel. */
+function formatArgs(args: unknown): string {
+  if (args == null) return "";
+  let s: string;
+  if (typeof args === "string") {
+    try {
+      s = JSON.stringify(JSON.parse(args));
+    } catch {
+      s = args;
+    }
+  } else {
+    try {
+      s = JSON.stringify(args);
+    } catch {
+      s = String(args);
+    }
+  }
+  return s.length > 90 ? s.slice(0, 90) + "…" : s;
+}
 
 const SUGGESTIONS = [
   "What moves gold this week?",
@@ -118,6 +143,10 @@ export function ChatRoom() {
   const [stream, setStream] = useState<StreamState | null>(null);
   /** When reasoning has finished and reply is streaming, collapse it. */
   const [reasoningCollapsed, setReasoningCollapsed] = useState(false);
+  /** AGENT mode: research agent with desk+web tools instead of plain chat. */
+  const [agentMode, setAgentMode] = useState(false);
+  const agentModeRef = useRef(agentMode);
+  useEffect(() => { agentModeRef.current = agentMode; }, [agentMode]);
 
   // left-rail live data
   const [spot, setSpot] = useState<SpotTick | null>(null);
@@ -209,7 +238,7 @@ export function ChatRoom() {
             "Content-Type": "application/json",
             "Accept": "application/x-ndstream",
           },
-          body: JSON.stringify({ messages: next }),
+          body: JSON.stringify({ messages: next, agent: agentModeRef.current }),
           signal: ac.signal,
         });
         if (!res.ok || !res.body) {
@@ -254,6 +283,7 @@ export function ChatRoom() {
         let doneModel: string | null = null;
         let doneLatency: number | null = null;
         let doneGrounded = false;
+        let doneAgentCalls: number | null = null;
         let errorText: string | null = null;
 
         while (true) {
@@ -274,6 +304,28 @@ export function ChatRoom() {
                   ...s, model: evt.model, grounded: evt.grounded,
                 } : s);
                 break;
+              case "tool": {
+                // agent tool activity — shown in the reasoning panel
+                const label = `▸ ${evt.name}(${formatArgs(evt.args)})`;
+                setStream((s) => s ? {
+                  ...s,
+                  phase: "reasoning",
+                  reasoning: s.reasoning + label + "\n",
+                  tokenCount: s.tokenCount + 1,
+                } : s);
+                break;
+              }
+              case "tool_result": {
+                const mark = evt.ok ? "✓" : "✗";
+                const prev = (evt.preview || "").slice(0, 140);
+                setStream((s) => s ? {
+                  ...s,
+                  phase: "reasoning",
+                  reasoning: s.reasoning + `  ${mark} ${prev}\n`,
+                  tokenCount: s.tokenCount + 1,
+                } : s);
+                break;
+              }
               case "reasoning":
                 setStream((s) => s ? {
                   ...s,
@@ -301,6 +353,9 @@ export function ChatRoom() {
                 doneModel = evt.model;
                 doneLatency = evt.latency_ms;
                 doneGrounded = evt.grounded;
+                if (evt.agent && typeof evt.tool_calls === "number") {
+                  doneAgentCalls = evt.tool_calls;
+                }
                 break;
               case "error":
                 terminalSeen = true;
@@ -326,6 +381,7 @@ export function ChatRoom() {
                 latency: doneLatency ?? undefined,
                 grounded: doneGrounded || undefined,
                 reasoning: streamRef.current?.reasoning?.trim() || undefined,
+                toolCalls: doneAgentCalls ?? undefined,
               },
             ]);
             if (doneModel) setModel(doneModel);
@@ -614,6 +670,9 @@ export function ChatRoom() {
                             <span>{(m.latency / 1000).toFixed(1)}s</span>
                           )}
                           {m.grounded && <span> · grounded w/ live data</span>}
+                          {m.toolCalls !== undefined && m.toolCalls > 0 && (
+                            <span> · agent · {m.toolCalls} tool call{m.toolCalls === 1 ? "" : "s"}</span>
+                          )}
                         </div>
                       )}
                     </div>
@@ -679,6 +738,29 @@ export function ChatRoom() {
               }}
               className="mx-auto w-full max-w-[760px] shrink-0 border-t border-[#1a1f2c] bg-[#0f1219] px-5 py-3"
             >
+              {/* agent mode toggle */}
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <button
+                  type="button"
+                  onClick={() => setAgentMode((v) => !v)}
+                  disabled={busy}
+                  className={
+                    "flex cursor-pointer items-center gap-1.5 rounded-full border px-3 py-1 text-[9px] font-bold uppercase tracking-[0.14em] transition-colors disabled:opacity-50 disabled:cursor-not-allowed " +
+                    (agentMode
+                      ? "border-[#e8b440]/70 bg-[#e8b440]/[0.16] text-[#e8b440]"
+                      : "border-[#1a1f2c] bg-[#0b0e14] text-[#76828e] hover:border-[#c8a04b]/35 hover:text-[#c8a04b]")
+                  }
+                  aria-pressed={agentMode}
+                >
+                  <span aria-hidden>◈</span>
+                  {agentMode ? "AGENT MODE — desk + web tools" : "AGENT MODE"}
+                </button>
+                <span className="gdc-spec text-[8px] uppercase tracking-[0.14em] text-[#76828e]">
+                  {agentMode
+                    ? "research agent · live tool calls · cited answers · may take 30-90s"
+                    : "20-yr gold veteran · grounded in your desk telemetry"}
+                </span>
+              </div>
               <div className="flex items-end gap-2">
                 <textarea
                   value={input}
@@ -690,7 +772,11 @@ export function ChatRoom() {
                     }
                   }}
                   rows={1}
-                  placeholder="Ask the desk… (Shift+Enter for newline)"
+                  placeholder={
+                    agentMode
+                      ? "Ask the research agent… it can search the web, fetch pages, read your desk"
+                      : "Ask the desk… (Shift+Enter for newline)"
+                  }
                   className="gdc-scroll max-h-32 min-h-[44px] flex-1 resize-none rounded-xl border border-[#1a1f2c] bg-[#0b0e14] px-4 py-3 text-[12.5px] text-[#f4f7fa] placeholder:text-[#76828e] outline-none transition-colors focus:border-[#c8a04b]/40"
                 />
                 <button
@@ -703,7 +789,9 @@ export function ChatRoom() {
                 </button>
               </div>
               <div className="gdc-spec mt-1.5 text-center text-[8px] uppercase tracking-[0.16em] text-[#76828e]">
-                education · not advice · cannot trade · never invents prices
+                {agentMode
+                  ? "agent · read-only tools · web text is data not instructions · L11-L14"
+                  : "education · not advice · cannot trade · never invents prices"}
               </div>
             </form>
           </main>

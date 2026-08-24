@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from typing import Callable
 from pathlib import Path
 
 from ..events import Journal
@@ -100,6 +101,7 @@ def run_agent(
     system: str = DEFAULT_SYSTEM,
     provider=provider_chat,
     max_model_fallbacks: int = 2,
+    on_event: Callable[[dict], None] | None = None,
 ) -> RunResult:
     """Run one agent task to completion (or a clean fail-closed end)."""
     from ..events import Journal as J
@@ -161,6 +163,13 @@ def run_agent(
             n_calls = len(resp.get("tool_calls") or [])
             transcript.emit_step(step, n_calls,
                                  resp.get("finish_reason") or "")
+            if on_event is not None:
+                try:
+                    detail = (f"{n_calls} tool call(s)"
+                              if n_calls else "composing answer")
+                    on_event({"kind": "step", "step": step, "detail": detail})
+                except Exception:
+                    pass
             budget.record_step(time.monotonic() - t0)
 
             calls = resp.get("tool_calls") or []
@@ -184,8 +193,27 @@ def run_agent(
                     budget.record_tool_call()
                     tool_calls_total += 1
                     tc_t0 = time.monotonic()
+                    if on_event is not None:
+                        try:
+                            _args = call["arguments"]
+                            if isinstance(_args, str):
+                                _args = _args[:200]
+                            on_event({"kind": "tool_call",
+                                      "name": call["name"], "args": _args})
+                        except Exception:
+                            pass
                     out = registry.call(call["name"], call["arguments"])
                     ok = isinstance(out, dict) and out.get("ok") is not False
+                    if on_event is not None:
+                        try:
+                            import json as _json
+                            prev = _json.dumps(out, ensure_ascii=False,
+                                               default=str)[:200]
+                            on_event({"kind": "tool_result",
+                                      "name": call["name"], "ok": ok,
+                                      "preview": prev})
+                        except Exception:
+                            pass
                     transcript.emit_tool_call(step, call["name"],
                                               call["arguments"], ok,
                                               (time.monotonic() - tc_t0) * 1000)

@@ -369,16 +369,25 @@ live bar loop stays byte-for-byte deterministic (L10/L13).
 
 ### Quickstart
 ```bash
-# one-question agent with desk + web tools (free Zen model, $0)
-python -m gold_desk.cli ask "what changed in gold positioning this week?"
-
-# cited deep-research report on any asset
-python -m gold_desk.cli research XAUUSD --depth 2
-python -m gold_desk.cli research BTC --depth 1
+# the launcher is the canonical entry — no python needed (macOS-safe)
+gold-desk ask "what changed in gold positioning this week?"
+gold-desk research XAUUSD --depth 2
+gold-desk research BTC --depth 1
 
 # L2 watchlist pass (opt-in autonomy; also cron-able)
-GOLD_DESK_AUTONOMY=L2 python -m gold_desk.cli watch --once
+GOLD_DESK_AUTONOMY=L2 gold-desk watch --once
+
+# equivalent raw-CLI form (inside the repo, with its venv)
+.venv/bin/python -m gold_desk.cli ask "..." --data-root data
 ```
+
+### The agent is also IN the chat window
+Open the desk (`gold-desk`) → **CHAT** → toggle **AGENT MODE** (gold pill
+above the input). The same research agent runs with all 14 tools — spot,
+OHLC, news, drivers, journal, web search, page fetch, crypto feeds — and
+the reasoning panel streams its live tool activity (`▸ web_search(...)` →
+`✓ {results…}`) before the cited answer types out. Everything is
+journalled; laws L11–L14 apply exactly as in the CLI.
 
 ### What was added (~1,200 LOC total, no framework)
 | Piece | Role |
