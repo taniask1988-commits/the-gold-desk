@@ -127,16 +127,23 @@ export async function POST(req: NextRequest) {
           const line = stdoutBuf.slice(0, nlIdx);
           stdoutBuf = stdoutBuf.slice(nlIdx + 1);
           if (!line.trim()) continue;
+          let evt: { type?: string };
           try {
-            // validate JSON before forwarding — never leak raw python errors
-            JSON.parse(line);
-            controller.enqueue(encoder.encode(line + "\n"));
-            if (line.includes('"type":"done"') ||
-                line.includes('"type":"error"')) {
-              sawTerminal = true;
-            }
+            // validate JSON before forwarding — never leak raw python errors.
+            // IMPORTANT: parse the parsed object's `type` field, not a
+            // substring of the raw line — Python's json.dumps emits
+            // `"type": "done"` (with a space after the colon), so a naive
+            // `line.includes('"type":"done"')` would never match and the
+            // route would synthesize a false "stream ended unexpectedly"
+            // error on every successful chat.
+            evt = JSON.parse(line) as { type?: string };
           } catch {
             /* skip non-JSON lines (defensive) */
+            continue;
+          }
+          controller.enqueue(encoder.encode(line + "\n"));
+          if (evt.type === "done" || evt.type === "error") {
+            sawTerminal = true;
           }
         }
       });
@@ -160,20 +167,42 @@ export async function POST(req: NextRequest) {
       });
       proc.on("close", (code: number | null) => {
         req.signal.removeEventListener("abort", onAbort);
+        // Flush any final partial line that didn't end with \n (defensive —
+        // the CLI always writes \n, but if the kernel pipe was closed mid-
+        // flush we'd otherwise lose the terminal event).
+        if (!sawTerminal && stdoutBuf.trim()) {
+          const line = stdoutBuf.trim();
+          stdoutBuf = "";
+          try {
+            const evt = JSON.parse(line) as { type?: string };
+            controller.enqueue(encoder.encode(line + "\n"));
+            if (evt.type === "done" || evt.type === "error") {
+              sawTerminal = true;
+            }
+          } catch {
+            /* not JSON — leave for the synthesized error path below */
+          }
+        }
         if (sawTerminal) {
           // already emitted done/error — just close
           try { controller.close(); } catch { /* noop */ }
           return;
         }
-        // python exited without emitting a terminal event — synthesize one
+        // python exited without emitting a terminal event — synthesize one,
+        // always including stderr tail so the user/operator can see why.
         try {
-          const errTail = stderrBuf.trim().split("\n").slice(-1)[0] || "";
+          const errTail = stderrBuf.trim().split("\n").slice(-2).join(" | ") || "";
+          const partial = stdoutBuf.trim().slice(-200) || "";
+          const detail: string[] = [];
+          if (code !== 0) detail.push(`exit ${code}`);
+          if (errTail) detail.push(errTail);
+          if (partial) detail.push(`partial stdout: ${partial}`);
           controller.enqueue(encoder.encode(
             JSON.stringify({
               type: "error",
-              error: code === 0
-                ? "stream ended unexpectedly"
-                : `chat failed (exit ${code})${errTail ? ": " + errTail : ""}`,
+              error: detail.length
+                ? `chat failed: ${detail.join(" · ")}`
+                : "stream ended unexpectedly (no error captured)",
             }) + "\n",
           ));
           try { controller.close(); } catch { /* noop */ }
