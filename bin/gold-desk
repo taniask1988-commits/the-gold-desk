@@ -73,6 +73,16 @@ launch_web() {
       exit 1
     fi
   fi
+  # The middleware.ts may live OUTSIDE the repo — in the home directory.
+  # Next.js scans upward for lockfiles; a stray ~/package-lock.json makes
+  # it pick ~ as the workspace root and sweep up ~/src/middleware.ts.
+  # (next.config.ts pins turbopack.root to prevent this, but warn anyway.)
+  if [ -f "$HOME/src/middleware.ts" ] || [ -f "$HOME/package-lock.json" ]; then
+    say "Stray files detected in ~ — Next.js may pick ~ as workspace root."
+    printf "  ${GOLD}!${OFF} ~ contains package-lock.json or src/middleware.ts from another project\n"
+    printf "  ${GOLD}!${OFF} fix: move that experiment to a real folder (e.g. ~/projects/…)\n"
+    printf "  ${GOLD}!${OFF}      the repo's next.config.ts already pins turbopack.root as a safety net\n"
+  fi
 
   local PM PMRUN
   if command -v bun >/dev/null 2>&1; then PM="bun"; PMRUN="bun run dev";

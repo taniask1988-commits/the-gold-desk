@@ -121,10 +121,24 @@ explicitly education-only (it cannot trade and never invents prices).
 ### Troubleshooting
 
 **`Middleware is missing expected function export name` (./src/middleware.ts)** —
-a `middleware.ts` file exists in `web/src/` that doesn't export a function. The
-desk uses **no middleware**; the file is an artifact (often created by an
-editor or AI assistant). Fix: `rm web/src/middleware.ts` and restart
-(`gold-desk` also detects and reports this automatically).
+the repo contains **no middleware.ts**. The real cause is a **stray lockfile
+in your home directory** (e.g. `~/package-lock.json` from another project):
+Next.js scans upward for lockfiles, picks `~` as the workspace root, and
+Turbopack sweeps up `~/src/middleware.ts` (if it exists) as the app's
+middleware — then fails because that file isn't a valid Next middleware.
+
+Two fixes (both already in the repo as safety nets):
+
+1. **Move the stray experiment out of home** — `~/package-lock.json`,
+   `~/src/middleware.ts`, `~/src/rate-limiter.ts` belong in a real project
+   folder like `~/projects/token-bucket-rate-limiter/`, not `~`.
+2. **The repo already pins the workspace root** in `web/next.config.ts`
+   (`turbopack.root`), so a fresh `git pull` + restart should clear it
+   regardless of home-dir state. The launcher also detects stray home files
+   and warns at launch.
+
+If the error persists after `git pull`: `rm -f ~/src/middleware.ts
+~/package-lock.json` (only if those are your stray files) and restart.
 
 Env overrides: `GOLD_DESK_PORT` (web port, default 3000), `GOLD_DESK_DATA` (journal path), `GOLD_DESK_ROOT`
 (harness root for the veto bench), `GOLD_DESK_PYTHON` (python with PyYAML).
