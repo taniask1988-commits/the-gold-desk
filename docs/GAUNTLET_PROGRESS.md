@@ -300,3 +300,10 @@ Round log:
 - R0 (2026-08-25): deep research complete. Both bars forensically briefed with file:line
   citations; 10 keyless institutional feeds probed live; gap analysis locked. AWAITING
   USER BAR LOCK before builder dispatch.
+
+## Round 2 progress (live commits)
+- 9f1596c — R0 deep research (bars set up)
+- 9965507 — R2-1 builder (institutional data plane)
+- bb74690 — R2-1 fix (fundamentalist prompt trim + OCF/FCF) — R2-1 CLOSED WON, 354 tests
+- 8f6c58e — R2-2 builder (quant toolkit + verified snapshot + claim-conflict journaling), 407 tests
+- GAUNTLET2-R2-CRITIC verdict: PICK BAR — 7 defects reproduced (D1-D7). Resume: see worklog.md entry GAUNTLET2-R2-RESUME-HANDOFF for the R2-2 fix dispatch brief.
