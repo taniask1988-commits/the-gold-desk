@@ -257,3 +257,46 @@ Final critic (fresh context, harshest seat): PICK_OVERALL **OURS**.
 1. Runtime-sync guard in gold-desk doctor (prevent drift between repo and deployed harness)
 2. PromptCache analogue + persona abstention polish
 3. Hero focal element on /markets + cosmetic polish (truncated mover names, orphan HSI tile, sub-label contrast)
+
+---
+
+# ROUND 2 — THE INTELLIGENCE ROUND (hedge-fund-grade research depth)
+
+Charter locked from deep research (2026-08-25): make the desk's research output
+hedge-fund-grade in DEPTH and USEFULNESS — beat a hybrid bar of:
+- BAR A: TradingAgents v0.3.1 @ a33fd4c (cloned scripts/tradingagents) — 12-agent debate
+  firm: analysts→bull/bear debate→RM→Trader→3-way risk debate→PM + reflective memory.
+  Runnable against our zen endpoint via openai_compatible for a true blind artifact fight.
+- BAR B: ai-hedge-fund v2.2.0 (cloned scripts/ai-hedge-fund) — PIT fundamentals (20Q×14),
+  earnings surprises, PromptCache. Its data plane is PAYWALLED — keyless superset is our
+  permanent edge.
+- BAR C: the institutional investment memo (thesis/citations/scenarios/risks/sizing/
+  kill-criteria/conviction).
+
+Keyless feed inventory (all probed live): SEC XBRL companyconcept (PIT fundamentals, MORE
+history than AHF's paid vendor), Yahoo fundamentals-timeseries (13 quarterly series),
+SEC 13F infotables (institutional positioning — Berkshire 89 positions/$299.3B parsed),
+EDGAR full-text + submissions, Treasury.gov yield curve (162d), alternative.me F&G,
+blockchain.info, CoinGecko, Reddit RSS. Dead: quoteSummary/options/StockTwits/Stooq/NSE.
+
+Gap (forensic): desk context = price+news only. Missing: fundamentals, earnings events,
+13F, macro series, social/on-chain, debate, trader execution, reflective memory,
+PromptCache, verification pass, memo shape.
+
+Piece table:
+| # | Piece | Bar |
+|---|-------|-----|
+| R2-1 | Institutional data plane (XBRL fundamentals, 13F, curve, F&G, on-chain, social + fundamentalist persona) | AHF data depth, keyless superset |
+| R2-2 | Quant toolkit + deterministic verified snapshot | TA market-data validation + stockstats |
+| R2-3 | Adversarial debate + trader execution + risk panel | TA debate architecture |
+| R2-4 | Reflective memory + PromptCache analogue | TA memory + AHF PromptCache |
+| R2-5 | Memo product + mechanical evidence-checker | Institutional memo + deep-research verification |
+| R2-6 | Run TradingAgents live as bar artifact + E2E + final critic | Blind: their report vs our memo |
+
+Research artifacts: scripts/gauntlet2-research/ (DEEP_RESEARCH.md, tradingagents-brief.md,
+ai-hedge-fund-brief.md, probe_feeds*.py + results).
+
+Round log:
+- R0 (2026-08-25): deep research complete. Both bars forensically briefed with file:line
+  citations; 10 keyless institutional feeds probed live; gap analysis locked. AWAITING
+  USER BAR LOCK before builder dispatch.
