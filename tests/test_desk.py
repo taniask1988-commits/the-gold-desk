@@ -631,3 +631,175 @@ def test_transport_failure_skips_rescue(monkeypatch):
         timeout=30.0)
     assert model == "m-b"
     assert calls["n"] == 2, "no rescue call for transport failures"
+
+
+# ---------------- R2-1 fix — defect 1: prompt-size + max_tokens ----------------
+
+def test_slice_institutional_trims_to_top_10_by_value():
+    """The fundamentalist's 13F entitlement slice trims the FULL 89-
+    position Berkshire array to TOP 10 BY VALUE — the persona prompt
+    drops from ~16,260 chars to ~6,000 chars so the JSON lands within
+    the free-tier model's response budget on DEFAULT engine settings
+    (no max_tokens CLI knob required for normal runs). The full
+    picture is preserved via total_value + n_positions + top10_pct so
+    the persona still reasons about concentration honestly."""
+    # synthetic 89-position 13F (descending values)
+    positions = [{"issuer": f" issuer-{i:02d}",
+                  "cusip": f"c{i:08d}",
+                  "value": (89 - i) * 1_000_000_000,
+                  "shares": (89 - i) * 1_000_000,
+                  "type": "SH"} for i in range(89)]
+    inst = {"ok": True, "fund": "BRK", "cik": "0001067983",
+            "filed": "2026-08-14",
+            "accession": "0001193125-26-352200",
+            "total_value": sum(p["value"] for p in positions),
+            "n_positions": 89, "top10_pct": 66.8,
+            "positions": positions}
+    sl = eng._slice_institutional(inst)
+    assert sl["ok"] is True
+    assert sl["n_positions_shown"] == 10
+    assert sl["n_positions"] == 89  # full picture preserved
+    assert sl["total_value"] == inst["total_value"]
+    assert sl["top10_pct"] == 66.8
+    assert sl["accession"] == "0001193125-26-352200"
+    # top-10 by value, descending
+    shown = [p["value"] for p in sl["positions"]]
+    assert len(shown) == 10
+    assert shown == sorted(shown, reverse=True)
+    assert shown[0] == 89 * 1_000_000_000
+    assert shown[-1] == 80 * 1_000_000_000
+    # each shown position keeps the core fields (issuer/cusip/value/shares/type)
+    for p in sl["positions"]:
+        assert "issuer" in p and "value" in p and "type" in p
+    # note explicitly tells the LLM the slice was trimmed
+    assert "top 10" in sl["note"]
+
+
+def test_slice_institutional_preserves_ok_false_shape():
+    """A dead slice (ok:False) is passed through so the persona can
+    abstain cleanly when the 13F feed is down — the trim logic only
+    applies to live slices."""
+    dead = {"ok": False, "error": "13F feed 429"}
+    sl = eng._slice_institutional(dead)
+    assert sl["ok"] is False
+    assert sl.get("error") == "13F feed 429"
+    assert "positions" not in sl  # no fabricated positions
+
+
+def test_slice_institutional_handles_none_input():
+    """None inst slice → {ok:False} shape (the fundamentalist's
+    abstention path when the institutional gather returned no slice)."""
+    sl = eng._slice_institutional(None)
+    assert sl["ok"] is False
+    assert "no institutional slice" in sl["error"]
+
+
+def test_slice_institutional_handles_empty_positions():
+    """A live slice with zero positions (rare edge case: a filer that
+    filed a 13F-HR with no holdings) yields ok:True with empty
+    positions array — the persona sees an honest empty slice."""
+    inst = {"ok": True, "fund": "EMPTY", "cik": "0000000000",
+            "filed": "2026-08-14", "accession": "x",
+            "total_value": 0.0, "n_positions": 0,
+            "top10_pct": 0.0, "positions": []}
+    sl = eng._slice_institutional(inst)
+    assert sl["ok"] is True
+    assert sl["positions"] == []
+    assert sl["n_positions_shown"] == 0
+    assert sl["n_positions"] == 0
+
+
+def test_fundamentalist_persona_max_tokens_override_is_4800():
+    """R2-1 fix — defect 1: the fundamentalist's per-persona
+    max_tokens is bumped to 4800 (default stays 2400 for every other
+    persona). Combined with the 13F top-10 trim, this lets the
+    fundamentalist's call land within the model's response budget on
+    DEFAULT engine settings (no max_tokens CLI knob required)."""
+    assert eng.PERSONA_DEFAULT_MAX_TOKENS == 2400
+    assert eng.PERSONA_MAX_TOKENS["fundamentalist"] == 4800
+    # no other persona is overridden — they all use the 2400 default
+    for name in ("technician", "macro", "news", "sentiment", "risk"):
+        assert name not in eng.PERSONA_MAX_TOKENS
+
+
+def test_run_desk_passes_per_persona_max_tokens_to_complete_json(
+        monkeypatch, tmp_path):
+    """The fundamentalist's complete_json call carries max_tokens=4800;
+    every other persona's call carries max_tokens=2400. Pinned via a
+    scripted complete_json that records the kwarg per call."""
+    _patch_context(monkeypatch)
+    seen: dict[str, int] = {}
+
+    def fake(messages, model, **kwargs):
+        system = messages[0]["content"]
+        key = next((k for marker, k in _MARKERS.items()
+                    if system.startswith(marker)), None)
+        if key and key != "pm":
+            seen[key] = kwargs.get("max_tokens")
+        if key == "pm":
+            return dict(PM_REPLY)
+        return dict(PERSONA_REPLIES[key])
+    monkeypatch.setattr(eng, "complete_json", fake)
+    out = run_desk("btc", data_root=tmp_path)
+    assert out["ok"] is True
+    # the fundamentalist gets 4800; every other persona gets 2400
+    assert seen["fundamentalist"] == 4800
+    for name in ("technician", "macro", "news", "sentiment", "risk"):
+        assert seen[name] == 2400, \
+            f"{name} should use the default 2400, got {seen[name]}"
+
+
+def test_run_desk_fundamentalist_sees_trimmed_13f_in_prompt(
+        monkeypatch, tmp_path):
+    """The fundamentalist's user message carries the trimmed 13F
+    (top-10) + total_value + n_positions + top10_pct + note. It does
+    NOT carry all 89 positions — that would blow the prompt-size
+    budget. Verified by intercepting the user content of the
+    fundamentalist's complete_json call."""
+    _patch_context(monkeypatch)
+    # inject a live 89-position institutional_top slice (overrides the
+    # _patch_context default which returns ok:False empty slices)
+    positions = [{"issuer": f"issuer-{i:02d}",
+                  "value": (89 - i) * 1_000_000_000,
+                  "shares": (89 - i) * 1_000_000, "type": "SH"}
+                 for i in range(89)]
+    monkeypatch.setattr(eng, "gather_institutional_context",
+        lambda s, d: {"ok": True, "slices": {
+            "institutional_top": {"ok": True, "fund": "BRK",
+                "cik": "0001067983", "filed": "2026-08-14",
+                "accession": "0001193125-26-352200",
+                "total_value": sum(p["value"] for p in positions),
+                "n_positions": 89, "top10_pct": 66.8,
+                "positions": positions}}})
+    captured: dict = {}
+
+    def fake(messages, model, **kwargs):
+        system = messages[0]["content"]
+        if system.startswith("You are The Fundamentalist"):
+            captured["user"] = messages[-1]["content"]
+            return dict(PERSONA_REPLIES["fundamentalist"])
+        if system.startswith("You are The Portfolio Manager"):
+            return dict(PM_REPLY)
+        key = next((k for marker, k in _MARKERS.items()
+                    if system.startswith(marker)), None)
+        return dict(PERSONA_REPLIES[key])
+    monkeypatch.setattr(eng, "complete_json", fake)
+    out = run_desk("AAPL", data_root=tmp_path)
+    assert out["ok"] is True
+    user = captured["user"]
+    # the trim happened: only 10 positions appear in the user message
+    # (count "issuer-" prefix occurrences on the values — each of the
+    # 10 shown positions has issuer "issuer-NN"; the other 79 don't
+    # appear at all)
+    assert user.count("issuer-") == 10
+    # the full picture fields are present so the LLM can reason about
+    # concentration honestly without seeing all 89 rows
+    assert '"n_positions": 89' in user
+    assert '"total_value"' in user
+    assert '"top10_pct": 66.8' in user
+    assert '"n_positions_shown": 10' in user
+    assert "top 10 by value" in user
+    # the user message size is bounded (well under the original 16,260
+    # chars the critic reproduced — the trim is the actual fix)
+    assert len(user) < 7000, \
+        f"fundamentalist user msg too long ({len(user)} chars)"

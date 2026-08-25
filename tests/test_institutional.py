@@ -62,9 +62,11 @@ def _load_bytes(name: str) -> bytes:
 # =====================================================================
 
 from gold_desk.markets.institutional import (  # noqa: E402
-    _is_standalone_period, _merge_xbrl_periods, _parse_13f_xml,
-    _parse_treasury_xml, _parse_reddit_rss, XBRL_CONCEPTS,
-    CURVE_FIELDS, DEFAULT_BRK_CIK, TTL_S, N_QUARTERS,
+    _is_standalone_period, _is_ytd_period, _merge_xbrl_periods,
+    _parse_13f_xml, _parse_treasury_xml, _parse_reddit_rss,
+    _derive_cashflow_standalone, XBRL_CONCEPTS,
+    XBRL_CONCEPT_FALLBACKS, CASH_FLOW_FIELDS, CURVE_FIELDS,
+    DEFAULT_BRK_CIK, TTL_S, N_QUARTERS,
 )
 from gold_desk.markets import institutional  # noqa: E402
 
@@ -178,6 +180,379 @@ def test_merge_xbrl_periods_filters_non_usd_units():
     periods = _merge_xbrl_periods(bundle)
     assert len(periods) == 1
     assert periods[0]["revenue"] == 100000.0
+
+
+# =====================================================================
+# R2-1 fix — defect 2: OCF concept-name fix + derived FCF (OCF − capex)
+# =====================================================================
+
+def test_xbrl_concepts_use_correct_ocf_concept_for_aapl():
+    """The builder's original CashFlowFromOperatingActivities 404s on
+    SEC for AAPL (verified live); the correct us-gaap concept AAPL
+    actually files is NetCashProvidedByUsedInOperatingActivities. The
+    XBRL_CONCEPTS map must map that concept to operating_cash_flow,
+    NOT the broken one."""
+    assert ("NetCashProvidedByUsedInOperatingActivities" in XBRL_CONCEPTS
+            and XBRL_CONCEPTS["NetCashProvidedByUsedInOperatingActivities"]
+            == "operating_cash_flow")
+    # the broken concept must NOT be registered (would silently 404)
+    assert "CashFlowFromOperatingActivities" not in XBRL_CONCEPTS
+
+
+def test_xbrl_capex_concept_and_fallback_chain_registered():
+    """capex is sourced from PaymentsToAcquirePropertyPlantAndEquipment
+    (the standard us-gaap capex tag AAPL files — verified 200 OK live).
+    XBRL_CONCEPT_FALLBACKS registers a fallback chain so a filer that
+    files the older PaymentsForCapitalImprovements tag instead still
+    gets capex populated via _fetch_xbrl_bundle."""
+    assert XBRL_CONCEPTS.get("PaymentsToAcquirePropertyPlantAndEquipment") \
+        == "capex"
+    assert "capex" in XBRL_CONCEPT_FALLBACKS
+    chain = XBRL_CONCEPT_FALLBACKS["capex"]
+    assert chain[0] == "PaymentsToAcquirePropertyPlantAndEquipment"
+    assert chain[1] == "PaymentsForCapitalImprovements"
+
+
+def test_merge_xbrl_periods_derives_fcf_when_ocf_and_capex_present():
+    """fcf_derived = operating_cash_flow − capex per period, computed
+    in the merge's final pass when both are sourced. Labeled
+    fcf_derived (not free_cash_flow) so the audit trail shows this is
+    COMPUTED, not sourced from a single XBRL tag (most filers incl.
+    AAPL don't file FreeCashFlow as a standalone concept)."""
+    bundle = {
+        "NetCashProvidedByUsedInOperatingActivities": {"units": {"USD": [
+            {"form": "10-Q", "start": "2026-03-29",
+             "end": "2026-06-27", "fy": 2026, "fp": "Q3",
+             "filed": "2026-07-31", "accn": "a1", "val": 25000},
+        ]}},
+        "PaymentsToAcquirePropertyPlantAndEquipment": {"units": {"USD": [
+            {"form": "10-Q", "start": "2026-03-29",
+             "end": "2026-06-27", "fy": 2026, "fp": "Q3",
+             "filed": "2026-07-31", "accn": "a1", "val": 5000},
+        ]}},
+    }
+    periods = _merge_xbrl_periods(bundle)
+    assert len(periods) == 1
+    assert periods[0]["operating_cash_flow"] == 25000.0
+    assert periods[0]["capex"] == 5000.0
+    assert periods[0]["fcf_derived"] == 20000.0  # 25000 − 5000
+
+
+def test_merge_xbrl_periods_fcf_derived_none_when_capex_missing():
+    """When capex is missing (concept 404'd and fallback chain all
+    404'd), fcf_derived stays None — the LLM sees the gap honestly,
+    never a fabricated FCF."""
+    bundle = {
+        "NetCashProvidedByUsedInOperatingActivities": {"units": {"USD": [
+            {"form": "10-Q", "start": "2026-03-29",
+             "end": "2026-06-27", "fy": 2026, "fp": "Q3",
+             "filed": "2026-07-31", "accn": "a1", "val": 25000},
+        ]}},
+        # capex deliberately absent (no PaymentsToAcquire* key)
+    }
+    periods = _merge_xbrl_periods(bundle)
+    assert len(periods) == 1
+    assert periods[0]["operating_cash_flow"] == 25000.0
+    assert periods[0].get("capex") is None
+    assert periods[0]["fcf_derived"] is None
+
+
+def test_merge_xbrl_periods_fcf_derived_none_when_ocf_missing():
+    """Symmetric: when OCF is missing, fcf_derived stays None too."""
+    bundle = {
+        "PaymentsToAcquirePropertyPlantAndEquipment": {"units": {"USD": [
+            {"form": "10-Q", "start": "2026-03-29",
+             "end": "2026-06-27", "fy": 2026, "fp": "Q3",
+             "filed": "2026-07-31", "accn": "a1", "val": 5000},
+        ]}},
+    }
+    periods = _merge_xbrl_periods(bundle)
+    assert len(periods) == 1
+    assert periods[0].get("operating_cash_flow") is None
+    assert periods[0]["capex"] == 5000.0
+    assert periods[0]["fcf_derived"] is None
+
+
+def test_fetch_xbrl_bundle_capex_fallback_walks_chain(monkeypatch,
+                                                       tmp_path):
+    """When the primary capex concept 404s (no `units` block in the
+    SEC companyconcept response — the missing-concept shape), the
+    fallback chain is walked and the fallback payload is stored UNDER
+    THE PRIMARY CONCEPT NAME so XBRL_CONCEPTS.get(concept) in
+    _merge_xbrl_periods finds the field unchanged."""
+    primary = "PaymentsToAcquirePropertyPlantAndEquipment"
+    fallback = "PaymentsForCapitalImprovements"
+    capex_payload = {"units": {"USD": [
+        {"form": "10-Q", "start": "2026-03-29",
+         "end": "2026-06-27", "fy": 2026, "fp": "Q3",
+         "filed": "2026-07-31", "accn": "a1", "val": 5000},
+    ]}}
+    # the SEC companyconcept 404 shape — has no `units` block
+    not_found_marker = {"ok": False, "err": "HTTP Error 404: Not Found",
+                        "status": 404}
+
+    def fake_fetch_one_concept(cik, concept):
+        if concept == primary:
+            return not_found_marker
+        if concept == fallback:
+            return capex_payload
+        # other concepts — return empty-payload marker
+        return {"ok": False, "err": "404", "status": 404}
+
+    monkeypatch.setattr(institutional, "_fetch_one_concept",
+                        fake_fetch_one_concept)
+    # short-circuit the cache so the bundle's _fetch closure runs
+    monkeypatch.setattr(institutional, "_cached_fetch",
+        lambda dr, name, ttl, fetch: {**fetch(), "fetched_at": 0.0,
+                                       "cache_hit": False})
+    bundle = institutional._fetch_xbrl_bundle("0000320193", tmp_path)
+    # the fallback payload is stored under the PRIMARY concept name
+    assert primary in bundle
+    assert bundle[primary] is capex_payload
+    # the fallback concept name is NOT added as a separate bundle key
+    # (the merge would otherwise see two entries for the same field)
+    assert fallback not in bundle
+    # downstream merge finds capex via XBRL_CONCEPTS.get(primary)
+    assert XBRL_CONCEPTS.get(primary) == "capex"
+    # and the merge produces capex=5000 on the period
+    periods = _merge_xbrl_periods(bundle)
+    assert periods[0]["capex"] == 5000.0
+
+
+def test_fetch_xbrl_bundle_keeps_primary_when_capex_primary_ok(
+        monkeypatch, tmp_path):
+    """When the primary capex concept returns real data, the fallback
+    chain is NOT walked (no extra HTTP call)."""
+    primary = "PaymentsToAcquirePropertyPlantAndEquipment"
+    fallback = "PaymentsForCapitalImprovements"
+    calls = []
+
+    def fake_fetch_one_concept(cik, concept):
+        calls.append(concept)
+        if concept == primary:
+            return {"units": {"USD": [
+                {"form": "10-Q", "start": "2026-03-29",
+                 "end": "2026-06-27", "fy": 2026, "fp": "Q3",
+                 "filed": "2026-07-31", "accn": "a1", "val": 5000},
+            ]}}
+        # the fallback should NEVER be called when the primary is OK
+        raise AssertionError("fallback should not be called when "
+                            f"primary returned units (called {concept})")
+
+    monkeypatch.setattr(institutional, "_fetch_one_concept",
+                        fake_fetch_one_concept)
+    monkeypatch.setattr(institutional, "_cached_fetch",
+        lambda dr, name, ttl, fetch: {**fetch(), "fetched_at": 0.0,
+                                       "cache_hit": False})
+    institutional._fetch_xbrl_bundle("0000320193", tmp_path)
+    assert primary in calls
+    assert fallback not in calls, \
+        "fallback must not be fetched when primary returned units"
+
+
+# =====================================================================
+# R2-1 fix — defect 2 caveat: cash-flow YTD → standalone derivation
+# (AAPL files only YTD for Q2/Q3 on the 10-Q cash flow statement)
+# =====================================================================
+
+def test_is_ytd_period_accepts_cashflow_ytd_spans():
+    """_is_ytd_period accepts the AAPL cash-flow YTD spans: Q1 90-day,
+    Q2 181-day, Q3 272-day on 10-Q; FY 300-400 day on 10-K. The
+    standalone filter (_is_standalone_period) only accepts 60-100 day
+    10-Q rows (Q1) and 300-400 day 10-K rows (FY) — it rejects Q2/Q3
+    YTD rows; the YTD filter accepts them so _derive_cashflow_standalone
+    can recover the standalone quarter."""
+    # Q1 90-day — both filters accept
+    assert _is_standalone_period({"form": "10-Q",
+        "start": "2025-09-28", "end": "2025-12-27"}) is True
+    assert _is_ytd_period({"form": "10-Q",
+        "start": "2025-09-28", "end": "2025-12-27"}) is True
+    # Q2 181-day — only YTD filter accepts
+    assert _is_standalone_period({"form": "10-Q",
+        "start": "2025-09-28", "end": "2026-03-28"}) is False
+    assert _is_ytd_period({"form": "10-Q",
+        "start": "2025-09-28", "end": "2026-03-28"}) is True
+    # Q3 272-day — only YTD filter accepts
+    assert _is_standalone_period({"form": "10-Q",
+        "start": "2025-09-28", "end": "2026-06-27"}) is False
+    assert _is_ytd_period({"form": "10-Q",
+        "start": "2025-09-28", "end": "2026-06-27"}) is True
+    # FY 365-day — both filters accept
+    assert _is_standalone_period({"form": "10-K",
+        "start": "2024-09-29", "end": "2025-09-27"}) is True
+    assert _is_ytd_period({"form": "10-K",
+        "start": "2024-09-29", "end": "2025-09-27"}) is True
+
+
+def test_derive_cashflow_standalone_q2_from_q2ytd_minus_q1ytd():
+    """Q2 standalone OCF = Q2 YTD − Q1 YTD (same fiscal year). The Q2
+    10-Q cash flow statement ships only the 6-month YTD (181-day), so
+    the standalone filter rejects it; _derive_cashflow_standalone
+    recovers the standalone quarter by subtracting Q1's 3-month YTD."""
+    # Q1 10-Q standalone (90-day) — already accepted by Step 1
+    periods = [
+        {"fy": 2026, "fp": "Q1", "operating_cash_flow": 53925000000.0,
+         "capex": 2373000000.0},
+        # Q2 — Step 1 rejected everything (only YTD rows exist)
+        {"fy": 2026, "fp": "Q2", "operating_cash_flow": None,
+         "capex": None},
+    ]
+    # YTD rows (the AAPL bundle would have these for Q1 AND Q2)
+    ytd_rows = {
+        (2026, "Q1", "operating_cash_flow"): {"val": 53925000000},
+        (2026, "Q2", "operating_cash_flow"): {"val": 82627000000},
+        (2026, "Q1", "capex"): {"val": 2373000000},
+        (2026, "Q2", "capex"): {"val": 4344000000},
+    }
+    _derive_cashflow_standalone(periods, ytd_rows)
+    # Q1 untouched (already had standalone from Step 1)
+    assert periods[0]["operating_cash_flow"] == 53925000000.0
+    # Q2 derived: 82627 - 53925 = 28702
+    assert periods[1]["operating_cash_flow"] == 28702000000.0
+    # Q2 capex derived: 4344 - 2373 = 1971
+    assert periods[1]["capex"] == 1971000000.0
+
+
+def test_derive_cashflow_standalone_q3_from_q3ytd_minus_q2ytd():
+    """Q3 standalone = Q3 YTD − Q2 YTD. Same logic as Q2 but for Q3."""
+    periods = [
+        {"fy": 2026, "fp": "Q2", "operating_cash_flow": 28702000000.0,
+         "capex": 1971000000.0},
+        {"fy": 2026, "fp": "Q3", "operating_cash_flow": None,
+         "capex": None},
+    ]
+    ytd_rows = {
+        (2026, "Q2", "operating_cash_flow"): {"val": 82627000000},
+        (2026, "Q3", "operating_cash_flow"): {"val": 116996000000},
+        (2026, "Q2", "capex"): {"val": 4344000000},
+        (2026, "Q3", "capex"): {"val": 6799000000},
+    }
+    _derive_cashflow_standalone(periods, ytd_rows)
+    # Q3 derived: 116996 - 82627 = 34369
+    assert periods[1]["operating_cash_flow"] == 34369000000.0
+    # Q3 capex derived: 6799 - 4344 = 2455
+    assert periods[1]["capex"] == 2455000000.0
+
+
+def test_derive_cashflow_standalone_q1_safety_net_uses_ytd_when_missing():
+    """Q1's YTD IS standalone (90 days, 3-month). The standalone filter
+    should already accept it, but if it missed for any reason, the
+    derivation's safety-net branch uses the YTD value directly."""
+    periods = [{"fy": 2026, "fp": "Q1",
+                "operating_cash_flow": None, "capex": None}]
+    ytd_rows = {
+        (2026, "Q1", "operating_cash_flow"): {"val": 53925000000},
+        (2026, "Q1", "capex"): {"val": 2373000000},
+    }
+    _derive_cashflow_standalone(periods, ytd_rows)
+    assert periods[0]["operating_cash_flow"] == 53925000000.0
+    assert periods[0]["capex"] == 2373000000.0
+
+
+def test_derive_cashflow_standalone_skips_when_prior_ytd_missing():
+    """When the prior quarter's YTD is missing (e.g., Q1 10-Q was filed
+    late or the concept 404'd), Q2 standalone stays None — never
+    fabricated."""
+    periods = [{"fy": 2026, "fp": "Q2",
+                "operating_cash_flow": None, "capex": None}]
+    ytd_rows = {
+        # Q1 YTD is MISSING — derivation can't subtract
+        (2026, "Q2", "operating_cash_flow"): {"val": 82627000000},
+    }
+    _derive_cashflow_standalone(periods, ytd_rows)
+    assert periods[0]["operating_cash_flow"] is None
+
+
+def test_derive_cashflow_standalone_skips_when_field_already_set():
+    """When Step 1 already accepted the standalone row, the derivation
+    leaves it untouched (no overwrite)."""
+    periods = [{"fy": 2026, "fp": "Q1",
+                "operating_cash_flow": 53925000000.0}]
+    ytd_rows = {
+        (2026, "Q1", "operating_cash_flow"): {"val": 9999999},
+    }
+    _derive_cashflow_standalone(periods, ytd_rows)
+    # Q1 standalone value preserved — not overwritten with YTD value
+    assert periods[0]["operating_cash_flow"] == 53925000000.0
+
+
+def test_merge_xbrl_periods_derives_cashflow_standalone_for_aapl_q3():
+    """End-to-end: AAPL's Q3 FY26 standalone OCF and capex are derived
+    from YTD rows because AAPL's 10-Q ships only the 9-month YTD on the
+    cash flow statement (no standalone 3-month row). The merge produces
+    Q3 standalone OCF = 116996 − 82627 = 34369, capex = 6799 − 4344 =
+    2455, fcf_derived = 34369 − 2455 = 31914."""
+    # Synthesize an AAPL-shaped bundle: revenue has BOTH standalone
+    # and YTD rows (income statement requires both); OCF and capex
+    # ship ONLY YTD rows for Q2 and Q3 (cash flow statement allows it).
+    bundle = {
+        # revenue: standalone 90-day Q1, Q2, Q3 rows
+        "RevenueFromContractWithCustomerExcludingAssessedTax": {
+            "units": {"USD": [
+                {"form": "10-Q", "start": "2025-09-28",
+                 "end": "2025-12-27", "fy": 2026, "fp": "Q1",
+                 "filed": "2026-01-30", "accn": "a1",
+                 "val": 143756000000},
+                {"form": "10-Q", "start": "2025-12-28",
+                 "end": "2026-03-28", "fy": 2026, "fp": "Q2",
+                 "filed": "2026-05-01", "accn": "a2",
+                 "val": 111184000000},
+                {"form": "10-Q", "start": "2026-03-29",
+                 "end": "2026-06-27", "fy": 2026, "fp": "Q3",
+                 "filed": "2026-07-31", "accn": "a3",
+                 "val": 109417000000},
+            ]}},
+        # OCF: Q1 90-day standalone, Q2 181-day YTD, Q3 272-day YTD
+        "NetCashProvidedByUsedInOperatingActivities": {
+            "units": {"USD": [
+                {"form": "10-Q", "start": "2025-09-28",
+                 "end": "2025-12-27", "fy": 2026, "fp": "Q1",
+                 "filed": "2026-01-30", "accn": "a1",
+                 "val": 53925000000},
+                {"form": "10-Q", "start": "2025-09-28",
+                 "end": "2026-03-28", "fy": 2026, "fp": "Q2",
+                 "filed": "2026-05-01", "accn": "a2",
+                 "val": 82627000000},
+                {"form": "10-Q", "start": "2025-09-28",
+                 "end": "2026-06-27", "fy": 2026, "fp": "Q3",
+                 "filed": "2026-07-31", "accn": "a3",
+                 "val": 116996000000},
+            ]}},
+        # capex: same shape as OCF
+        "PaymentsToAcquirePropertyPlantAndEquipment": {
+            "units": {"USD": [
+                {"form": "10-Q", "start": "2025-09-28",
+                 "end": "2025-12-27", "fy": 2026, "fp": "Q1",
+                 "filed": "2026-01-30", "accn": "a1",
+                 "val": 2373000000},
+                {"form": "10-Q", "start": "2025-09-28",
+                 "end": "2026-03-28", "fy": 2026, "fp": "Q2",
+                 "filed": "2026-05-01", "accn": "a2",
+                 "val": 4344000000},
+                {"form": "10-Q", "start": "2025-09-28",
+                 "end": "2026-06-27", "fy": 2026, "fp": "Q3",
+                 "filed": "2026-07-31", "accn": "a3",
+                 "val": 6799000000},
+            ]}},
+    }
+    periods = _merge_xbrl_periods(bundle)
+    # 3 periods, sorted by filed desc (Q3 first, then Q2, then Q1)
+    assert len(periods) == 3
+    q3 = [p for p in periods if p["fp"] == "Q3"][0]
+    q2 = [p for p in periods if p["fp"] == "Q2"][0]
+    q1 = [p for p in periods if p["fp"] == "Q1"][0]
+    # Q1: standalone filter accepted the 90-day row
+    assert q1["operating_cash_flow"] == 53925000000.0
+    assert q1["capex"] == 2373000000.0
+    assert q1["fcf_derived"] == 51552000000.0
+    # Q2: derived from YTD difference
+    assert q2["operating_cash_flow"] == 28702000000.0  # 82627 - 53925
+    assert q2["capex"] == 1971000000.0  # 4344 - 2373
+    assert q2["fcf_derived"] == 26731000000.0  # 28702 - 1971
+    # Q3: derived from YTD difference
+    assert q3["operating_cash_flow"] == 34369000000.0  # 116996 - 82627
+    assert q3["capex"] == 2455000000.0  # 6799 - 4344
+    assert q3["fcf_derived"] == 31914000000.0  # 34369 - 2455
 
 
 def test_cik_resolution_zero_pads_to_10_digits(monkeypatch, tmp_path):

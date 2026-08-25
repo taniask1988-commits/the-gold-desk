@@ -86,6 +86,14 @@ N_QUARTERS = 8             # PIT window — matches ai-hedge-fund's 20 reduced
 # XBRL us-gaap concept → output field name (the ~10 we surface).
 # RevenueFromContractWithCustomerExcludingAssessedTax is the modern us-gaap
 # revenue concept (post-ASC 606); Revenues is the legacy fallback.
+#
+# R2-1 fix — defect 2 (OCF concept-name bug): the original builder used
+# `CashFlowFromOperatingActivities`, which 404s on SEC for AAPL (verified
+# live 2026-08-26). The correct us-gaap concept AAPL actually files is
+# `NetCashProvidedByUsedInOperatingActivities` (200 OK, real data —
+# verified live). FreeCashFlow is left registered but most filers (incl.
+# AAPL) don't file it as a standalone XBRL concept — `fcf_derived` below
+# is the sourced-of-record FCF path (OCF − capex) for the audit trail.
 XBRL_CONCEPTS = {
     "RevenueFromContractWithCustomerExcludingAssessedTax": "revenue",
     "Revenues": "revenue",
@@ -99,7 +107,23 @@ XBRL_CONCEPTS = {
     "CashAndCashEquivalentsAtCarryingValue": "cash",
     "CashAndCashEquivalents": "cash",
     "FreeCashFlow": "free_cash_flow",
-    "CashFlowFromOperatingActivities": "operating_cash_flow",
+    "NetCashProvidedByUsedInOperatingActivities": "operating_cash_flow",
+    "PaymentsToAcquirePropertyPlantAndEquipment": "capex",
+}
+
+# R2-1 fix — defect 2: capex concept fallback chain. The standard us-gaap
+# capex tag is `PaymentsToAcquirePropertyPlantAndEquipment` (AAPL files
+# this — 200 OK). Some filers (older filers / different industry
+# conventions) use `PaymentsForCapitalImprovements` instead. _fetch_xbrl
+# _bundle tries the primary; on 404 (no `units` block in the response)
+# it walks the fallback chain so capex is populated for any filer that
+# files EITHER tag. The fallback payload is stored under the PRIMARY
+# concept name so XBRL_CONCEPTS.get(concept) in _merge_xbrl_periods finds
+# the field unchanged (audit trail shows derived FCF sourced from capex
+# field regardless of which tag returned data).
+XBRL_CONCEPT_FALLBACKS = {
+    "capex": ["PaymentsToAcquirePropertyPlantAndEquipment",
+              "PaymentsForCapitalImprovements"],
 }
 
 # Treasury yield curve XML BC_* tag → output key (1M-30Y the desk uses).
@@ -218,6 +242,15 @@ def _is_standalone_period(row: dict) -> bool:
     sheet checklist item (debt/equity structure, financial position) —
     XBRL tags these as `end`-only rows, which the duration filter would
     otherwise drop.
+
+    R2-1 fix — defect 2 caveat: for cash-flow-statement items (OCF,
+    capex), AAPL only files YTD rows for Q2 (181 days) and Q3 (272 days)
+    in 10-Qs — there is NO standalone 3-month row for Q2 or Q3 (the SEC
+    allows filers to ship only YTD on the cash flow statement, unlike
+    the income statement where standalone + YTD is required). _is_ytd
+    _period + _derive_cashflow_standalone handle that derivation in
+    _merge_xbrl_periods; this filter stays strict for income-statement
+    items where standalone IS required.
     """
     form = row.get("form")
     start, end = row.get("start"), row.get("end")
@@ -234,6 +267,34 @@ def _is_standalone_period(row: dict) -> bool:
     days = (e - s).days
     if form == "10-Q":
         return 60 <= days <= 100
+    if form == "10-K":
+        return 300 <= days <= 400
+    return False
+
+
+def _is_ytd_period(row: dict) -> bool:
+    """Cash-flow-statement YTD rows: 10-Q spans of 60-290 days (covers
+    Q1 90-day, Q2 181-day, Q3 272-day YTD); 10-K spans of 300-400 days
+    (FY standalone — overlap with _is_standalone_period is intentional
+    so FY rows flow through both filters). R2-1 fix — defect 2: AAPL
+    files cash flow only as YTD for Q2 and Q3 (no standalone 3-month
+    rows on those quarters' 10-Qs), so this filter accepts them and
+    _derive_cashflow_standalone subtracts the prior quarter's YTD to
+    recover the standalone quarter value."""
+    form = row.get("form")
+    start, end = row.get("start"), row.get("end")
+    if form not in ("10-Q", "10-K") or not end or not start:
+        return False
+    if start == end:
+        return False  # instantaneous — not a YTD row
+    try:
+        s = datetime.strptime(start, "%Y-%m-%d")
+        e = datetime.strptime(end, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return False
+    days = (e - s).days
+    if form == "10-Q":
+        return 60 <= days <= 290
     if form == "10-K":
         return 300 <= days <= 400
     return False
@@ -267,6 +328,14 @@ def _merge_xbrl_periods(concepts_data: dict[str, dict]) -> list[dict]:
 
     Each period's `accn` is the accession number of the filing it came
     from — preserved per period for L11 audit-grade citation.
+
+    R2-1 fix — defect 2: for cash-flow-statement items (OCF, capex,
+    FreeCashFlow), AAPL files only YTD rows for Q2 and Q3 in 10-Qs (no
+    standalone 3-month row). Step 1b collects those YTD rows per
+    (fy, fp, field); Step 3 then derives the standalone quarter value
+    as current YTD − prior quarter's YTD (same fiscal year). For Q1
+    and FY the standalone row is directly accepted (90-day Q1 / 365-day
+    FY already pass _is_standalone_period), so no derivation needed.
     """
     # Step 1: per (fy, fp, concept), keep the latest standalone row.
     latest: dict[tuple, dict] = {}
@@ -296,6 +365,34 @@ def _merge_xbrl_periods(concepts_data: dict[str, dict]) -> list[dict]:
                 if cur is None or \
                         _period_sort_key(v) > _period_sort_key(cur):
                     latest[key] = v
+    # Step 1b: for cash-flow-statement fields, ALSO collect the latest
+    # YTD row per (fy, fp, field) — AAPL ships only YTD for Q2 and Q3
+    # on the cash flow statement (no standalone 3-month row). Step 3
+    # below derives the standalone quarter value from these YTD rows.
+    ytd_rows: dict[tuple, dict] = {}
+    for concept, payload in concepts_data.items():
+        if not isinstance(payload, dict) or "units" not in payload:
+            continue
+        field = XBRL_CONCEPTS.get(concept)
+        if field not in CASH_FLOW_FIELDS:
+            continue
+        for unit, vals in (payload.get("units") or {}).items():
+            if unit != "USD":
+                continue
+            for v in vals:
+                if not isinstance(v, dict):
+                    continue
+                if not _is_ytd_period(v):
+                    continue
+                fy = v.get("fy")
+                fp = v.get("fp")
+                if fy is None or not fp:
+                    continue
+                key = (fy, fp, field)
+                cur = ytd_rows.get(key)
+                if cur is None or \
+                        _period_sort_key(v) > _period_sort_key(cur):
+                    ytd_rows[key] = v
     # Step 2: merge by (fy, fp) — one row per period, fields across
     # concepts. The row's (start, end, accn, filed, form) come from the
     # FIRST concept seen but are upgraded when a flow item with a real
@@ -331,7 +428,94 @@ def _merge_xbrl_periods(concepts_data: dict[str, dict]) -> list[dict]:
             pe[field] = None
     final = list(by_period.values())
     final.sort(key=lambda r: r.get("filed") or "", reverse=True)
-    return final[:N_QUARTERS]
+    final = final[:N_QUARTERS]
+    # Step 3: derive standalone cash-flow values from YTD when the
+    # standalone filter rejected everything (Q2/Q3 on AAPL's 10-Q).
+    # Standalone Q2 = Q2 YTD − Q1 YTD (same fy); Q3 = Q3 YTD − Q2 YTD.
+    # For Q1 (90-day) and FY (365-day), the standalone filter already
+    # accepted the row directly, so no derivation is needed.
+    _derive_cashflow_standalone(final, ytd_rows)
+    # Step 4: derived FCF = OCF − capex (per period, when both sourced).
+    # Labeled `fcf_derived` so the audit trail shows this is COMPUTED,
+    # not sourced from a single XBRL tag (most filers incl. AAPL don't
+    # file FreeCashFlow as a standalone us-gaap concept — verified 404
+    # live). When OCF or capex is None, fcf_derived stays None and the
+    # LLM sees the gap honestly rather than reading a fabricated number.
+    for pe in final:
+        ocf = pe.get("operating_cash_flow")
+        capex = pe.get("capex")
+        if isinstance(ocf, (int, float)) and \
+                isinstance(capex, (int, float)):
+            pe["fcf_derived"] = ocf - capex
+        else:
+            pe["fcf_derived"] = None
+    return final
+
+
+def _safe_float(v) -> float | None:
+    """Best-effort float coercion; None on failure."""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+# Cash-flow-statement fields whose 10-Q rows ship as YTD only (no
+# standalone 3-month quarter for Q2/Q3 on AAPL). Used to gate the
+# YTD-derivation path in _merge_xbrl_periods.
+CASH_FLOW_FIELDS = frozenset({"operating_cash_flow", "capex",
+                              "free_cash_flow"})
+
+# Fiscal-period order for the prior-quarter YTD lookup (Q1→Q2→Q3→FY).
+# Q1's YTD IS the standalone quarter (90 days); FY's YTD IS the
+# standalone year (365 days) — only Q2 and Q3 need derivation.
+_FP_ORDER = ("Q1", "Q2", "Q3", "FY")
+
+
+def _derive_cashflow_standalone(periods: list[dict],
+                                ytd_rows: dict[tuple, dict]) -> None:
+    """Derive standalone OCF/capex/FreeCashFlow per period from YTD
+    when the standalone filter rejected everything (AAPL's Q2/Q3 on
+    10-Qs ship only YTD on the cash flow statement).
+
+    For Q2 standalone: subtract Q1's YTD value (same fiscal year).
+    For Q3 standalone: subtract Q2's YTD value (same fiscal year).
+    For Q1 and FY: the standalone filter already accepted the row
+    directly, so no derivation is needed (skip when field is not None).
+
+    Mutates `periods` in place. Honest about gaps: if the prior
+    quarter's YTD row is missing (e.g., Q1 10-Q was filed late or the
+    concept 404'd), the standalone stays None — never fabricated.
+    """
+    for pe in periods:
+        fy = pe.get("fy")
+        fp = pe.get("fp")
+        if fy is None or fp not in _FP_ORDER:
+            continue
+        for field in CASH_FLOW_FIELDS:
+            if pe.get(field) is not None:
+                continue  # standalone already accepted by Step 1
+            cur_ytd_row = ytd_rows.get((fy, fp, field))
+            if cur_ytd_row is None:
+                continue
+            cur_val = _safe_float(cur_ytd_row.get("val"))
+            if cur_val is None:
+                continue
+            idx = _FP_ORDER.index(fp)
+            if idx == 0:
+                # Q1's YTD IS standalone (90 days) — use directly as a
+                # safety net (the standalone filter should have caught
+                # it, but be defensive if it missed for any reason)
+                pe[field] = cur_val
+                continue
+            prev_fp = _FP_ORDER[idx - 1]
+            prev_ytd_row = ytd_rows.get((fy, prev_fp, field))
+            if prev_ytd_row is None:
+                continue
+            prev_val = _safe_float(prev_ytd_row.get("val"))
+            if prev_val is None:
+                continue
+            pe[field] = cur_val - prev_val
 
 
 # -------------------------------------------------- Yahoo fallback (FT)
@@ -393,6 +577,13 @@ def _yahoo_fallback_periods(symbol: str, data_root) -> list[dict]:
                     period[field] = None
     rows = list(by_ts.values())
     rows.sort(key=lambda r: r.get("filed") or "", reverse=True)
+    # R2-1 fix — defect 2: Yahoo doesn't ship capex, so we can't compute
+    # fcf_derived (OCF − capex) on this path; Yahoo's own free_cash_flow
+    # (sourced) is the of-record FCF for Yahoo-source symbols. Set
+    # fcf_derived = None so the audit trail honestly distinguishes
+    # derived (XBRL path) from sourced (Yahoo path).
+    for r in rows:
+        r.setdefault("fcf_derived", None)
     return rows[:N_QUARTERS]
 
 
@@ -416,8 +607,20 @@ def fetch_fundamentals(symbol: str, data_root=None) -> dict:
     Returns {ok, symbol, cik, source, periods: [{fy, fp, form, filed,
     accn, start, end, revenue, net_income, gross_profit,
     operating_income, eps_diluted, eps_basic, total_debt,
-    stockholders_equity, cash, free_cash_flow, operating_cash_flow}],
-    latest_quarter, n_quarters}."""
+    stockholders_equity, cash, free_cash_flow, operating_cash_flow,
+    capex, fcf_derived}], latest_quarter, n_quarters}.
+
+    R2-1 fix — defect 2: `operating_cash_flow` is sourced from the
+    `NetCashProvidedByUsedInOperatingActivities` us-gaap concept (the
+    correct concept AAPL files — verified 200 OK live 2026-08-26); the
+    builder's original `CashFlowFromOperatingActivities` 404'd for AAPL.
+    `capex` is sourced from `PaymentsToAcquirePropertyPlantAndEquipment`
+    (primary) with `PaymentsForCapitalImprovements` fallback (registered
+    in XBRL_CONCEPT_FALLBACKS, walked by _fetch_xbrl_bundle). `fcf_derived`
+    is computed per period as operating_cash_flow − capex when both are
+    sourced, else None — the audit trail labels it derived (not sourced
+    from a single XBRL tag, since most filers incl. AAPL don't file
+    FreeCashFlow as a standalone concept — verified 404 live)."""
     sym = str(symbol or "").strip()
     if not sym:
         return {"ok": False, "symbol": sym, "error": "no symbol",
@@ -458,7 +661,16 @@ def fetch_fundamentals(symbol: str, data_root=None) -> dict:
 def _fetch_xbrl_bundle(cik: str, data_root) -> dict[str, dict]:
     """Fetch the ~13 XBRL companyconcept endpoints for one CIK (cached
     as a single bundle). Fail-soft per concept (one dead concept doesn't
-    kill the bundle)."""
+    kill the bundle).
+
+    R2-1 fix — defect 2: for fields with a fallback chain (capex), the
+    primary concept is fetched first; if the primary 404s or returns no
+    `units` block (the SEC companyconcept response shape for a missing
+    concept), the next concept in XBRL_CONCEPT_FALLBACKS[field] is tried.
+    The fallback payload is stored under the PRIMARY concept name so
+    XBRL_CONCEPTS.get(concept) in _merge_xbrl_periods finds the field
+    unchanged — the audit trail shows derived FCF computed from capex
+    regardless of which tag returned the data."""
     cache_name = f"xbrl_bundle_{cik}"
 
     def _fetch() -> dict:
@@ -474,6 +686,27 @@ def _fetch_xbrl_bundle(cik: str, data_root) -> dict[str, dict]:
                         bundle[concept] = payload
                 except Exception:  # noqa: BLE001 — per-concept fail-soft
                     pass
+        # capex fallback chain: if the primary 404'd or returned no
+        # units, walk the alternate tags (AAPL files PaymentsToAcquire
+        # PropertyPlantAndEquipment; some filers use the older
+        # PaymentsForCapitalImprovements tag instead). The fallback
+        # payload is stored under the PRIMARY concept name so the rest
+        # of the pipeline doesn't need to know which tag returned data.
+        for field, chain in XBRL_CONCEPT_FALLBACKS.items():
+            primary = chain[0]
+            primary_payload = bundle.get(primary)
+            if isinstance(primary_payload, dict) and \
+                    primary_payload.get("units"):
+                continue  # primary already returned real data
+            for alt in chain[1:]:
+                try:
+                    alt_payload = _fetch_one_concept(cik, alt)
+                    if isinstance(alt_payload, dict) and \
+                            alt_payload.get("units"):
+                        bundle[primary] = alt_payload
+                        break
+                except Exception:  # noqa: BLE001 — fallback fail-soft
+                    continue
         return {"ok": True, "data": bundle, "cik": cik}
     cached = _cached_fetch(data_root, cache_name, TTL_S, _fetch)
     return (cached or {}).get("data") or {}

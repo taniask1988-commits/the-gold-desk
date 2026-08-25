@@ -57,6 +57,20 @@ DEFAULT_TIMEOUT_S = 60.0          # per-persona / PM wall clock
 VALID_SIGNALS = ("bullish", "bearish", "neutral")
 VALID_CONSENSUS = ("bullish", "bearish", "neutral", "mixed")
 
+# R2-1 fix — defect 1: per-persona max_tokens override. The desk-wide
+# default 2400 fits every persona EXCEPT the fundamentalist, whose
+# institutional slice (8Q XBRL + top-10 13F + EPS path) is the largest
+# single payload. Bumping it to 4800 gives the reasoning-first free-tier
+# model headroom to emit JSON without truncating — combined with the
+# 13F top-10 trim in _slice_institutional (drops the prompt from
+# ~16,260 chars to ~6,000 chars), the fundamentalist's call lands
+# within the model's response budget on DEFAULT engine settings (no
+# CLI max_tokens knob required for normal runs — verified live).
+PERSONA_DEFAULT_MAX_TOKENS = 2400
+PERSONA_MAX_TOKENS: dict[str, int] = {
+    "fundamentalist": 4800,
+}
+
 
 class DeskContextError(RuntimeError):
     """Context gather failed — the desk refuses to run (fail loud)."""
@@ -197,8 +211,12 @@ def run_desk(
             futures = {}
             for p in persona_list:
                 user = _persona_user_msg(p, context, detail)
+                # R2-1 fix — defect 1: per-persona max_tokens (only the
+                # fundamentalist's bumped to 4800; default stays 2400)
+                max_tok = PERSONA_MAX_TOKENS.get(
+                    p.name, PERSONA_DEFAULT_MAX_TOKENS)
                 futures[ex.submit(_run_persona, p, user, chain, budget,
-                                  timeout)] = p
+                                  timeout, max_tok)] = p
             for fut in as_completed(futures):
                 p = futures[fut]
                 try:
@@ -297,11 +315,14 @@ def run_desk(
 # ------------------------------------------------------------ persona call
 
 def _run_persona(persona: Persona, user_msg: str, models: list[str],
-                 budget: Budget, timeout: float) -> dict:
+                 budget: Budget, timeout: float,
+                 max_tokens: int = PERSONA_DEFAULT_MAX_TOKENS) -> dict:
     """One persona = one complete_json call (with model fall-through).
 
-    Never raises: any LLM/parse failure becomes an abstention.
-    """
+    Never raises: any LLM/parse failure becomes an abstention. The
+    max_tokens override lets the fundamentalist (largest payload) emit
+    JSON without truncating — the desk-wide default 2400 fits every
+    other persona."""
     t0 = time.monotonic()
     messages = [
         {"role": "system", "content": persona.system},
@@ -311,7 +332,7 @@ def _run_persona(persona: Persona, user_msg: str, models: list[str],
     try:
         budget.check_step()
         parsed, model_used = _complete_json_with_fallback(
-            messages, models, timeout)
+            messages, models, timeout, max_tokens=max_tokens)
         budget.record_step(time.monotonic() - t0)
         return _persona_result(persona, parsed, model_used,
                                time.monotonic() - t0)
@@ -715,10 +736,45 @@ def _slice_institutional(inst: dict | None) -> dict:
     """The fundamentalist's 13F entitlement — the latest 13F-HR
     holdings for the default filer (Berkshire). The slice is fund-
     positioning, not per-symbol; the fundamentalist cites top
-    holdings and concentration."""
+    holdings and concentration.
+
+    R2-1 fix — defect 1: the FULL 89-position Berkshire 13F (live
+    2026-08-14, ~16,260 chars serialized) blows the free-tier
+    model's response budget — the persona reliably abstains with
+    "zen timeout" before emitting JSON. TRIM the positions array
+    to TOP 10 BY VALUE so the persona prompt drops to ~6,000 chars
+    and the JSON lands within the model's response budget on DEFAULT
+    engine settings (verified live — no max_tokens CLI knob required
+    for normal runs). The full picture is preserved via total_value
+    + n_positions + top10_pct so the persona still reasons about
+    concentration honestly without reading all 89 rows."""
     if not inst or not isinstance(inst, dict):
         return {"ok": False, "error": "no institutional slice"}
-    return inst
+    if not inst.get("ok"):
+        # fail-soft pass-through (preserves {ok: False, error} shape
+        # so the persona abstains cleanly when the 13F feed is down)
+        return inst
+    positions = inst.get("positions") or []
+    top10 = sorted(positions, key=lambda p: p.get("value", 0),
+                   reverse=True)[:10]
+    return {
+        "ok": True,
+        "fund": inst.get("fund"),
+        "cik": inst.get("cik"),
+        "filed": inst.get("filed"),
+        "accession": inst.get("accession"),
+        "total_value": inst.get("total_value"),
+        "n_positions": inst.get("n_positions"),
+        "top10_pct": inst.get("top10_pct"),
+        "positions": [{"issuer": p.get("issuer"),
+                       "cusip": p.get("cusip"),
+                       "value": p.get("value"),
+                       "shares": p.get("shares"),
+                       "type": p.get("type")} for p in top10],
+        "n_positions_shown": len(top10),
+        "note": ("top 10 by value; full picture in total_value / "
+                 "n_positions / top10_pct"),
+    }
 
 
 def _slice_curve(curve: dict | None) -> dict:
