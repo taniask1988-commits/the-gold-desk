@@ -544,14 +544,18 @@ def cmd_markets_news(args) -> int:
 
 
 def _agent_registry():
-    """Full research registry: desk tools + crypto tools + web tools."""
+    """Full research registry: desk tools + crypto tools + web tools +
+    the multi-analyst desk bridge (piece 6)."""
     from .agent.desk_tools import desk_registry
     from .agent.assets import asset_tools
     from .agent.browse import browse_tools
+    from .agent.desk_bridge import desk_bridge_tools
     reg = desk_registry()
     for t in asset_tools():
         reg.register(t)
     for t in browse_tools():
+        reg.register(t)
+    for t in desk_bridge_tools():
         reg.register(t)
     return reg
 

@@ -55,7 +55,7 @@ live. Budgets and safety laws L11–L14 of the host repo apply unchanged.
 | 3 | Asset drill-down: chart + news + drivers + research for ANY asset | TradingView symbol page | WON (4/4 blind + defect round) |
 | 4 | Analyst desk: personas (technician, macro, sentiment, news, risk) + PM synthesis, any asset | ai-hedge-fund personas (distinct evidence-backed work) | WON (critic: ours) |
 | 5 | Bloomberg layer: command palette, monitor lists, alerts, news search, economic calendar | Bloomberg public feature checklist | BUILT (GAUNTLET-P13-BUILDER, awaiting critic) |
-| 6 | Chat AGENT MODE → analyst desk entry | — | PENDING |
+| 6 | Chat AGENT MODE → analyst desk entry | — | DONE (bridge live-verified) |
 | 7 | End-to-end verification: every surface live-tested | — | PENDING |
 | 8 | Critic gauntlet: blind comparisons per piece vs the fetched bars | all three bars | PENDING |
 
@@ -239,3 +239,6 @@ results, alert toast + persistence across reload, monitors strip,
 
 ### Piece 5 — WON
 Critic 25/25 live checks; ECO judged BEAT; command entry edge-BEAT. Defect round: Google News topic search, palette hint fix, lint clean both trees. 277/277.
+
+### Piece 6 — DONE
+run_analyst_desk bridge tool in both agent registries; live-verified on GC=F (5 personas, PM bullish 56).

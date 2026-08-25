@@ -32,14 +32,19 @@ DEFAULT_SYSTEM = None  # imported lazily to avoid circulars
 
 
 def build_registry() -> ToolRegistry:
-    """The full research registry: desk + crypto + web tools."""
+    """The full research registry: desk + crypto + web tools + the
+    multi-analyst desk bridge (piece 6 — chat AGENT MODE can run the
+    5-persona desk on any symbol)."""
     from .desk_tools import desk_registry
     from .assets import asset_tools
     from .browse import browse_tools
+    from .desk_bridge import desk_bridge_tools
     reg = desk_registry()
     for t in asset_tools():
         reg.register(t)
     for t in browse_tools():
+        reg.register(t)
+    for t in desk_bridge_tools():
         reg.register(t)
     return reg
 
