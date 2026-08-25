@@ -59,6 +59,7 @@ NOT wired into the orchestrator's decision loop.
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -81,6 +82,13 @@ MOVERS_TOP_N = 5           # watchlist movers strip length
 MOVERS_SCREENER_COUNT = 12  # whole-market movers strip length
 HTTP_TIMEOUT = 8.0
 
+# P10 defect 1 (ad-hoc raw symbols): guard for treating arbitrary raw
+# input as a Yahoo symbol — short and charset-restricted so a mover
+# card's ticker (TOP, GENB, EZPW, ETSY…) can be probed directly while
+# spaces / %-sequences / query junk never reach the URL builder.
+ADHOC_MAX_LEN = 24
+_ADHOC_SYMBOL_RE = re.compile(r"^[A-Za-z0-9^.=:/-]+$")
+
 
 # ------------------------------------------------------------------ fetch
 def _http_get(url: str, timeout: float = HTTP_TIMEOUT) -> str:
@@ -90,6 +98,23 @@ def _http_get(url: str, timeout: float = HTTP_TIMEOUT) -> str:
     })
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read().decode("utf-8", "replace")
+
+
+def _adhoc_candidate(symbol: str) -> str | None:
+    """Raw user input → candidate Yahoo symbol for the ad-hoc fallback
+    (P10 defect 1). Guards: ≤ ADHOC_MAX_LEN chars and the restricted
+    charset ^[A-Za-z0-9^.=:/-]+$ (letters, digits, caret, equals, dot,
+    colon, slash, dash — no spaces or %-encoding junk, so there is no
+    injection surface in the chart URL). Upper-cased: Yahoo symbols
+    are canonically upper-case. Returns None when the input is not a
+    safe candidate (then fetch_detail serves the not-found path
+    WITHOUT touching the network)."""
+    s = str(symbol or "").strip()
+    if not s or len(s) > ADHOC_MAX_LEN:
+        return None
+    if not _ADHOC_SYMBOL_RE.match(s):
+        return None
+    return s.upper()
 
 
 def _fetch_chart(symbol: str, range_: str = "1d",
@@ -293,6 +318,24 @@ def _cached_fetch(data_root: str | Path, name: str, ttl: int,
             return cached
         return {"ok": False, "error": f"{type(e).__name__}: {e}",
                 "fetched_at": time.time(), "cache_hit": False}
+
+
+def _detail_news(canon: str, data_root: str | Path = "data") -> dict:
+    """Per-symbol RSS headlines for fetch_detail (fail-soft seam).
+
+    Live-probed 2026-08-25: feeds.finance.yahoo.com/rss/2.0/headline is
+    keyless and serves US equities, crypto, futures, indices and major
+    FX (AAPL 18 items, BTC-USD 18, GC=F 16, ^NSEI 6, EURUSD=X 19) but
+    carries NO NSE-listed symbols (RELIANCE.NS → empty channel — a
+    valid cached state, not an error). Runs off the canon Yahoo symbol
+    (an inverted pair like inr/usd → USDINR=X simply gets empty news).
+    Never raises — see markets/news.py.
+    """
+    try:
+        from .news import fetch_symbol_news
+        return fetch_symbol_news(canon, data_root)
+    except Exception:  # noqa: BLE001 — news never breaks the detail
+        return {"ok": False, "items": []}
 
 
 # ------------------------------------------------------- market movers
@@ -499,6 +542,13 @@ def _resolve_for_detail(symbol: str):
     USDINR=X) the inverted flag is set and the quote is served as
     1/price. Pair inputs with no registry hit on either side (jpy/eur)
     return the ad-hoc Yahoo pair, in_registry=False.
+
+    Resolution order (P10 defect 1, whole-market movers dead-end):
+    registry alias → registry symbol → FX pair/direct → reciprocal
+    pair → AD-HOC raw Yahoo attempt (in fetch_detail, guarded by
+    _adhoc_candidate) → not found. Before P10 anything the registry
+    and pair resolvers didn't know (screener movers like TOP/GENB/
+    EZPW, or any arbitrary ticker) dead-ended on "Symbol not found".
     """
     norm = normalize(symbol)
     pr = resolve_pair(symbol)
@@ -544,20 +594,50 @@ def fetch_detail(symbol: str, data_root: str | Path = "data") -> dict:
     never raises, {ok: False, error} instead. If only one of the two
     fetches works, the other block degrades (None / empty bars)
     without killing the response.
+
+    Round-4 (GAUNTLET-P8-BUILDER): the detail now carries `news` —
+    per-symbol keyless Yahoo RSS headlines (max 8, 300s cache, fail-
+    soft; fetched in parallel with the chart calls for registry
+    symbols). Empty news (Yahoo's RSS carries no NSE-listed symbols)
+    is {ok: True, items: []} — the drill-down page simply hides the
+    card.
+
+    Round-5 (GAUNTLET-P10-BUILDER, defect 1): AD-HOC raw symbols.
+    When registry AND pair resolution both fail, the guarded raw
+    input (see _adhoc_candidate) is tried as a Yahoo symbol directly
+    — validated by the 1d chart fetch itself: chart.result[0] with a
+    price (meta.regularMarketPrice or closes) → served with
+    sector="adhoc", name from meta.shortName/longName (raw symbol
+    fallback) and every normal field; anything else → the same clean
+    not-found as before. This is what makes the ~24 whole-market
+    mover cards (screener symbols like TOP/GENB/EZPW outside the
+    67-symbol registry) one-click drill-downs instead of dead ends —
+    and any arbitrary ticker (ETSY, …) too. A 6-letter all-alpha
+    ticker reads as an FX pair to resolve_pair; when neither pair
+    side serves, the raw input still gets its ad-hoc attempt
+    (slash-free only — a "/" is pair intent, never a Yahoo symbol).
     """
     try:
         canon, inverted, in_reg = _resolve_for_detail(symbol)
+        adhoc = False
         if not canon:
-            return {"ok": False, "symbol": str(symbol),
-                    "error": f"unknown symbol: {symbol!r}"}
+            # P10 defect 1: registry + pair resolution both missed —
+            # the raw input itself is the last candidate
+            cand = _adhoc_candidate(symbol)
+            if cand is None:
+                return {"ok": False, "symbol": str(symbol),
+                        "error": f"unknown symbol: {symbol!r}"}
+            canon, in_reg, adhoc = cand, False, True
         daily: dict | None = None
         weekly: dict | None = None
         daily_err = weekly_err = None
+        news: dict = {"ok": False, "items": []}
         if in_reg:
-            # registry symbol (or its reciprocal): 1d ∥ 5d
-            with ThreadPoolExecutor(max_workers=2) as ex:
+            # registry symbol (or its reciprocal): 1d ∥ 5d ∥ news
+            with ThreadPoolExecutor(max_workers=3) as ex:
                 fd = ex.submit(_fetch_chart, canon, "1d", "15m")
                 fw = ex.submit(_fetch_chart, canon, "5d", "30m")
+                fn = ex.submit(_detail_news, canon, data_root)
                 try:
                     daily = fd.result()
                 except Exception as e:  # noqa: BLE001 — per-block fail-soft
@@ -566,6 +646,33 @@ def fetch_detail(symbol: str, data_root: str | Path = "data") -> dict:
                     weekly = fw.result()
                 except Exception as e:  # noqa: BLE001
                     weekly_err = f"{type(e).__name__}: {e}"
+                try:
+                    news = fn.result()
+                except Exception:  # noqa: BLE001 — news fails soft
+                    pass
+        elif adhoc:
+            # P10 defect 1: ad-hoc raw symbol — the 1d chart fetch IS
+            # the validation (Yahoo serving chart.result[0] with a
+            # price means the symbol exists); a failed/priceless
+            # fetch is the not-found path, never a half-quote
+            try:
+                daily = _fetch_chart(canon, "1d", "15m")
+                if _price_of(daily) is None:
+                    raise RuntimeError(f"no price in payload for {canon}")
+            except Exception:
+                return {"ok": False, "symbol": str(symbol),
+                        "error": f"unknown symbol: {symbol!r}"}
+            with ThreadPoolExecutor(max_workers=2) as ex:
+                fw = ex.submit(_fetch_chart, canon, "5d", "30m")
+                fn = ex.submit(_detail_news, canon, data_root)
+                try:
+                    weekly = fw.result()
+                except Exception as e:  # noqa: BLE001
+                    weekly_err = f"{type(e).__name__}: {e}"
+                try:
+                    news = fn.result()
+                except Exception:  # noqa: BLE001 — news fails soft
+                    pass
         else:
             # ad-hoc Yahoo pair (neither side in the registry): fetch
             # BOTH directions, anchor on the better-quoted side
@@ -594,7 +701,30 @@ def fetch_detail(symbol: str, data_root: str | Path = "data") -> dict:
                 except Exception as e:  # noqa: BLE001
                     weekly_err = f"{type(e).__name__}: {e}"
             else:
-                daily_err = (f"no chart result for {direct} or {recip}")
+                # P10 defect 1: a pair-shaped input may be a plain
+                # 6-letter ticker ("XXXXXX" reads as a pair to
+                # resolve_pair) — give the raw input its ad-hoc Yahoo
+                # attempt before giving up. Slash-free only: a "/" is
+                # pair intent and never a valid Yahoo symbol path.
+                rescued = None
+                cand = _adhoc_candidate(symbol)
+                if cand and "/" not in cand:
+                    try:
+                        c_daily = _fetch_chart(cand, "1d", "15m")
+                        if _price_of(c_daily) is not None:
+                            rescued = c_daily
+                    except Exception:  # noqa: BLE001 — last-resort probe
+                        pass
+                if rescued is not None:
+                    canon, daily, adhoc = cand, rescued, True
+                    try:
+                        weekly = _fetch_chart(canon, "5d", "30m")
+                    except Exception as e:  # noqa: BLE001
+                        weekly_err = f"{type(e).__name__}: {e}"
+                else:
+                    daily_err = (f"no chart result for {direct} or {recip}")
+            # canon is final after the ad-hoc probe — news for that side
+            news = _detail_news(canon, data_root)
         if daily is None and weekly is None:
             raise RuntimeError(f"daily: {daily_err}; 5d: {weekly_err}")
 
@@ -687,12 +817,14 @@ def fetch_detail(symbol: str, data_root: str | Path = "data") -> dict:
         else:
             name = (meta.get("shortName") or meta.get("longName")
                     or (entry["name"] if entry else None)
+                    or (canon if adhoc else None)   # raw symbol, P10
                     or _direct_pair_label(canon))
         out = {
             "ok": True,
             "symbol": canon,
             "name": name,
-            "sector": entry["sector"] if entry else "forex",
+            "sector": (entry["sector"] if entry
+                       else ("adhoc" if adhoc else "forex")),
             "currency": (canon[:3] if inverted
                          else meta.get("currency", "USD")),
             "price": price,
@@ -706,6 +838,7 @@ def fetch_detail(symbol: str, data_root: str | Path = "data") -> dict:
         if inverted:
             out["derived"] = True
             out["derived_from"] = canon
+        out["news"] = news
         return out
     except Exception as e:  # noqa: BLE001 — display telemetry fails soft
         return {"ok": False, "symbol": str(symbol),

@@ -366,6 +366,22 @@ def cmd_markets(args) -> int:
                                                tz=_dt.timezone.utc)
             print(f"last bar   : {when:%Y-%m-%d %H:%M} UTC  "
                   f"o={last['o']} h={last['h']} l={last['l']} c={last['c']}")
+        # per-symbol news (round-4): keyless Yahoo RSS headlines,
+        # fail-soft — an empty feed (no NSE-listed coverage) is skipped
+        news = out.get("news") or {}
+        items = news.get("items") or []
+        if items:
+            print()
+            print(f"NEWS — {out['symbol']} "
+                  f"(Yahoo RSS, {len(items)} shown)")
+            print("-" * 60)
+            for it in items:
+                when = it.get("published", "")
+                if when:
+                    when = when.split(",", 1)[-1].strip()
+                    when = when.rsplit(" ", 1)[0]  # drop timezone word
+                title = str(it.get("title", ""))[:68]
+                print(f"  · [{when}] {title}")
         return 0
 
     sector_keys = None

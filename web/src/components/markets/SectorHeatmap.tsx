@@ -1,25 +1,31 @@
 "use client";
 
 import { memo } from "react";
+import Link from "next/link";
 import type { MarketRow, SectorBlock } from "./types";
 import { Sparkline } from "./Sparkline";
-import { chgBg, displaySymbol, fmtPrice, fmtPct, TILE_GREEN, TILE_RED } from "./lib";
+import { chgBg, displaySymbol, fmtPrice, fmtPct, symbolHref, TILE_GREEN, TILE_RED } from "./lib";
 
-/** One heatmap tile: symbol, price at full precision, change_pct, sparkline.
- *  Flat rgba background scaled by |change_pct| (clamped at ~3%). Hero tiles
- *  (the full-width indices band) run one size larger for focal hierarchy. */
+/** One heatmap tile — now the drill-down entry point (piece 3): the
+ *  whole tile is a Link to /markets/<symbol>. Flat rgba background
+ *  scaled by |change_pct| (clamped at ~3%). Hero tiles (the full-width
+ *  indices band) run one size larger for focal hierarchy. The compact
+ *  label strips .NS/-USD/=X decorations; the full symbol rides in the
+ *  title attr. */
 function TileImpl({ row, hero = false }: { row: MarketRow; hero?: boolean }) {
   const up = row.change_pct > 0;
   const flat = row.change_pct === 0 || !Number.isFinite(row.change_pct);
   const sym = displaySymbol(row.symbol);
   return (
-    <div
-      className="flex min-w-[110px] flex-[1_1_110px] max-w-[210px] flex-col gap-1 overflow-hidden rounded-md border border-[#1a1f2c] px-2.5 pb-1.5 pt-2 transition-colors duration-200 hover:border-[#2a3247]"
+    <Link
+      href={symbolHref(row.symbol)}
+      className="flex min-w-0 cursor-pointer flex-col gap-1 overflow-hidden rounded-md border border-[#1a1f2c] px-2.5 pb-1.5 pt-2 transition-colors duration-200 hover:border-[#c8a04b]/55"
       style={{ backgroundColor: chgBg(row.change_pct) }}
-      title={`${row.name} · ${row.currency} · spark ${row.points_source ?? "1d"}`}
+      title={`${row.symbol} · ${row.name} · ${row.currency} · spark ${row.points_source ?? "1d"} — click for full detail`}
+      aria-label={`${row.symbol} ${row.name} — open detail page`}
     >
       <div className="flex items-baseline justify-between gap-1.5">
-        <span className="gdc-data truncate text-[11px] font-semibold tracking-tight text-[#e8ecf4]">
+        <span className="gdc-data min-w-0 truncate text-[11px] font-semibold tracking-tight text-[#e8ecf4]">
           {sym}
         </span>
         <span
@@ -58,13 +64,20 @@ function TileImpl({ row, hero = false }: { row: MarketRow; hero?: boolean }) {
         color={flat ? "#8a93a6" : up ? TILE_GREEN : TILE_RED}
         height={hero ? 32 : 26}
       />
-    </div>
+    </Link>
   );
 }
 
 export const MemoTile = memo(TileImpl);
 
-/** One sector: header row (label + average change chip) + tile grid. */
+/** One sector: header row (label + average change chip) + tile grid.
+ *
+ * Grid packing (round-3 critic defect 1): CSS grid with
+ * repeat(auto-fill, minmax(145px, 1fr)) — auto-FILL (not auto-fit)
+ * keeps every column track occupied-or-reserved, so a last-row orphan
+ * sits in a track exactly as wide as its siblings instead of
+ * stretching to the 210px flex max. Single-tile sectors (volatility)
+ * center their lone tile at max 210px instead of stretching it. */
 function SectorGridImpl({
   sector,
   avgPct,
@@ -77,6 +90,7 @@ function SectorGridImpl({
   hero?: boolean;
 }) {
   if (!sector.rows || sector.rows.length === 0) return null;
+  const single = sector.rows.length === 1;
   return (
     <section
       className={`gdc-panel px-3.5 pb-3.5 pt-3 ${hero ? "md:col-span-2 xl:col-span-3" : ""}`}
@@ -92,7 +106,7 @@ function SectorGridImpl({
             NSE · BSE · IST
           </span>
         )}
-        <span className="gdc-data text-[9px] tabular-nums text-[#76828e]">
+        <span className="gdc-data text-[9px] tabular-nums text-[#8a93a6]">
           {sector.rows.length}
         </span>
         {avgPct != null && (
@@ -108,11 +122,22 @@ function SectorGridImpl({
           </span>
         )}
       </div>
-      <div className="flex flex-wrap gap-1.5">
-        {sector.rows.map((row) => (
-          <MemoTile key={row.symbol} row={row} hero={hero} />
-        ))}
-      </div>
+      {single ? (
+        // a lone tile centers instead of stretching across dead space
+        <div className="flex justify-center">
+          <div className="w-full max-w-[210px]">
+            {sector.rows.map((row) => (
+              <MemoTile key={row.symbol} row={row} hero={hero} />
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(145px,1fr))] gap-1.5">
+          {sector.rows.map((row) => (
+            <MemoTile key={row.symbol} row={row} hero={hero} />
+          ))}
+        </div>
+      )}
     </section>
   );
 }

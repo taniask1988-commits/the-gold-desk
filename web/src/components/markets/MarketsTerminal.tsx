@@ -130,7 +130,7 @@ export function MarketsTerminal() {
         <div className="gdc-panel flex w-[280px] flex-col items-center gap-3 px-6 py-5">
           <span className="gdc-spec">Linking market feeds</span>
           <span className="gdc-breathe h-[2px] w-[120px] rounded-full bg-[#c8a04b]" />
-          <span className="gdc-data text-[9px] text-[#76828e]">67 symbols · 9 sectors · keyless</span>
+          <span className="gdc-data text-[9px] text-[#8a93a6]">67 symbols · 9 sectors · keyless</span>
         </div>
       </div>
     );
@@ -193,7 +193,7 @@ export function MarketsTerminal() {
             />
           ))}
           {derived.sectors.length === 0 && (
-            <div className="gdc-panel px-4 py-6 text-center text-[11px] uppercase tracking-[0.16em] text-[#76828e]">
+            <div className="gdc-panel px-4 py-6 text-center text-[11px] uppercase tracking-[0.16em] text-[#8a93a6]">
               no sector data served
             </div>
           )}

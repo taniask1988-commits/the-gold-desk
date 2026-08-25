@@ -60,9 +60,41 @@ export function fmtPrice(
   });
 }
 
-/** Display symbol: strip Yahoo caret/FX decorations for a clean ticker. */
+/** Compact display symbol for TILES and mover cards: strip the Yahoo
+ *  caret / FX "=X" / NSE ".NS" / crypto "-USD" decorations for a clean
+ *  ticker (the round-3 critic caught ICICIBANK.NS clipping at 145px).
+ *  The full registry symbol always stays in the title attr and on the
+ *  detail page. */
 export function displaySymbol(symbol: string): string {
-  return symbol.replace(/\^+/, "").replace(/=X$/, "");
+  return symbol
+    .replace(/\^+/g, "")
+    .replace(/=X$/, "")
+    .replace(/\.NS$/, "")
+    .replace(/-USD$/, "");
+}
+
+/** Sector chip label for the detail page. Ad-hoc symbols (P10 defect
+ *  1: non-registry tickers like TOP/ETSY served straight off Yahoo)
+ *  carry sector "adhoc" — displayed as the generic "Market". */
+export function sectorLabel(sector?: string): string {
+  if (!sector) return "Symbol";
+  return sector === "adhoc" ? "Market" : sector;
+}
+
+/** Reciprocal-direction label for a Yahoo FX symbol (mirrors the
+ *  python `_pair_label`): USDINR=X → "INR/USD" — the display side of a
+ *  derived pair on the detail page. */
+export function derivedPairLabel(symbol: string): string {
+  const core = symbol.slice(0, 6).toUpperCase();
+  return `${core.slice(3)}/${core.slice(0, 3)}`;
+}
+
+/** Drill-down href for a symbol. Each path segment is encoded but "/"
+ *  stays a REAL separator ("inr/usd" → /markets/inr/usd) so the
+ *  [...symbol] catch-all route re-joins it; carets/equals/dots encode
+ *  safely inside their segment ("^GSPC" → /markets/%5EGSPC). */
+export function symbolHref(symbol: string): string {
+  return "/markets/" + symbol.split("/").map(encodeURIComponent).join("/");
 }
 
 /** ISO timestamp → "YYYY-MM-DD HH:MM:SS UTC" (input is already Z-suffixed). */

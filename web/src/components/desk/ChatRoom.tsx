@@ -161,6 +161,15 @@ export function ChatRoom() {
   // keep streamRef in sync so the streaming reader can mutate latest state
   useEffect(() => { streamRef.current = stream; }, [stream]);
 
+  /* -------- ?q= prefill (piece 3 drill-down hand-off) --------
+   * The markets detail page links here as /chat?q=research <SYMBOL>.
+   * Prefill the composer with the query — never auto-send: the user
+   * stays in control of what reaches the agent. */
+  useEffect(() => {
+    const q = new URLSearchParams(window.location.search).get("q");
+    if (q && q.trim()) setInput(q.trim().slice(0, 400));
+  }, []);
+
   /* -------- polling for left-rail data -------- */
   useEffect(() => {
     let cancelled = false;

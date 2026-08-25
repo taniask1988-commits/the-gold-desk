@@ -52,7 +52,7 @@ live. Budgets and safety laws L11–L14 of the host repo apply unchanged.
 | 0 | Bars fetched (TradingView screenshots, ai-hedge-fund clone, Bloomberg checklist) | — | DONE |
 | 1 | Multi-market data plane: symbol registry v2 + feeds for forex/crypto/NSE/US/indices/commodities | TradingView coverage of those markets | ROUND 3 BUILT (awaiting round-3 critic) |
 | 2 | Markets surface: cross-asset heatmap, movers, watchlists, search | TradingView /markets screenshot (blind) | WON (round 1) |
-| 3 | Asset drill-down: chart + news + drivers + research for ANY asset | TradingView symbol page | PENDING |
+| 3 | Asset drill-down: chart + news + drivers + research for ANY asset | TradingView symbol page | WON (4/4 blind + defect round) |
 | 4 | Analyst desk: personas (technician, macro, sentiment, news, risk) + PM synthesis, any asset | ai-hedge-fund personas (distinct evidence-backed work) | PENDING |
 | 5 | Bloomberg layer: command palette, monitor lists, alerts, news search, economic calendar | Bloomberg public feature checklist | PENDING |
 | 6 | Chat AGENT MODE → analyst desk entry | — | PENDING |
@@ -176,3 +176,6 @@ R1: TRADINGVIEW (FX pips, detail mislabel, sparklines, coverage). R2: TRADINGVIE
 
 ### Piece 2 — WON (round 1)
 Blind VLM: "Page B wins by a landslide" (at-a-glance). ~60 instruments/viewport vs TV ~4. Cosmetic defects (ragged orphans, NSE truncation, microtext contrast) folded into Piece 3.
+
+### Piece 3 — WON (4/4 blind VLM + defect round)
+Ad-hoc resolution closed the biggest gap: ANY Yahoo ticker in one click. News above fold, decoded breadcrumbs, 24/24 mover links live.

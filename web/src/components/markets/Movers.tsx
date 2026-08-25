@@ -1,19 +1,24 @@
 "use client";
 
 import { memo } from "react";
+import Link from "next/link";
 import type { MoverQuote } from "./types";
-import { chgBg, chgColor, fmtPct, fmtPrice, displaySymbol } from "./lib";
+import { chgBg, chgColor, fmtPct, fmtPrice, displaySymbol, symbolHref } from "./lib";
 
-/** Compact whole-market mover card — tint intensity scales with |change_pct|. */
+/** Compact whole-market mover card — tint intensity scales with
+ *  |change_pct|. Click-through (piece 3): the card is a Link to the
+ *  symbol's drill-down page. */
 function MoverCardImpl({ q }: { q: MoverQuote }) {
   return (
-    <div
-      className="flex min-w-[104px] flex-1 flex-col gap-0.5 overflow-hidden rounded-md border border-[#1a1f2c] px-2.5 py-1.5 transition-colors duration-200 hover:border-[#2a3247]"
+    <Link
+      href={symbolHref(q.symbol)}
+      className="flex min-w-0 cursor-pointer flex-col gap-0.5 overflow-hidden rounded-md border border-[#1a1f2c] px-2.5 py-1.5 transition-colors duration-200 hover:border-[#c8a04b]/55"
       style={{ backgroundColor: chgBg(q.change_pct) }}
-      title={`${q.name} — ${fmtPct(q.change_pct)}`}
+      title={`${q.symbol} · ${q.name} — ${fmtPct(q.change_pct)} — click for full detail`}
+      aria-label={`${q.symbol} ${q.name} — open detail page`}
     >
       <div className="flex items-baseline justify-between gap-2">
-        <span className="gdc-data truncate text-[10.5px] font-semibold tracking-tight text-[#e8ecf4]">
+        <span className="gdc-data min-w-0 truncate text-[10.5px] font-semibold tracking-tight text-[#e8ecf4]">
           {displaySymbol(q.symbol)}
         </span>
         <span
@@ -26,10 +31,10 @@ function MoverCardImpl({ q }: { q: MoverQuote }) {
       <div className="truncate text-[8.5px] leading-tight text-[#8a93a6]" title={q.name}>
         {q.name}
       </div>
-      <div className="gdc-data text-[9.5px] tabular-nums text-[#8a93a6]">
+      <div className="gdc-data text-[11px] tabular-nums text-[#aab4bf]">
         {q.price != null ? fmtPrice(q.price, q.symbol) : "—"}
       </div>
-    </div>
+    </Link>
   );
 }
 
@@ -53,7 +58,7 @@ function MoverRowImpl({
         </span>
         <span className="h-px flex-1 bg-[#1a1f2c]" />
       </div>
-      <div className="flex flex-wrap gap-1.5">
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(104px,1fr))] gap-1.5">
         {quotes.map((q) => (
           <MoverCard key={q.symbol} q={q} />
         ))}
@@ -78,7 +83,7 @@ function MoversStripImpl({
           Market Movers — Whole US Market
         </h2>
         <span className="h-px flex-1 bg-[#1a1f2c]" />
-        <span className="text-[8px] uppercase tracking-[0.18em] text-[#76828e]">
+        <span className="text-[9px] uppercase tracking-[0.18em] text-[#8a93a6]">
           Yahoo day_gainers / day_losers · 12 per side
         </span>
       </div>
@@ -111,20 +116,22 @@ function WatchlistRowImpl({
         <span className="h-px flex-1 bg-[#1a1f2c]" />
       </div>
       {quotes.length === 0 && (
-        <div className="py-2 text-[9px] uppercase tracking-[0.14em] text-[#76828e]">no rows</div>
+        <div className="py-2 text-[9px] uppercase tracking-[0.14em] text-[#8a93a6]">no rows</div>
       )}
       {quotes.map((q, i) => (
-        <div
+        <Link
           key={q.symbol}
-          className="flex items-baseline gap-2 rounded-sm px-1.5 py-[3px] transition-colors duration-150 hover:bg-white/[0.03]"
+          href={symbolHref(q.symbol)}
+          title={`${q.symbol} · ${q.name} — click for full detail`}
+          className="flex cursor-pointer items-baseline gap-2 rounded-sm px-1.5 py-[3px] transition-colors duration-150 hover:bg-white/[0.04]"
         >
-          <span className="gdc-data w-3.5 shrink-0 text-[9px] tabular-nums text-[#76828e]">
+          <span className="gdc-data w-3.5 shrink-0 text-[9px] tabular-nums text-[#8a93a6]">
             {i + 1}
           </span>
           <span className="gdc-data w-[76px] shrink-0 truncate text-[10.5px] font-semibold text-[#e8ecf4]">
             {displaySymbol(q.symbol)}
           </span>
-          <span className="min-w-0 flex-1 truncate text-[9px] text-[#76828e]" title={q.name}>
+          <span className="min-w-0 flex-1 truncate text-[9px] text-[#8a93a6]" title={q.name}>
             {q.name}
           </span>
           <span className="gdc-data hidden shrink-0 text-[10px] tabular-nums text-[#8a93a6] sm:inline">
@@ -136,7 +143,7 @@ function WatchlistRowImpl({
           >
             {fmtPct(q.change_pct)}
           </span>
-        </div>
+        </Link>
       ))}
     </div>
   );
@@ -157,7 +164,7 @@ function WatchlistMoversImpl({
           Watchlist Movers — Registry Top 5
         </h2>
         <span className="h-px flex-1 bg-[#1a1f2c]" />
-        <span className="text-[8px] uppercase tracking-[0.18em] text-[#76828e]">
+        <span className="text-[9px] uppercase tracking-[0.18em] text-[#8a93a6]">
           across the 67-symbol board
         </span>
       </div>

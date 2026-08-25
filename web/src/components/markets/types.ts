@@ -46,6 +46,19 @@ export interface DetailBar {
   c: number;
 }
 
+export interface DetailNewsItem {
+  title: string;
+  link?: string;
+  published?: string;
+  source?: string;
+}
+
+export interface DetailNews {
+  ok?: boolean;
+  items?: DetailNewsItem[];
+  error?: string;
+}
+
 export interface SymbolDetail {
   ok: boolean;
   symbol?: string;
@@ -60,5 +73,6 @@ export interface SymbolDetail {
   bars?: DetailBar[];
   derived?: boolean;
   derived_from?: string;
+  news?: DetailNews;
   error?: string;
 }

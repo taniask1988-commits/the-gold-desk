@@ -36,10 +36,17 @@ def _offline_screener(monkeypatch):
     """Keep the suite offline (round-3): fetch_board now merges whole-
     market movers, so the screener seam raises by default. Movers tests
     re-patch mb._fetch_screener or mb.fetch_market_movers with canned
-    data."""
+    data.
+
+    Round-4 (P8): fetch_detail now also merges per-symbol RSS news —
+    the news seam defaults to an offline empty stub; news tests re-patch
+    mb._detail_news or markets.news._http_get with canned payloads."""
     def _dead(scr_id, count=12):
         raise RuntimeError(f"offline test: {scr_id}")
     monkeypatch.setattr(mb, "_fetch_screener", _dead)
+    monkeypatch.setattr(mb, "_detail_news",
+                        lambda canon, data_root="data":
+                        {"ok": False, "items": []})
 
 
 def canned_chart(price=105.0, prev=100.0, n=6, currency="USD",
@@ -502,9 +509,9 @@ def test_fetch_detail_daily_down_degrades(monkeypatch, tmp_path):
 
 
 def test_fetch_detail_fail_soft(monkeypatch, tmp_path):
-    # unknown symbol: no network at all, clean error
-    monkeypatch.setattr(mb, "_fetch_chart",
-                        fake_fetch(default=canned_chart()))
+    # unknown symbol: the P10 ad-hoc Yahoo attempt 404s → clean error
+    monkeypatch.setattr(mb, "_fetch_chart", fake_fetch(payloads={
+        ("ZZZ-NOT-A-SYMBOL", "1d"): None}))
     out = mb.fetch_detail("zzz-not-a-symbol", data_root=tmp_path)
     assert out["ok"] is False
     assert "unknown symbol" in out["error"]
@@ -758,11 +765,137 @@ def test_detail_adhoc_pair_direct_when_better(monkeypatch, tmp_path):
 
 def test_detail_unknown_pair_fails_clean(monkeypatch, tmp_path):
     """A pair neither side of which resolves anywhere → clean fail-soft
-    (both candidate directions raise)."""
+    (both candidate directions raise, and the slash in the raw input
+    means it never gets a raw ad-hoc attempt either — a "/" is pair
+    intent, not a Yahoo symbol path)."""
     monkeypatch.setattr(mb, "_fetch_chart", fake_fetch(payloads={
         ("ABCDEF=X", "1d"): None, ("DEFABC=X", "1d"): None}))
     out = mb.fetch_detail("abc/def", data_root=tmp_path)
     assert out["ok"] is False
+
+
+# --------------------------------------- round-5: ad-hoc raw symbols (P10)
+def test_detail_adhoc_raw_symbol_resolves(monkeypatch, tmp_path):
+    """P10 defect 1: screener mover symbols outside the registry (TOP,
+    GENB, EZPW…) resolve ad-hoc straight off the Yahoo chart — sector
+    'adhoc', name from meta.shortName, and every normal field."""
+    daily = canned_chart(price=16.24, prev=14.13, n=6)
+    daily["meta"]["shortName"] = "TOP Financial"
+    daily["meta"]["longName"] = "TOP Financial Holding Group Ltd"
+    weekly = canned_chart(price=16.24, prev=12.0, n=10)
+    monkeypatch.setattr(mb, "_fetch_chart", fake_fetch(payloads={
+        ("TOP", "1d"): daily, ("TOP", "5d"): weekly}))
+    out = mb.fetch_detail("top", data_root=tmp_path)   # raw + lowercase
+    assert out["ok"] is True
+    assert out["symbol"] == "TOP"
+    assert out["sector"] == "adhoc"
+    assert out["name"] == "TOP Financial"        # meta.shortName first
+    assert out["price"] == 16.24
+    assert out["prev_close"] == 14.13
+    assert out["change"] == 2.11
+    assert out["change_pct"] == round(2.11 / 14.13 * 100, 2)
+    assert len(out["bars"]) == 10               # 5d bars served too
+    assert out["range_5d_change_pct"] == round(
+        (16.24 - 12.0) / 12.0 * 100, 2)
+    assert out["currency"] == "USD"
+    assert "derived" not in out                 # never flagged derived
+    # news seam still folded in (offline stub → fail-soft empty)
+    assert out["news"]["items"] == []
+
+
+def test_detail_adhoc_name_falls_back_to_raw_symbol(monkeypatch, tmp_path):
+    """Meta without shortName/longName → the name is the raw symbol."""
+    daily = canned_chart(price=5.0, prev=4.0, n=6)
+    del daily["meta"]["shortName"]
+    del daily["meta"]["longName"]
+    monkeypatch.setattr(mb, "_fetch_chart", fake_fetch(payloads={
+        ("EZPW", "1d"): daily, ("EZPW", "5d"): daily}))
+    out = mb.fetch_detail("EZPW", data_root=tmp_path)
+    assert out["ok"] is True
+    assert out["name"] == "EZPW"
+    assert out["sector"] == "adhoc"
+
+
+def test_detail_adhoc_chart_404s_not_found(monkeypatch, tmp_path):
+    """Ad-hoc candidate whose chart fetch fails → the SAME clean
+    not-found path as before P10 (never a half-quote)."""
+    monkeypatch.setattr(mb, "_fetch_chart", fake_fetch(payloads={
+        ("ZZZZ", "1d"): None}))
+    out = mb.fetch_detail("ZZZZ", data_root=tmp_path)
+    assert out["ok"] is False
+    assert out["symbol"] == "ZZZZ"
+    assert "unknown symbol" in out["error"]
+
+    # a served chart with NO price anywhere is equally not-found
+    priceless = {"meta": {"currency": "USD"}, "timestamp": [],
+                 "indicators": {"quote": [{"close": []}]}}
+    monkeypatch.setattr(mb, "_fetch_chart", fake_fetch(payloads={
+        ("QQQQ", "1d"): priceless}))
+    out2 = mb.fetch_detail("QQQQ", data_root=tmp_path)
+    assert out2["ok"] is False
+    assert "unknown symbol" in out2["error"]
+
+
+def test_detail_adhoc_invalid_input_rejected_before_fetch(
+        monkeypatch, tmp_path):
+    """Guard: spaces / punctuation / over-length input never reaches
+    the network — the not-found returns without a single chart call."""
+    calls: list = []
+    monkeypatch.setattr(mb, "_fetch_chart", fake_fetch(calls=calls))
+    for bad in ("bad symbol!", "a%20b", "??", "x" * 25, ""):
+        out = mb.fetch_detail(bad, data_root=tmp_path)
+        assert out["ok"] is False, bad
+        assert "unknown symbol" in out["error"], bad
+    assert calls == []                # zero chart fetches attempted
+
+
+def test_detail_adhoc_registry_still_wins(monkeypatch, tmp_path):
+    """The ad-hoc fallback never shadows the registry: 'nvda' is still
+    the curated NVDA row (sector 'us', curated name), not ad-hoc."""
+    daily = canned_chart(price=210.0, prev=200.0, n=6)
+    daily["meta"]["shortName"] = "NVIDIA Corporation"
+    monkeypatch.setattr(mb, "_fetch_chart", fake_fetch(payloads={
+        "NVDA": daily}))
+    out = mb.fetch_detail("nvda", data_root=tmp_path)
+    assert out["ok"] is True
+    assert out["symbol"] == "NVDA"
+    assert out["sector"] == "us"            # registry sector, not adhoc
+    assert out["name"] == "NVIDIA Corporation"
+
+
+def test_detail_pairshaped_six_letter_ticker_rescued(monkeypatch, tmp_path):
+    """A 6-letter all-alpha ticker reads as an FX pair to resolve_pair
+    (XXXXXX → XXXXXX=X / XXXYYY=X); when neither pair side serves,
+    the raw input still gets its ad-hoc Yahoo attempt (P10 order:
+    pair → reciprocal pair → raw ad-hoc → not found)."""
+    daily = canned_chart(price=210.0, prev=200.0, n=6)
+    monkeypatch.setattr(mb, "_fetch_chart", fake_fetch(payloads={
+        ("ABCDEF=X", "1d"): None, ("DEFABC=X", "1d"): None,
+        ("ABCDEF", "1d"): daily, ("ABCDEF", "5d"): daily}))
+    out = mb.fetch_detail("abcdef", data_root=tmp_path)
+    assert out["ok"] is True
+    assert out["symbol"] == "ABCDEF"
+    assert out["sector"] == "adhoc"
+    assert out["price"] == 210.0
+
+
+def test_cli_markets_detail_adhoc_symbol(monkeypatch, tmp_path, capsys):
+    """The CLI detail path serves ad-hoc symbols too (P10): the mover
+    card drill-down's exact backend call."""
+    from gold_desk.cli import main
+    daily = canned_chart(price=16.24, prev=14.13, n=6)
+    daily["meta"]["shortName"] = "TOP Financial"
+    monkeypatch.setattr(mb, "_fetch_chart", fake_fetch(payloads={
+        ("TOP", "1d"): daily, ("TOP", "5d"): daily}))
+    rc = main(["markets", "--symbol", "TOP",
+               "--json", "--data-root", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    payload = json.loads(out.strip())
+    assert payload["ok"] is True
+    assert payload["symbol"] == "TOP"
+    assert payload["sector"] == "adhoc"
+    assert payload["name"] == "TOP Financial"
 
 
 # ---------------------------------------------------------------------- CLI
@@ -891,3 +1024,200 @@ def test_cli_markets_detail_fx_precision(monkeypatch, tmp_path, capsys):
     assert rc == 0
     assert "1.16591" in out
     assert "1.17 " not in out
+
+
+# -------------------------------------------------- round-4: per-symbol news
+# GAUNTLET-P8-BUILDER: keyless Yahoo RSS headlines (live-probed
+# 2026-08-25 — AAPL 18 items, BTC-USD 18, GC=F 16, ^NSEI 6, EURUSD=X 19,
+# RELIANCE.NS empty channel). Offline parser/cache/fail-soft tests.
+from gold_desk.markets import news as mnews  # noqa: E402
+
+CANNED_RSS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<rss version="2.0">
+    <channel>
+        <description>Latest Financial News for TEST</description>
+        <item>
+            <title><![CDATA[Plain Cdata Headline &amp; Ampersand]]></title>
+            <link>https://finance.yahoo.com/markets/stocks/articles/one.html?.tsrc=rss</link>
+            <pubDate>Mon, 24 Aug 2026 21:03:00 +0000</pubDate>
+        </item>
+        <item>
+            <title>Tracking &lt;b&gt;Wrapped&lt;/b&gt; Link Item</title>
+            <link>https://finance.yahoo.com/r/one?url=https%3A%2F%2Fwww.reuters.com%2Farticle&amp;guccounter=1</link>
+            <pubDate>Sun, 23 Aug 2026 10:00:00 +0000</pubDate>
+        </item>
+        <item>
+            <title>No pubDate item</title>
+            <link>https://finance.yahoo.com/markets/stocks/articles/three.html</link>
+        </item>
+        <item>
+            <link>https://finance.yahoo.com/markets/stocks/articles/no-title.html</link>
+            <pubDate>Sat, 22 Aug 2026 09:00:00 +0000</pubDate>
+        </item>
+    </channel>
+</rss>
+"""
+
+
+def test_parse_headline_rss_canned():
+    items = mnews.parse_headline_rss(CANNED_RSS, source="probe")
+    # title-less item dropped, the other three parse
+    assert len(items) == 3
+    assert items[0]["title"] == "Plain Cdata Headline & Ampersand"
+    assert items[0]["published"] == "Mon, 24 Aug 2026 21:03:00 +0000"
+    assert items[0]["source"] == "probe"
+    # plain links keep their path, tracking ?tsrc=rss suffix stripped
+    assert items[0]["link"].startswith(
+        "https://finance.yahoo.com/markets/stocks/articles/one.html")
+    assert "tsrc" not in items[0]["link"]
+    # url= redirect wrapper unwrapped + unquoted (regex stops at the
+    # first & — the trailing guccounter tracking param is dropped)
+    assert items[1]["link"] == "https://www.reuters.com/article"
+    # missing pubDate → empty string, item kept
+    assert items[2]["title"] == "No pubDate item"
+    assert items[2]["published"] == ""
+
+
+def test_parse_headline_rss_empty_channel():
+    assert mnews.parse_headline_rss(
+        "<rss><channel><title>empty</title></channel></rss>") == []
+
+
+def test_fetch_symbol_news_canned_and_cached(monkeypatch, tmp_path):
+    monkeypatch.setattr(mnews, "_http_get", lambda url, timeout=8.0:
+                        CANNED_RSS)
+    calls = {"n": 0}
+
+    def counting(url, timeout=8.0):
+        calls["n"] += 1
+        return CANNED_RSS
+    monkeypatch.setattr(mnews, "_http_get", counting)
+    out = mnews.fetch_symbol_news("TEST", data_root=tmp_path)
+    assert out["ok"] is True
+    assert out["symbol"] == "TEST"
+    assert out["cache_hit"] is False
+    assert len(out["items"]) == 3
+    # second call inside the 300s TTL → cache hit, no HTTP
+    out2 = mnews.fetch_symbol_news("TEST", data_root=tmp_path)
+    assert out2["cache_hit"] is True
+    assert calls["n"] == 1
+    # separate symbols get separate cache files (slug+hash namespace)
+    out3 = mnews.fetch_symbol_news("OTHER", data_root=tmp_path)
+    assert out3["cache_hit"] is False
+
+
+def test_fetch_symbol_news_caps_at_eight(monkeypatch, tmp_path):
+    many = "<rss><channel>" + "".join(
+        f"<item><title>Headline {i}</title>"
+        f"<link>https://x/{i}</link>"
+        f"<pubDate>Mon, 24 Aug 2026 0{i}:00:00 +0000</pubDate></item>"
+        for i in range(20)) + "</channel></rss>"
+    monkeypatch.setattr(mnews, "_http_get", lambda url, timeout=8.0: many)
+    out = mnews.fetch_symbol_news("TEST", data_root=tmp_path)
+    assert out["ok"] is True
+    assert len(out["items"]) == 8     # NEWS_MAX_ITEMS cap
+    assert out["items"][0]["title"] == "Headline 0"
+
+
+def test_fetch_symbol_news_empty_channel_is_ok(monkeypatch, tmp_path):
+    """Live-probed: NSE-listed symbols (RELIANCE.NS) return HTTP 200
+    with an EMPTY channel — a valid cached state, not an error."""
+    empty = ("<?xml version='1.0'?>"
+             "<rss><channel><description>Latest Financial News for "
+             "</description></channel></rss>")
+    monkeypatch.setattr(mnews, "_http_get", lambda url, timeout=8.0: empty)
+    out = mnews.fetch_symbol_news("RELIANCE.NS", data_root=tmp_path)
+    assert out["ok"] is True
+    assert out["items"] == []
+    # cached too (empty ≠ error)
+    out2 = mnews.fetch_symbol_news("RELIANCE.NS", data_root=tmp_path)
+    assert out2["cache_hit"] is True
+
+
+def test_fetch_symbol_news_fail_soft(monkeypatch, tmp_path):
+    def dead(url, timeout=8.0):
+        raise RuntimeError("rss unreachable")
+    monkeypatch.setattr(mnews, "_http_get", dead)
+    out = mnews.fetch_symbol_news("BTC-USD", data_root=tmp_path)
+    assert out["ok"] is False
+    assert out["items"] == []
+    assert "RuntimeError" in out.get("error", "")
+    # empty symbol short-circuits, never raises
+    out2 = mnews.fetch_symbol_news("", data_root=tmp_path)
+    assert out2["ok"] is False
+    assert out2["items"] == []
+
+
+def test_fetch_detail_carries_news(monkeypatch, tmp_path):
+    """Round-4: the detail folds news in alongside the chart calls."""
+    canned_news = {"ok": True, "items": [
+        {"title": "Bitcoin Tops $81,000",
+         "link": "https://finance.yahoo.com/x",
+         "published": "Mon, 24 Aug 2026 21:03:00 +0000",
+         "source": "Yahoo Finance · BTC-USD"}]}
+    monkeypatch.setattr(mb, "_detail_news",
+                        lambda canon, data_root="data": canned_news)
+    monkeypatch.setattr(mb, "_fetch_chart", fake_fetch(payloads={
+        ("BTC-USD", "1d"): canned_chart(price=105.0, prev=100.0, n=8),
+        ("BTC-USD", "5d"): canned_chart(price=105.0, prev=95.0, n=10)}))
+    out = mb.fetch_detail("btc", data_root=tmp_path)
+    assert out["ok"] is True
+    assert out["news"]["ok"] is True
+    assert out["news"]["items"][0]["title"] == "Bitcoin Tops $81,000"
+    # the seam is called with the CANONICAL yahoo symbol
+    seen = {}
+    monkeypatch.setattr(mb, "_detail_news",
+                        lambda canon, data_root="data":
+                        seen.setdefault("canon", canon) or canned_news)
+    mb.fetch_detail("btc", data_root=tmp_path)
+    assert seen["canon"] == "BTC-USD"
+
+
+def test_fetch_detail_news_never_breaks_detail(monkeypatch, tmp_path):
+    """A news seam that raises is swallowed — the quote still serves."""
+    def exploding(canon, data_root="data"):
+        raise RuntimeError("news exploded")
+    monkeypatch.setattr(mb, "_detail_news", exploding)
+    monkeypatch.setattr(mb, "_fetch_chart", fake_fetch(payloads={
+        ("GC=F", "1d"): canned_chart(price=105.0, prev=100.0, n=6),
+        ("GC=F", "5d"): canned_chart(price=105.0, prev=95.0, n=8)}))
+    out = mb.fetch_detail("gold", data_root=tmp_path)
+    assert out["ok"] is True
+    assert out["price"] == 105.0
+
+
+def test_cli_markets_detail_prints_news(monkeypatch, tmp_path, capsys):
+    from gold_desk.cli import main
+    monkeypatch.setattr(mb, "_detail_news", lambda canon, data_root="data": {
+        "ok": True, "items": [
+            {"title": "Bitcoin Tops $81,000 as Gold Notches Best Month",
+             "link": "https://finance.yahoo.com/x",
+             "published": "Mon, 24 Aug 2026 21:03:00 +0000",
+             "source": "Yahoo Finance · BTC-USD"}]})
+    monkeypatch.setattr(mb, "_fetch_chart", fake_fetch(payloads={
+        ("BTC-USD", "1d"): canned_chart(price=105.0, prev=100.0, n=6),
+        ("BTC-USD", "5d"): canned_chart(price=105.0, prev=95.0, n=8)}))
+    rc = main(["markets", "--symbol", "btc",
+               "--data-root", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "NEWS — BTC-USD" in out
+    assert "Bitcoin Tops $81,000" in out
+    assert "24 Aug 2026 21:03:00" in out
+
+
+def test_cli_markets_detail_no_news_section_when_empty(
+        monkeypatch, tmp_path, capsys):
+    """Fail-soft: no headlines (empty RSS / offline) → no NEWS section."""
+    from gold_desk.cli import main
+    monkeypatch.setattr(mb, "_detail_news",
+                        lambda canon, data_root="data":
+                        {"ok": True, "items": []})
+    monkeypatch.setattr(mb, "_fetch_chart", fake_fetch(payloads={
+        ("RELIANCE.NS", "1d"): canned_chart(price=105.0, prev=100.0, n=6),
+        ("RELIANCE.NS", "5d"): canned_chart(price=105.0, prev=95.0, n=8)}))
+    rc = main(["markets", "--symbol", "reliance",
+               "--data-root", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "NEWS" not in out
