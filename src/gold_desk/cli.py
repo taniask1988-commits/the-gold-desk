@@ -747,6 +747,264 @@ def cmd_markets_institutional(args) -> int:
     return 0
 
 
+# -------------------------------------- R2-2 quant + verified snapshot ---
+
+
+def cmd_markets_quant(args) -> int:
+    """markets-quant SYMBOL — the numpy-free indicator battery
+    (RSI14, MACD, BBands, ATR14/ATR%, realized_vol_20d, vol_regime,
+    SMA{20,50,200}, EMA{12,26}, ADX14, Stoch, CCI20, OBV). Computed
+    deterministically from DAILY bars; no LLM involved.
+
+    Uses fetch_daily_bars (range=1y&interval=1d) so the indicator
+    windows (RSI14, MACD 26+9, BBands 20, ATR14, realized_vol_20d) use
+    the proper daily resolution — a 5d/30m bar series would render
+    these indicators meaningless."""
+    from .markets.board import fetch_daily_bars
+    from .features.quant import compute_indicators
+    bars = fetch_daily_bars(args.symbol, data_root=args.data_root)
+    if not bars:
+        if args.json:
+            print(json.dumps({"ok": False, "symbol": args.symbol,
+                              "error": "daily bars fetch failed"}))
+            return 1
+        print(f"markets-quant: daily bars fetch failed for {args.symbol}")
+        return 1
+    out = compute_indicators(bars)
+    out["symbol"] = args.symbol.upper()
+    # name + sector from a fetch_detail lookup (lightweight; cached)
+    try:
+        from .markets.board import fetch_detail
+        d = fetch_detail(args.symbol, data_root=args.data_root)
+        out["name"] = d.get("name")
+        out["sector"] = d.get("sector")
+    except Exception:
+        pass
+    if args.json:
+        print(json.dumps(out, sort_keys=True, default=str))
+        return 0 if out.get("ok") else 1
+    print(f"QUANT INDICATORS — {out['symbol']}  ({out.get('bar_count')}"
+          f" bars)")
+    print("=" * 64)
+    if not out.get("ok"):
+        print(f"  err: {out.get('error')}")
+        return 1
+    print(f"  last close   : {out.get('last_close')}")
+    print(f"  RSI(14)      : {out.get('rsi14')}")
+    m = out.get("macd") or {}
+    print(f"  MACD         : line={m.get('line')}  signal="
+          f"{m.get('signal')}  hist={m.get('hist')}")
+    b = out.get("bbands") or {}
+    print(f"  Bollinger(20): upper={b.get('upper')}  mid={b.get('middle')}"
+          f"  lower={b.get('lower')}  width={b.get('width')}"
+          f"  pct_b={b.get('pct_b')}")
+    print(f"  ATR(14)      : {out.get('atr14')}  ({out.get('atr_pct')}%"
+          f" of price)")
+    print(f"  realized vol : {out.get('realized_vol_20d')}  "
+          f"→ regime {out.get('vol_regime')}")
+    s = out.get("sma") or {}
+    print(f"  SMA          : 20={s.get('20')}  50={s.get('50')}  "
+          f"200={s.get('200')}")
+    e = out.get("ema") or {}
+    print(f"  EMA          : 12={e.get('12')}  26={e.get('26')}")
+    print(f"  ADX(14)      : {out.get('adx14')}")
+    st = out.get("stoch") or {}
+    print(f"  Stoch(14,3)  : %K={st.get('k')}  %D={st.get('d')}")
+    print(f"  CCI(20)      : {out.get('cci20')}")
+    print(f"  OBV          : {out.get('obv')}")
+    return 0
+
+
+def cmd_markets_snapshot(args) -> int:
+    """markets-snapshot SYMBOL — deterministic verified snapshot (no
+    LLM, no network beyond the bar fetch). The source-of-truth block
+    the technician persona treats as ground truth for any exact
+    numeric claim; closes the TradingAgents v0.3.1
+    market_data_validator.py:1-25 discipline keyless.
+
+    Uses fetch_daily_bars (range=1y&interval=1d) so the 5d/20d/63d
+    change pct fields and the indicator windows use the proper daily
+    resolution."""
+    from .markets.board import fetch_daily_bars
+    from .features.verified_snapshot import build_verified_snapshot
+    bars = fetch_daily_bars(args.symbol, data_root=args.data_root)
+    if not bars:
+        if args.json:
+            print(json.dumps({"ok": False, "symbol": args.symbol,
+                              "error": "daily bars fetch failed"}))
+            return 1
+        print(f"markets-snapshot: daily bars fetch failed for "
+              f"{args.symbol}")
+        return 1
+    # SPY benchmark bars for beta (fail-soft — uses daily bars so the
+    # 63-day beta window sees DAILY log-returns, not the 30m bars that
+    # fetch_detail ships over 5 days)
+    bench_bars: list[dict] = []
+    try:
+        bench_bars = fetch_daily_bars("SPY", data_root=args.data_root)
+    except Exception:
+        pass
+    snap = build_verified_snapshot(
+        args.symbol.upper(), bars,
+        indicators=None, benchmark_bars=bench_bars)
+    if args.json:
+        print(json.dumps(snap, sort_keys=True, default=str))
+        return 0 if snap.get("ok") else 1
+    print(f"VERIFIED SNAPSHOT — {snap.get('symbol')}")
+    print("=" * 64)
+    if not snap.get("ok"):
+        print(f"  err: {snap.get('error', 'unknown')}")
+        return 1
+    print(f"  as_of           : {snap.get('as_of')}")
+    print(f"  last_close      : {snap.get('last_close')}")
+    print(f"  last_change_pct : {snap.get('last_change_pct')}")
+    print(f"  5d / 20d / 63d  : {snap.get('change_pct_5d')} / "
+          f"{snap.get('change_pct_20d')} / {snap.get('change_pct_63d')}")
+    print(f"  atr14 / atr_pct : {snap.get('atr14_value')} / "
+          f"{snap.get('atr_pct')}")
+    print(f"  realized_vol_20d: {snap.get('realized_vol_20d')}")
+    print(f"  RSI14           : {snap.get('rsi14')}")
+    print(f"  MACD hist       : {snap.get('macd_hist')}")
+    print(f"  BB %b           : {snap.get('bb_pct_b')}")
+    print(f"  volume last/avg : {snap.get('volume_last')} / "
+          f"{snap.get('volume_avg_20d')}")
+    r = snap.get("regime_labels") or {}
+    print(f"  regime          : trend={r.get('trend')}  vol="
+          f"{r.get('vol')}  breakout={r.get('breakout')}")
+    print(f"  beta vs SPY     : {snap.get('benchmark_beta')}")
+    return 0
+
+
+def cmd_markets_beta(args) -> int:
+    """markets-beta SYMBOL [BENCH] — OLS regression symbol ~ benchmark
+    over daily log-returns (default 63-day window, default bench SPY).
+    Returns beta, alpha, r_squared, correlation, n.
+
+    Uses fetch_daily_bars (range=1y&interval=1d) for both symbol and
+    benchmark — daily log-returns need daily closes history, which
+    fetch_detail's 5d/30m bars don't carry."""
+    from .markets.board import fetch_daily_bars
+    from .features.quant import compute_beta
+    bench = args.bench or "SPY"
+    sym_bars = fetch_daily_bars(args.symbol, data_root=args.data_root)
+    bench_bars = fetch_daily_bars(bench, data_root=args.data_root)
+    if not sym_bars or not bench_bars:
+        if args.json:
+            print(json.dumps({"ok": False, "symbol": args.symbol,
+                              "benchmark": bench,
+                              "error": "daily bars fetch failed"}))
+            return 1
+        print(f"markets-beta: daily bars fetch failed for "
+              f"{args.symbol if not sym_bars else bench}")
+        return 1
+    out = compute_beta(sym_bars, bench_bars, window=args.window)
+    out["ok"] = True
+    out["symbol"] = args.symbol.upper()
+    out["benchmark"] = bench.upper()
+    out["window"] = args.window
+    if args.json:
+        print(json.dumps(out, sort_keys=True, default=str))
+        return 0
+    print(f"BETA — {out['symbol']} vs {out['benchmark']}  "
+          f"(window={out['window']}, n={out['n']})")
+    print("=" * 64)
+    print(f"  beta        : {out.get('beta')}")
+    print(f"  alpha       : {out.get('alpha')}")
+    print(f"  r_squared   : {out.get('r_squared')}")
+    print(f"  correlation : {out.get('correlation')}")
+    return 0
+
+
+def cmd_markets_corr(args) -> int:
+    """markets-corr SYM1,SYM2,SYM3 — symmetric correlation matrix
+    across the comma-listed symbols, daily log-returns, default
+    63-day window. Uses fetch_daily_bars for daily close history."""
+    from .markets.board import fetch_daily_bars
+    from .features.quant import compute_correlation_matrix
+    syms = [s.strip().upper() for s in args.symbols.split(",")
+            if s.strip()]
+    if len(syms) < 2:
+        if args.json:
+            print(json.dumps({"ok": False, "error":
+                              "need ≥2 symbols (comma-separated)"}))
+        else:
+            print("markets-corr: need ≥2 symbols (comma-separated)")
+        return 1
+    # fetch daily bars per symbol (fail-soft per symbol)
+    bars_map: dict[str, list[dict]] = {}
+    for s in syms:
+        try:
+            bars_map[s] = fetch_daily_bars(s, data_root=args.data_root)
+        except Exception:
+            bars_map[s] = []
+    out = {"ok": True, "symbols": syms, "window": args.window,
+           "matrix": {}}
+    # build the matrix directly here (the public helper uses the
+    # board pattern's 5d/30m bars; we want daily bars instead)
+    import math as _math
+    closes_map: dict[str, list[float]] = {}
+    for s in syms:
+        closes_map[s] = [b["c"] for b in bars_map[s] if b.get("c")]
+    matrix: dict[str, dict[str, float | None]] = {s: {} for s in syms}
+    for i, si in enumerate(syms):
+        for sj in syms[i:]:
+            if si == sj:
+                matrix[si][sj] = 1.0
+                matrix[sj][si] = 1.0
+                continue
+            s_rets = []
+            for k in range(1, len(closes_map[si])):
+                a, b = closes_map[si][k - 1], closes_map[si][k]
+                if a > 0 and b > 0:
+                    s_rets.append(_math.log(b / a))
+            b_rets = []
+            for k in range(1, len(closes_map[sj])):
+                a, b = closes_map[sj][k - 1], closes_map[sj][k]
+                if a > 0 and b > 0:
+                    b_rets.append(_math.log(b / a))
+            sr = s_rets[-args.window:]
+            br = b_rets[-args.window:]
+            n = min(len(sr), len(br))
+            sr, br = sr[-n:], br[-n:]
+            if n < 2:
+                matrix[si][sj] = None
+                matrix[sj][si] = None
+                continue
+            ms = sum(sr) / n
+            mb = sum(br) / n
+            cov = sum((sr[i] - ms) * (br[i] - mb)
+                      for i in range(n)) / n
+            vs = sum((sr[i] - ms) ** 2 for i in range(n)) / n
+            vb = sum((br[i] - mb) ** 2 for i in range(n)) / n
+            sds = _math.sqrt(vs) if vs > 0 else 0.0
+            sdb = _math.sqrt(vb) if vb > 0 else 0.0
+            if sds == 0 or sdb == 0:
+                matrix[si][sj] = None
+                matrix[sj][si] = None
+                continue
+            r = max(-1.0, min(1.0, cov / (sds * sdb)))
+            matrix[si][sj] = round(r, 6)
+            matrix[sj][si] = round(r, 6)
+    out["matrix"] = matrix
+    if args.json:
+        print(json.dumps(out, sort_keys=True, default=str))
+        return 0
+    print(f"CORRELATION MATRIX — {','.join(out.get('symbols', []))}  "
+          f"(window={out.get('window')})")
+    print("=" * 64)
+    syms = out.get("symbols") or []
+    matrix = out.get("matrix") or {}
+    # header
+    print("        " + "  ".join(f"{s:>10s}" for s in syms))
+    for s in syms:
+        row = matrix.get(s) or {}
+        cells = "  ".join(
+            f"{(row.get(s2) if row.get(s2) is not None else 0):>10.4f}"
+            for s2 in syms)
+        print(f"{s:>8s} {cells}")
+    return 0
+
+
 def _agent_registry():
     """Full research registry: desk tools + crypto tools + web tools +
     the multi-analyst desk bridge (piece 6)."""
@@ -1126,6 +1384,54 @@ def main(argv=None) -> int:
     p_inst.add_argument("--json", action="store_true")
     p_inst.add_argument("--data-root", default=str(REPO_ROOT / "data"))
     p_inst.set_defaults(func=cmd_markets_institutional)
+
+    # --- R2-2 quant toolkit + deterministic verified snapshot ---
+    p_quant = sub.add_parser("markets-quant",
+                              help="numpy-free indicator battery for a symbol "
+                                   "(RSI14, MACD, BBands, ATR/ATR%, realized "
+                                   "vol 20d + vol regime, SMA{20,50,200}, "
+                                   "EMA{12,26}, ADX14, Stoch, CCI20, OBV)")
+    p_quant.add_argument("symbol",
+                          help="any Yahoo symbol (AAPL, BTC-USD, GC=F, ...)")
+    p_quant.add_argument("--json", action="store_true")
+    p_quant.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_quant.set_defaults(func=cmd_markets_quant)
+
+    p_snap = sub.add_parser("markets-snapshot",
+                              help="deterministic verified snapshot for a "
+                                   "symbol — the no-LLM ground-truth block "
+                                   "the technician persona treats as the "
+                                   "source of truth for exact claims")
+    p_snap.add_argument("symbol",
+                         help="any Yahoo symbol (AAPL, BTC-USD, GC=F, ...)")
+    p_snap.add_argument("--json", action="store_true")
+    p_snap.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_snap.set_defaults(func=cmd_markets_snapshot)
+
+    p_beta = sub.add_parser("markets-beta",
+                             help="OLS beta/alpha/r²/correlation vs a "
+                                  "benchmark (default SPY, 63-day window)")
+    p_beta.add_argument("symbol",
+                        help="any Yahoo symbol (AAPL, BTC-USD, ...)")
+    p_beta.add_argument("bench", nargs="?", default="SPY",
+                        help="benchmark Yahoo symbol (default SPY)")
+    p_beta.add_argument("--window", type=int, default=63,
+                        help="log-return window in days (default 63)")
+    p_beta.add_argument("--json", action="store_true")
+    p_beta.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_beta.set_defaults(func=cmd_markets_beta)
+
+    p_corr = sub.add_parser("markets-corr",
+                             help="symmetric correlation matrix across "
+                                  "comma-separated symbols (63-day window)")
+    p_corr.add_argument("symbols",
+                         help="comma-separated symbols (e.g. "
+                              "AAPL,MSFT,NVDA)")
+    p_corr.add_argument("--window", type=int, default=63,
+                        help="log-return window in days (default 63)")
+    p_corr.add_argument("--json", action="store_true")
+    p_corr.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_corr.set_defaults(func=cmd_markets_corr)
 
     args = parser.parse_args(argv)
     return args.func(args)

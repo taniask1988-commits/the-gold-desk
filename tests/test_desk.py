@@ -208,7 +208,12 @@ def test_persona_tools_are_desk_tool_subsets():
     R2-1: the risk persona still sees the 5 market-data tools (its tools
     list was not extended — the new institutional slices feed the PM
     base_block instead; the fundamentalist is the only persona reading
-    XBRL/13F directly)."""
+    XBRL/13F directly).
+
+    R2-2: the technician now also reads quant_indicators + verified_
+    snapshot (the deterministic ground-truth block the technician must
+    treat as the source of truth for any exact numeric claim, mirroring
+    TradingAgents' market_analyst.py:51 + market_data_validator.py)."""
     for p in PERSONAS:
         assert p.tools, f"{p.name} has no tools"
         assert set(p.tools) <= set(DESK_TOOLS), (
@@ -216,7 +221,9 @@ def test_persona_tools_are_desk_tool_subsets():
             f"{set(p.tools) - set(DESK_TOOLS)}")
     by_name = {p.name: p for p in PERSONAS}
     assert by_name["technician"].tools == ["market_ohlc",
-                                           "market_indicators"]
+                                           "market_indicators",
+                                           "quant_indicators",
+                                           "verified_snapshot"]
     assert by_name["macro"].tools == ["board_sectors"]
     assert by_name["news"].tools == ["symbol_news"]
     assert by_name["sentiment"].tools == ["market_movers",

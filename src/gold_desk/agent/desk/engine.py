@@ -39,9 +39,15 @@ from typing import Callable
 
 from ...events import Journal
 from ..journal_util import default_journal
+from ...features.quant import compute_indicators as _compute_indicators
+from ...features.verified_snapshot import (
+    build_verified_snapshot as _build_verified_snapshot,
+    flag_claim_conflicts as _flag_claim_conflicts,
+)
 from ...llm.zen_client import LLMInvalidJSON, LLMUnavailable, complete_json
 from ...markets.board import (
     fetch_board,
+    fetch_daily_bars,
     fetch_detail,
     fetch_market_movers,
 )
@@ -201,8 +207,52 @@ def run_desk(
         inst = {"ok": False, "slices": {}}
     inst_slices = (inst or {}).get("slices") or {}
 
-    context = _build_context(detail, board, movers, inst_slices)
-    base_block = _base_block(detail, board, inst_slices)
+    # ---- 1c. R2-2 quant toolkit + deterministic verified snapshot.
+    # Built ONCE per desk run, fail-soft: a bars-less snapshot degrades
+    # to {ok: False, "no_bars": True} so the desk still runs. The
+    # technician persona gets both slices in its prompt; the PM base
+    # block carries a compact headline so the synthesis weighs the
+    # verified numbers against the other five voices.
+    #
+    # R2-2: the snapshot + quant_indicators are computed from DAILY
+    # bars (fetch_daily_bars range=1y&interval=1d) so the indicator
+    # windows (RSI14, MACD 26+9, BBands 20, ATR14, realized_vol_20d)
+    # and the 5d/20d/63d change pct fields use the proper daily
+    # resolution. The technician's market_ohlc + market_indicators
+    # slices are SEPARATE — they still use the 5d/30m bars from
+    # fetch_detail for the technician's chart-reading checklist.
+    quant_indicators: dict = {"ok": False, "error": "no daily bars"}
+    verified_snapshot: dict = {"ok": False, "no_bars": True,
+                              "regime_labels": {}}
+    try:
+        canon_sym = str(detail.get("symbol") or symbol)
+        daily_bars = fetch_daily_bars(canon_sym,
+                                       data_root=data_root) or []
+        if daily_bars:
+            quant_indicators = _compute_indicators(daily_bars)
+            # SPY benchmark bars for beta (fail-soft: any fetch failure
+            # → benchmark_beta is None; the snapshot still ships).
+            bench_bars: list[dict] = []
+            try:
+                bench_bars = fetch_daily_bars("SPY", data_root=data_root)
+            except Exception:  # noqa: BLE001 — benchmark fail-soft
+                bench_bars = []
+            verified_snapshot = _build_verified_snapshot(
+                canon_sym, daily_bars,
+                indicators=quant_indicators,
+                benchmark_bars=bench_bars)
+    except Exception as e:  # noqa: BLE001 — quant slice fail-soft
+        quant_indicators = {"ok": False,
+                            "error": f"{type(e).__name__}: {e}"}
+        verified_snapshot = {"ok": False, "no_bars": False,
+                            "regime_labels": {},
+                            "error": f"{type(e).__name__}: {e}"}
+
+    context = _build_context(detail, board, movers, inst_slices,
+                           quant_indicators=quant_indicators,
+                           verified_snapshot=verified_snapshot)
+    base_block = _base_block(detail, board, inst_slices,
+                           verified_snapshot=verified_snapshot)
 
     # ---- 2. the five personas, in PARALLEL (one completion_json each) --
     personas_out: list[dict] = []
@@ -216,7 +266,8 @@ def run_desk(
                 max_tok = PERSONA_MAX_TOKENS.get(
                     p.name, PERSONA_DEFAULT_MAX_TOKENS)
                 futures[ex.submit(_run_persona, p, user, chain, budget,
-                                  timeout, max_tok)] = p
+                                  timeout, max_tok,
+                                  verified_snapshot)] = p
             for fut in as_completed(futures):
                 p = futures[fut]
                 try:
@@ -225,14 +276,36 @@ def run_desk(
                     raise
                 except Exception as e:  # noqa: BLE001 — belt and braces
                     out = _abstain_result(p, "", e)
+                # R2-2 claim-conflict flag: extract numeric claims from
+                # the technician's thesis and compare against the verified
+                # snapshot (the deterministic ground-truth block). A
+                # delta > 0.5% is journaled as a claim_conflicts array on
+                # the AgentStep so the PM + downstream evidence-checker
+                # (R2-5) can see the LLM's numeric drift. Only the
+                # technician reads the verified_snapshot in its prompt;
+                # other personas have no snapshot to claim against.
+                claim_conflicts: list[dict] = []
+                if (not out.get("abstained")
+                        and verified_snapshot.get("ok")
+                        and "verified_snapshot" in p.tools):
+                    try:
+                        claim_conflicts = _flag_claim_conflicts(
+                            out.get("thesis", ""), verified_snapshot)
+                    except Exception:  # noqa: BLE001 — flag is advisory
+                        claim_conflicts = []
+                if claim_conflicts:
+                    out["claim_conflicts"] = claim_conflicts
                 personas_out.append(out)
-                jr.emit("AgentStep", {
+                step_payload = {
                     "run_id": run_id, "step": len(personas_out),
                     "persona": p.name, "signal": out["signal"],
                     "confidence": out["confidence"],
                     "abstained": out["abstained"],
                     "model": out.get("model") or "", "ms": out["latency_ms"],
-                })
+                }
+                if claim_conflicts:
+                    step_payload["claim_conflicts"] = claim_conflicts
+                jr.emit("AgentStep", step_payload)
                 _emit("persona", {"name": p.name, "signal": out["signal"],
                                   "confidence": out["confidence"],
                                   "abstained": out["abstained"]})
@@ -281,6 +354,11 @@ def run_desk(
         "price": detail.get("price"),
         "change_pct": detail.get("change_pct"),
         "range_5d_change_pct": detail.get("range_5d_change_pct"),
+        "quant_indicators": quant_indicators,
+        "verified_snapshot": verified_snapshot,
+        "claim_conflicts_count": sum(
+            len(r.get("claim_conflicts") or [])
+            for r in personas_out),
         "personas": personas_out,
         "pm": pm,
         "abstained": sum(1 for r in personas_out if r["abstained"]),
@@ -316,13 +394,18 @@ def run_desk(
 
 def _run_persona(persona: Persona, user_msg: str, models: list[str],
                  budget: Budget, timeout: float,
-                 max_tokens: int = PERSONA_DEFAULT_MAX_TOKENS) -> dict:
+                 max_tokens: int = PERSONA_DEFAULT_MAX_TOKENS,
+                 verified_snapshot: dict | None = None) -> dict:
     """One persona = one complete_json call (with model fall-through).
 
     Never raises: any LLM/parse failure becomes an abstention. The
     max_tokens override lets the fundamentalist (largest payload) emit
     JSON without truncating — the desk-wide default 2400 fits every
-    other persona."""
+    other persona. The verified_snapshot arg is accepted for
+    signature symmetry with the caller's submit loop; the claim-
+    conflict flag is run by the caller (the loop has access to the
+    persona's tools list and the snapshot) so this function stays
+    LLM-pure."""
     t0 = time.monotonic()
     messages = [
         {"role": "system", "content": persona.system},
@@ -570,7 +653,9 @@ def _mechanical_pm(personas_out: list[dict], error: Exception) -> dict:
 # ------------------------------------------------------- context slicing
 
 def _build_context(detail: dict, board: dict, movers: dict,
-                   inst_slices: dict | None = None) -> dict:
+                   inst_slices: dict | None = None,
+                   quant_indicators: dict | None = None,
+                   verified_snapshot: dict | None = None) -> dict:
     """The desk's whole context, keyed by DESK_TOOLS names so each
     persona slice is just its tools' blocks (+ a small shared header).
 
@@ -579,7 +664,14 @@ def _build_context(detail: dict, board: dict, movers: dict,
     are merged in fail-soft — a slice returning {ok: False} is still
     passed to the persona, which knows to abstain when its data is
     empty. The fundamentalist's three entitlements come straight from
-    these slices."""
+    these slices.
+
+    R2-2: quant_indicators + verified_snapshot slices are additive —
+    the technician reads them; the verified snapshot is the source of
+    truth for any exact numeric claim in the technician's thesis
+    (engine._run_persona flag-checks the thesis against the snapshot).
+    Both slices are fail-soft so a bars-less detail degrades cleanly.
+    """
     ctx = {
         "market_ohlc": _slice_ohlc(detail),
         "market_indicators": _slice_indicators(detail),
@@ -601,11 +693,15 @@ def _build_context(detail: dict, board: dict, movers: dict,
         {"ok": False}
     ctx["onchain"] = inst_slices.get("onchain") or {"ok": False}
     ctx["social"] = _slice_social(inst_slices.get("social"))
+    # R2-2 quant toolkit + verified snapshot — additive, fail-soft
+    ctx["quant_indicators"] = quant_indicators or {"ok": False}
+    ctx["verified_snapshot"] = verified_snapshot or {"ok": False}
     return ctx
 
 
 def _base_block(detail: dict, board: dict,
-                inst_slices: dict | None = None) -> dict:
+                inst_slices: dict | None = None,
+                verified_snapshot: dict | None = None) -> dict:
     """The compact context the PM sees (no bars, no full board).
 
     R2-1: the PM also sees a fundamentals headline — latest revenue +
@@ -613,7 +709,13 @@ def _base_block(detail: dict, board: dict,
     yield + F&G value + on-chain price — so the synthesis weighs the
     fundamentalist voice against the chart/macro/news voices without
     reading the full XBRL bundle. Each headline field is null when its
-    slice was fail-soft."""
+    slice was fail-soft.
+
+    R2-2: the PM also sees a verified_snapshot_headline (last_close,
+    regime_labels, realized_vol_20d, benchmark_beta) so the synthesis
+    weighs the technician's verified numbers against the other five
+    voices. The full snapshot stays in the technician's context slice;
+    the PM only needs the headline."""
     inst = inst_slices or {}
     fund = (inst.get("fundamentals") or {})
     inst13 = (inst.get("institutional_top") or {})
@@ -627,6 +729,9 @@ def _base_block(detail: dict, board: dict,
     fng_head = ((fng.get("latest") or {}) if fng.get("ok") else None)
     onchain_head = ({"price": onchain.get("market_price_usd")}
                     if onchain.get("ok") else None)
+    snap = verified_snapshot or {}
+    snap_head = (_verified_snapshot_headline(snap)
+                 if snap.get("ok") else None)
     return {
         "symbol": detail.get("symbol"),
         "name": detail.get("name"),
@@ -646,6 +751,28 @@ def _base_block(detail: dict, board: dict,
         "macro_curve_headline": curve_head,
         "crypto_sentiment_headline": fng_head,
         "onchain_headline": onchain_head,
+        "verified_snapshot_headline": snap_head,
+    }
+
+
+def _verified_snapshot_headline(snap: dict) -> dict:
+    """Compact PM-facing verified snapshot: last close + regime + vol +
+    beta. The full snapshot stays in the technician's context slice."""
+    reg = snap.get("regime_labels") or {}
+    return {
+        "last_close": snap.get("last_close"),
+        "last_change_pct": snap.get("last_change_pct"),
+        "change_pct_5d": snap.get("change_pct_5d"),
+        "change_pct_20d": snap.get("change_pct_20d"),
+        "change_pct_63d": snap.get("change_pct_63d"),
+        "atr14_value": snap.get("atr14_value"),
+        "atr_pct": snap.get("atr_pct"),
+        "realized_vol_20d": snap.get("realized_vol_20d"),
+        "rsi14": snap.get("rsi14"),
+        "macd_hist": snap.get("macd_hist"),
+        "bb_pct_b": snap.get("bb_pct_b"),
+        "regime": reg,
+        "benchmark_beta": snap.get("benchmark_beta"),
     }
 
 

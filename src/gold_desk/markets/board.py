@@ -212,6 +212,55 @@ def _closes(r: dict) -> list[float]:
     return [c for c in (_quote(r).get("close") or []) if c is not None]
 
 
+def fetch_daily_bars(symbol: str, range_: str = "1y",
+                     data_root: str | Path = "data") -> list[dict]:
+    """R2-2: fetch daily OHLCV bars for a symbol via the v8/chart
+    endpoint at range=1y&interval=1d (fail-soft, returns [] on error).
+
+    Used by the quant toolkit's compute_beta path — daily log-returns
+    over a 63-day window need 64+ daily closes, which the 5d/30m bars
+    from fetch_detail don't carry. This helper is the canonical
+    keyless path for daily-resolution bars; cached under
+    <data_root>/cache/daily_<SYMBOL>.json with a 30-min TTL (the
+    brief's mandated TTL).
+    """
+    def _build() -> dict:
+        r = _fetch_chart(symbol, range_, "1d")
+        ts_arr = r.get("timestamp") or []
+        q = _quote(r)
+        opens = q.get("open") or []
+        highs = q.get("high") or []
+        lows = q.get("low") or []
+        closes = q.get("close") or []
+        vols = q.get("volume") or []
+        bars: list[dict] = []
+        for i, t in enumerate(ts_arr):
+            def _at(arr, i):
+                return arr[i] if i < len(arr) else None
+            o, h, l, c = _at(opens, i), _at(highs, i), _at(lows, i), \
+                _at(closes, i)
+            v = _at(vols, i)
+            if None in (o, h, l, c):
+                continue
+            bars.append({"ts": int(t) * 1000,
+                         "o": _round(o, symbol),
+                         "h": _round(h, symbol),
+                         "l": _round(l, symbol),
+                         "c": _round(c, symbol),
+                         "v": float(v) if isinstance(v, (int, float))
+                         else 0.0})
+        if not bars:
+            raise RuntimeError(f"no daily bars for {symbol}")
+        return {"ok": True, "symbol": symbol, "range": range_,
+                "interval": "1d", "bars": bars}
+
+    cached = _cached_fetch(data_root, f"daily_{symbol.upper()}", 1800,
+                            _build)
+    if not cached.get("ok"):
+        return []
+    return cached.get("bars") or []
+
+
 def _row_from_chart(entry: dict, r: dict) -> dict:
     """Registry entry + chart.result[0] → one board row.
 

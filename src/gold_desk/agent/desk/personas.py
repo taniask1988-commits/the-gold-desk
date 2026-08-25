@@ -57,6 +57,26 @@ DESK_TOOLS = {
                "count, blocks mined, minutes between blocks, fees",
     "social": "Reddit RSS feed (r/wallstreetbets / r/CryptoCurrency / "
               "r/stocks) routed by asset class — recent titles + links",
+    # --- R2-2 quant toolkit + deterministic verified snapshot
+    # (closes the TradingAgents v0.3.1 market-data-validation bar:
+    # tradingagents/dataflows/market_data_validator.py:1-25 — a no-LLM
+    # ground-truth OHLCV+indicator block every exact numeric claim
+    # must match; the technician's thesis prose is flag-checked
+    # against this snapshot in engine._run_persona.)
+    "quant_indicators": "numpy-free indicator battery (RSI14, MACD "
+                        "{line,signal,hist}, Bollinger {upper,middle,"
+                        "lower,width,pct_b}, ATR14/ATR%, realized "
+                        "vol 20d, vol regime, SMA{20,50,200}, "
+                        "EMA{12,26}, ADX14, Stoch {k,d}, CCI20, OBV) "
+                        "computed deterministically from the bars",
+    "verified_snapshot": "no-LLM ground-truth block (last close, "
+                         "1d/5d/20d/63d change %, ATR14/ATR%, realized "
+                         "vol 20d, RSI14, MACD hist, BB pct_b, "
+                         "volume_last, volume_avg_20d, regime labels, "
+                         "benchmark beta vs SPY) — the source of truth "
+                         "for any EXACT numeric claim in the persona "
+                         "thesis; the engine flags prose claims that "
+                         "differ from this snapshot by >0.5%",
 }
 
 # The wire format every persona must answer in (the brief's exact string).
@@ -108,6 +128,13 @@ Hard rules:
   numbers; do not use outside knowledge of this symbol.
 - Every key_evidence point must cite a number from the data.
 - If the bars are too few or too stale to read, say so and go neutral.
+- R2-2 verified-snapshot discipline (mirrors TradingAgents'
+  market_data_validator.py:1-25 + market_analyst.py:51): ANY exact
+  numeric claim in your thesis (price, change %, ATR, RSI, vol level,
+  beta) MUST come from the verified_snapshot block. If your prose
+  claims a number the snapshot doesn't contain, ABSTAIN. The harness
+  flag-checks your thesis against the snapshot and journals any
+  claim whose delta exceeds 0.5% — do not force the desk to flag you.
 
 """ + SIGNAL_CONTRACT
 
@@ -301,7 +328,8 @@ PERSONAS: tuple[Persona, ...] = (
         name="technician",
         role="The Technician",
         system=_TECHNICIAN,
-        tools=["market_ohlc", "market_indicators"],
+        tools=["market_ohlc", "market_indicators", "quant_indicators",
+               "verified_snapshot"],
     ),
     Persona(
         name="macro",
