@@ -86,6 +86,13 @@ function HeaderBarImpl({
         </div>
 
         <div className="ml-auto flex flex-wrap items-center gap-2 text-[10px]">
+          <a
+            href="/markets"
+            className="gdc-chip border-[#c8a04b]/35 text-[#c8a04b] transition-colors hover:bg-[#c8a04b]/[0.12]"
+            aria-label="Open the Market Gauntlet multi-market surface"
+          >
+            <span aria-hidden>▸</span> Markets
+          </a>
           <button
             onClick={launchChat}
             aria-label="Open The Desk chat in a separate window"
