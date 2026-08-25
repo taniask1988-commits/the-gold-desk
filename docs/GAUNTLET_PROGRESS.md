@@ -56,8 +56,8 @@ live. Budgets and safety laws L11–L14 of the host repo apply unchanged.
 | 4 | Analyst desk: personas (technician, macro, sentiment, news, risk) + PM synthesis, any asset | ai-hedge-fund personas (distinct evidence-backed work) | WON (critic: ours) |
 | 5 | Bloomberg layer: command palette, monitor lists, alerts, news search, economic calendar | Bloomberg public feature checklist | BUILT (GAUNTLET-P13-BUILDER, awaiting critic) |
 | 6 | Chat AGENT MODE → analyst desk entry | — | DONE (bridge live-verified) |
-| 7 | End-to-end verification: every surface live-tested | — | PENDING |
-| 8 | Critic gauntlet: blind comparisons per piece vs the fetched bars | all three bars | PENDING |
+| 7 | End-to-end verification: every surface live-tested | — | DONE (19/20 + sync fix → 20/20) |
+| 8 | Critic gauntlet: blind comparisons per piece vs the fetched bars | all three bars | EXIT_WON |
 
 ## Round log
 
@@ -242,3 +242,18 @@ Critic 25/25 live checks; ECO judged BEAT; command entry edge-BEAT. Defect round
 
 ### Piece 6 — DONE
 run_analyst_desk bridge tool in both agent registries; live-verified on GC=F (5 personas, PM bullish 56).
+
+
+## RUN CLOSED — EXIT_WON
+
+Final critic (fresh context, harshest seat): PICK_OVERALL **OURS**.
+- vs TradingView (fresh blind VLM, both orders): ours 9/10 vs 3/10 and 9/10 vs 2/10
+- vs ai-hedge-fund: discipline ported faithfully, structurally exceeded (data-plane persona entitlements)
+- vs Bloomberg checklist: 8/8 live-verified
+- The hybrid: TV's density + Bloomberg's command surface + the fund's persona desk + the constitution/journal/governor spine none of the three have — one keyless system.
+- E2E 19/20 → 20/20 after the runtime re-sync fix (gold_desk.data restored).
+
+### Round-2 targets (if the owner re-opens the gauntlet)
+1. Runtime-sync guard in gold-desk doctor (prevent drift between repo and deployed harness)
+2. PromptCache analogue + persona abstention polish
+3. Hero focal element on /markets + cosmetic polish (truncated mover names, orphan HSI tile, sub-label contrast)
