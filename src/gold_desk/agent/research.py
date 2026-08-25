@@ -39,14 +39,18 @@ PLAN_PROMPT = """You are planning a focused research brief on {asset}.
 Produce a JSON research plan with EXACTLY this shape:
 {{
   "questions": [{{
-    "question": "one specific research question",
-    "queries": ["search query 1", "search query 2"]
+    "question": "one specific research question about {asset}",
+    "queries": ["a real web-search string mentioning {asset}", "another real web-search string mentioning {asset}"]
   }}],
-  "must_check": ["hard number or fact that MUST be verified, e.g. 'current price'", "..."]
+  "must_check": ["hard number or fact about {asset} that MUST be verified", "..."]
 }}
 
 Rules:
 - {n} questions maximum (depth {depth}).
+- Every query string MUST contain the asset name or its common name
+  (e.g. for BTC use "bitcoin ETF flows this week"; for XAUUSD use
+  "gold price outlook"). Queries that do not mention {asset} are
+  DISCARDED by the harness — write real queries, never placeholders.
 - Questions must be answerable from public web sources or market data.
 - must_check: 2-4 load-bearing facts. Keep them numeric where possible.
 - Output ONLY the JSON object, no prose.
@@ -128,41 +132,78 @@ def research(
                            "content": f"Research task: {asset}. Market context: "
                                       + json.dumps(base)[:1500]})
 
-        # ---- 1. plan
-        plan = _plan(asset, depth, model_id, models[1:3])
+        # ---- 1. plan (+ sanitize: free models sometimes copy the prompt's
+        # example strings verbatim as their queries — observed in the wild:
+        # a BTC plan emitted queries "search query 1"/"search query 2" and
+        # the fan-out gathered pages about *queries*. The sanitizer drops
+        # placeholder/asset-irrelevant queries and falls back to defaults.)
+        plan = _sanitize_plan(_plan(asset, depth, model_id, models[1:3]),
+                              asset)
 
         # ---- 2. fan-out
         sources: list[dict] = []      # {n, url, title, fetched_ts}
         extracts: list[str] = []      # fenced UNTRUSTED blocks with [n]
-        for qi, q in enumerate(plan.get("questions", [])[:depth + 2]):
+        source_cap = max(4, depth * 4)
+
+        def _try_fetch(hit: dict, query: str) -> None:
+            """Fetch one search hit into sources/extracts (dedup, cap)."""
+            if len(sources) >= source_cap:
+                return
+            if any(s["url"] == hit["url"] for s in sources):
+                return
+            budget.check_tool_call()
+            jr.emit("ResearchSourceFetched", {
+                "run_id": run_id, "url": hit["url"],
+                "via": "search", "query": query,
+            })
+            page = fetch_page_raw(hit["url"])
+            text = (page.get("text") or "").strip()
+            if not text:
+                return
+            # prefer the SEARCH-RESULT title: the engine curates it (clean,
+            # relevant); on-page titles are often HTML junk or bot-block
+            # boilerplate ("Performing security verification…").
+            ptitle = (page.get("title") or "").strip()
+            htitle = (hit.get("title") or "").strip()
+            title = htitle or ptitle
+            n = len(sources) + 1
+            sources.append({
+                "n": n, "url": hit["url"],
+                "title": title[:160],
+                "fetched_ts": page.get("fetched_ts", ""),
+            })
+            extracts.append(
+                f"[{n}] {hit['url']}\n"
+                + wrap_untrusted(text, hit["url"], max_chars=3500))
+
+        for q in plan.get("questions", [])[:depth + 2]:
             for query in (q.get("queries") or [])[:2]:
                 budget.check_tool_call()
                 sr = web_search_raw(query, max_results=4)
                 for hit in (sr.get("results") or [])[:2]:
-                    budget.check_tool_call()
-                    if any(s["url"] == hit["url"] for s in sources):
-                        continue
-                    jr.emit("ResearchSourceFetched", {
-                        "run_id": run_id, "url": hit["url"],
-                        "via": "search", "query": query,
-                    })
-                    page = fetch_page_raw(hit["url"])
-                    text = (page.get("text") or "").strip()
-                    if not text:
-                        continue
-                    n = len(sources) + 1
-                    sources.append({
-                        "n": n, "url": hit["url"],
-                        "title": page.get("title") or hit["title"],
-                        "fetched_ts": page.get("fetched_ts", ""),
-                    })
-                    extracts.append(
-                        f"[{n}] {hit['url']}\n"
-                        + wrap_untrusted(text, hit["url"], max_chars=3500))
-                    if len(sources) >= max(4, depth * 4):
+                    _try_fetch(hit, query)
+                    if len(sources) >= source_cap:
                         break
-                if len(sources) >= max(4, depth * 4):
+                if len(sources) >= source_cap:
                     break
+
+        # ---- 2b. relevance guard: if nothing gathered even mentions the
+        # asset, the searches went off-topic — one rescue pass with
+        # guaranteed-relevant default queries (never fabricated sources).
+        if not _any_relevant(extracts, sources, asset):
+            for query in _default_queries(asset)[:2]:
+                if len(sources) >= source_cap:
+                    break
+                budget.check_tool_call()
+                jr.emit("AgentStep", {
+                    "run_id": run_id, "step": "relevance-rescue",
+                    "detail": f"off-topic sources; retrying with: {query}",
+                })
+                sr = web_search_raw(query, max_results=4)
+                for hit in (sr.get("results") or [])[:2]:
+                    _try_fetch(hit, query)
+                    if len(sources) >= source_cap:
+                        break
 
         # ---- 3. verify pass (numbers cross-check)
         must_check = plan.get("must_check") or []
@@ -213,6 +254,102 @@ def research(
 
 
 # ------------------------------------------------------------------ helpers
+
+# --------------------------------------------------------------------------
+# Plan sanitization — the placeholder-query guard (observed in the wild:
+# free models sometimes emit the prompt's example strings verbatim, e.g.
+# queries "search query 1"/"search query 2", sending the fan-out after
+# pages about *queries* instead of the asset).
+# --------------------------------------------------------------------------
+
+_PLACEHOLDER_MARKS = (
+    "search query", "query 1", "query 2", "example query", "your query",
+    "another web-search", "real web-search", "lorem ipsum",
+)
+
+_ALIAS_TABLE = {
+    "btc": ("bitcoin", "btc"),
+    "eth": ("ethereum", "ether", "eth"),
+    "sol": ("solana", "sol"),
+    "xauusd": ("gold", "xauusd", "xau"),
+    "xau": ("gold", "xauusd", "xau"),
+    "gold": ("gold", "xauusd", "xau"),
+}
+
+
+def _asset_aliases(asset: str) -> list[str]:
+    key = asset.strip().lower()
+    aliases = {key, asset.strip().lower()}
+    for k, vals in _ALIAS_TABLE.items():
+        if key == k or key.startswith(k):
+            aliases.update(v.lower() for v in vals)
+    return sorted(a for a in aliases if a)
+
+
+def _default_queries(asset: str) -> list[str]:
+    common = _asset_aliases(asset)[0] if _asset_aliases(asset) else asset
+    return [
+        f"{asset} current price USD",
+        f"{common} news and analysis this week",
+        f"{common} market outlook",
+    ]
+
+
+def _is_placeholder(query: str) -> bool:
+    q = query.lower()
+    return any(mark in q for mark in _PLACEHOLDER_MARKS)
+
+
+def _query_relevant(query: str, aliases: list[str]) -> bool:
+    """A real query mentions the asset (or an alias) and isn't a copied
+    placeholder. Short generic strings also rejected — they're noise."""
+    if _is_placeholder(query):
+        return False
+    q = query.lower()
+    if len(q.strip()) < 6:
+        return False
+    return any(al in q for al in aliases)
+
+
+def _sanitize_plan(plan: dict, asset: str) -> dict:
+    """Drop placeholder / asset-irrelevant queries from the model's plan;
+    when nothing survives, fall back to guaranteed-relevant defaults."""
+    aliases = _asset_aliases(asset)
+    clean_questions = []
+    for q in (plan.get("questions") or []):
+        if not isinstance(q, dict):
+            continue
+        queries = [s.strip() for s in (q.get("queries") or [])
+                   if isinstance(s, str) and s.strip()]
+        good = [s for s in queries if _query_relevant(s, aliases)]
+        if good:
+            clean_questions.append({
+                "question": str(q.get("question") or
+                                f"Current state of {asset}")[:300],
+                "queries": good[:2],
+            })
+    if not clean_questions:
+        clean_questions = [{
+            "question": f"What is the current state of {asset}?",
+            "queries": _default_queries(asset)[:2],
+        }]
+    must = [str(s).strip() for s in (plan.get("must_check") or [])
+            if isinstance(s, str) and s.strip() and not _is_placeholder(s)]
+    if not must:
+        must = [f"current {asset} price"]
+    return {"questions": clean_questions[:4], "must_check": must[:4]}
+
+
+def _any_relevant(extracts: list[str], sources: list[dict],
+                  asset: str) -> bool:
+    """True when the gathered evidence so much as mentions the asset."""
+    aliases = _asset_aliases(asset)
+    hay = " ".join(extracts).lower()
+    hay += " " + " ".join(
+        f"{s.get('title') or ''} {s.get('url') or ''}" for s in sources
+    ).lower()
+    return any(al in hay for al in aliases)
+
 
 def _market_context(asset: str) -> dict:
     ctx: dict = {"asset": asset}

@@ -239,7 +239,17 @@ def _title_of(text: str) -> str:
     m = re.search(r"^Title:\s*(.+)$", text, re.MULTILINE)  # jina format
     if m:
         return m.group(1).strip()[:120]
-    return text.strip().split("\n", 1)[0][:120]
+    # take the first ~400 chars (title may span lines), strip HTML tags,
+    # collapse whitespace — raw HTML first lines like
+    # "<!DOCTYPE html>\n<html lang=...>" become clean text or empty
+    head = text.strip()[:400]
+    head = re.sub(r"<script\b.*?</script>", " ", head,
+                  flags=re.IGNORECASE | re.DOTALL)
+    head = re.sub(r"<style\b.*?</style>", " ", head,
+                  flags=re.IGNORECASE | re.DOTALL)
+    head = re.sub(r"<[^>]+>", " ", head)
+    head = re.sub(r"\s+", " ", head).strip()
+    return head[:120]
 
 
 def wrap_untrusted(text: str, url: str, max_chars: int = 9000) -> str:
