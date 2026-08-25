@@ -416,3 +416,24 @@ Added: `ddgs` (tiny, keyless metasearch) — the only mandatory new dep.
 Optional extras: `[browser]` playwright, `[fetch]` trafilatura,
 `[crypto]` ccxt. Forbidden: LangChain/LlamaIndex/CrewAI/AutoGen, vector
 DBs, queues, docker-compose. See `docs/AGENT_LAWS.md` for the full ladder.
+
+
+---
+
+## GAUNTLET LOOP — quality-bar skill (installed)
+
+The [gauntlet-loop](https://github.com/robonuggets/gauntlet-loop) skill
+(Matt Shumer's builder/critic pattern, CC BY 4.0) is installed at
+`.claude/skills/gauntlet-loop/` — clone this repo in Claude Code and use:
+
+    /gauntlet-loop build me a research brief that beats a named analyst report
+
+It turns any goal into one short, paste-ready prompt that makes an agent
+pick a REAL quality bar (named, fetchable, comparable — never a rubric),
+split the work into small judgeable pieces, run a separate harsh critic
+with fresh context on each, compare blind against the bar, and loop until
+the work wins the blind comparison. Exit is winning, never a round count.
+
+The skill pairs naturally with the research agent: use it when you want
+`research` output held to a named external standard instead of our own
+template.
