@@ -53,7 +53,7 @@ live. Budgets and safety laws L11–L14 of the host repo apply unchanged.
 | 1 | Multi-market data plane: symbol registry v2 + feeds for forex/crypto/NSE/US/indices/commodities | TradingView coverage of those markets | ROUND 3 BUILT (awaiting round-3 critic) |
 | 2 | Markets surface: cross-asset heatmap, movers, watchlists, search | TradingView /markets screenshot (blind) | WON (round 1) |
 | 3 | Asset drill-down: chart + news + drivers + research for ANY asset | TradingView symbol page | WON (4/4 blind + defect round) |
-| 4 | Analyst desk: personas (technician, macro, sentiment, news, risk) + PM synthesis, any asset | ai-hedge-fund personas (distinct evidence-backed work) | PENDING |
+| 4 | Analyst desk: personas (technician, macro, sentiment, news, risk) + PM synthesis, any asset | ai-hedge-fund personas (distinct evidence-backed work) | WON (critic: ours) |
 | 5 | Bloomberg layer: command palette, monitor lists, alerts, news search, economic calendar | Bloomberg public feature checklist | PENDING |
 | 6 | Chat AGENT MODE → analyst desk entry | — | PENDING |
 | 7 | End-to-end verification: every surface live-tested | — | PENDING |
@@ -179,3 +179,6 @@ Blind VLM: "Page B wins by a landslide" (at-a-glance). ~60 instruments/viewport 
 
 ### Piece 3 — WON (4/4 blind VLM + defect round)
 Ad-hoc resolution closed the biggest gap: ANY Yahoo ticker in one click. News above fold, decoded breadcrumbs, 24/24 mover links live.
+
+### Piece 4 — WON
+Critic: data-plane persona separation structurally stronger than the bar; zero fabricated numbers; abstain contract + JSON rescue (GC=F 4/5 substantive after fix). 238/238 tests.

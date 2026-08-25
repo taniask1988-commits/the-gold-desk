@@ -54,6 +54,7 @@ EVENT_KINDS = [
     "AgentRunStarted", "AgentStep", "AgentToolCall",
     "AgentRunFinished", "ResearchReport", "ResearchSourceFetched",
     "ProposalDrafted", "BudgetExceeded",
+    "DeskReport",
 ]
 
 # Agent-sidecar kinds must never carry a reason code (L13-adjacent invariant)
@@ -61,6 +62,7 @@ AGENT_KINDS = {
     "AgentRunStarted", "AgentStep", "AgentToolCall",
     "AgentRunFinished", "ResearchReport", "ResearchSourceFetched",
     "ProposalDrafted", "BudgetExceeded",
+    "DeskReport",
 }
 
 

@@ -25,6 +25,12 @@
     python -m gold_desk.cli research ASSET [--depth 2] [--refresh]
                                                     # cited deep-research report
     python -m gold_desk.cli watch    [--once] [--force]  # L2 watchlist pass
+    python -m gold_desk.cli desk SYMBOL [--model ID] [--json]
+                                                    # multi-analyst desk: 5 personas
+                                                    # (technician/macro/news/
+                                                    # sentiment/risk) judge any
+                                                    # symbol in parallel + a PM
+                                                    # consensus (6 LLM calls)
 """
 from __future__ import annotations
 
@@ -551,6 +557,63 @@ def cmd_watch(args) -> int:
     return 0
 
 
+def cmd_desk(args) -> int:
+    """Multi-analyst desk: 5 personas in parallel + PM synthesis."""
+    from .agent.desk import run_desk
+    try:
+        out = run_desk(args.symbol, data_root=args.data_root,
+                       model=args.model)
+    except Exception as e:  # noqa: BLE001 — context errors fail loud here
+        if args.json:
+            print(json.dumps({"ok": False, "symbol": args.symbol,
+                              "error": f"{type(e).__name__}: {e}"}))
+        else:
+            print(f"analyst desk failed: {type(e).__name__}: {e}")
+        return 1
+    if args.json:
+        print(json.dumps(out, ensure_ascii=False, sort_keys=True,
+                         default=str))
+        return 0 if out.get("ok") else 1
+
+    # human output: symbol header + one line per persona + PM block
+    print("ANALYST DESK")
+    print("=" * 64)
+    print(f"{out['symbol']} — {out.get('name') or ''}"
+          f"  [{out.get('sector') or '?'}]")
+    chg = out.get("change_pct")
+    print(f"as of : {out.get('as_of', '?')}   "
+          f"price {_fmt_price(out.get('price'), out['symbol'])}"
+          f"   1d {f'{chg:+.2f}%' if isinstance(chg, (int, float)) else 'n/a'}")
+    print()
+    for p in out.get("personas") or []:
+        line = (f"  {p['role'].upper():16s} {p['signal']:8s} "
+                f"{p['confidence']:3d}%  {p['thesis']}")
+        print(line)
+        for ev in p.get("key_evidence") or []:
+            print(f"  { ' ':16s}           · {ev}")
+        if p.get("abstained"):
+            print(f"  { ' ':16s}           (model: {p.get('model') or 'n/a'})")
+    print()
+    pm = out.get("pm") or {}
+    print("PM — THE PORTFOLIO MANAGER")
+    print("-" * 64)
+    print(f"consensus     : {pm.get('consensus', '?')} "
+          f"(conviction {pm.get('conviction', 0)}/100)"
+          + ("  [mechanical vote — PM model unavailable]"
+             if pm.get("mechanical") else ""))
+    print(f"summary       : {pm.get('summary', '')}")
+    if pm.get("disagreements"):
+        print(f"disagreements : {pm['disagreements']}")
+    for flag in pm.get("risk_flags") or []:
+        print(f"risk flag     : {flag}")
+    print()
+    abst = out.get("abstained", 0)
+    print(f"  [{len(out.get('personas') or [])} personas · {abst} abstained"
+          f" · {out.get('elapsed_ms', 0)}ms · model {out.get('model') or '?'}"
+          f" · run {out.get('run_id', '?')[:10]}…]")
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="gold-desk",
                                      description="Gold Decision Harness v1")
@@ -685,6 +748,18 @@ def main(argv=None) -> int:
     p_watch.add_argument("--json", action="store_true")
     p_watch.add_argument("--data-root", default=str(REPO_ROOT / "data"))
     p_watch.set_defaults(func=cmd_watch)
+
+    p_desk = sub.add_parser(
+        "desk", help="multi-analyst desk: 5 personas + PM consensus")
+    p_desk.add_argument("symbol",
+                        help="any Yahoo symbol or alias (btc, AAPL, GC=F, "
+                             "^NSEI, TOP, eur/usd ...)")
+    p_desk.add_argument("--model", default=None,
+                        help="model id (default: catalog default chain)")
+    p_desk.add_argument("--json", action="store_true",
+                        help="machine-readable result (used by the web)")
+    p_desk.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_desk.set_defaults(func=cmd_desk)
 
     args = parser.parse_args(argv)
     return args.func(args)

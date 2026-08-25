@@ -76,3 +76,48 @@ export interface SymbolDetail {
   news?: DetailNews;
   error?: string;
 }
+
+/* -------------------------------------------------------------- desk
+ * DTOs for GET /api/desk/desk?symbol=X (cli desk --symbol X --json) —
+ * the multi-analyst desk report (MARKET GAUNTLET piece 4). */
+
+export interface DeskPersona {
+  name: string;
+  role: string;
+  signal: "bullish" | "bearish" | "neutral";
+  confidence: number;
+  thesis: string;
+  key_evidence: string[];
+  abstained: boolean;
+  model: string;
+  latency_ms: number;
+}
+
+export interface DeskPm {
+  consensus: "bullish" | "bearish" | "neutral" | "mixed";
+  conviction: number;
+  summary: string;
+  disagreements: string;
+  risk_flags: string[];
+  model?: string;
+  mechanical?: boolean;
+  latency_ms?: number;
+}
+
+export interface DeskReport {
+  ok: boolean;
+  symbol?: string;
+  name?: string;
+  sector?: string;
+  as_of?: string;
+  price?: number;
+  change_pct?: number;
+  range_5d_change_pct?: number;
+  personas?: DeskPersona[];
+  pm?: DeskPm;
+  abstained?: number;
+  model?: string;
+  run_id?: string;
+  elapsed_ms?: number;
+  error?: string;
+}

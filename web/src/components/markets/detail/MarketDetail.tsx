@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { MarketsBoard, SymbolDetail } from "../types";
 import { MarketFooter } from "../MarketFooter";
+import { AnalystDesk } from "./AnalystDesk";
 import { CandleChart } from "./CandleChart";
 import { NewsCard } from "./NewsCard";
 import { SectorStrip } from "./SectorStrip";
@@ -367,6 +368,11 @@ export function MarketDetail({ symbol }: { symbol: string }) {
 
               {/* per-symbol news (hidden when the feed serves none) */}
               <NewsCard symbol={sym} news={detail.news} />
+
+              {/* multi-analyst desk (piece 4): on-demand, below news,
+                  above the sector strip — 5 personas + PM consensus,
+                  result cached in component state only */}
+              <AnalystDesk symbol={sym} />
 
               {/* sibling tiles from the same sector */}
               <SectorStrip board={board} sectorKey={detail.sector} currentSymbol={sym} />
