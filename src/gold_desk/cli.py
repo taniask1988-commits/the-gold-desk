@@ -31,6 +31,12 @@
                                                     # sentiment/risk) judge any
                                                     # symbol in parallel + a PM
                                                     # consensus (6 LLM calls)
+    python -m gold_desk.cli markets-eco [--json]   # economic calendar (ECO —
+                                                    # ForexFactory mirror,
+                                                    # static fallback)
+    python -m gold_desk.cli markets-news QUERY [--json]
+                                                    # NSE-style news search:
+                                                    # query → merged Yahoo RSS
 """
 from __future__ import annotations
 
@@ -463,6 +469,80 @@ def cmd_markets(args) -> int:
     return 0
 
 
+def cmd_markets_eco(args) -> int:
+    """ECO — this week's economic calendar (GAUNTLET-P13)."""
+    from .markets.calendar import fetch_calendar
+    out = fetch_calendar(args.data_root)
+    if args.json:
+        print(json.dumps(out, sort_keys=True))
+        return 0 if out.get("ok") else 1
+    if not out.get("ok"):
+        print("economic calendar unreachable:", out.get("error"))
+        return 1
+    src = out.get("source", "?")
+    print("ECONOMIC CALENDAR — this week"
+          f"  [{src} feed]"
+          f"  week of {out.get('week_start', '?')}")
+    if out.get("note"):
+        print(f"  note: {out['note']}")
+    print("=" * 64)
+    import datetime as _dt
+    day = None
+    mark = {"high": "###", "medium": "##", "low": "#"}
+    for ev in out.get("events", []):
+        t = _dt.datetime.fromtimestamp(ev["ts"] / 1000,
+                                       tz=_dt.timezone.utc)
+        if t.date() != day:
+            day = t.date()
+            print()
+            print(day.strftime("%A %Y-%m-%d").upper())
+            print("-" * 64)
+        dot = mark.get(ev.get("impact", "low"), "#")
+        extra = ""
+        if ev.get("forecast"):
+            extra = f"  fcst {ev['forecast']}"
+        if ev.get("previous"):
+            extra += f"  prev {ev['previous']}"
+        print(f"  {dot} {t:%H:%M} {ev.get('country', '??'):4s} "
+              f"{str(ev.get('title', ''))[:44]}{extra}")
+    if not out.get("events"):
+        print("  (no events served this week)")
+    return 0
+
+
+def cmd_markets_news(args) -> int:
+    """NSE-style news search (GAUNTLET-P13; topic pass GAUNTLET-P15)."""
+    from .markets.news_search import search_news
+    out = search_news(" ".join(args.query), args.data_root)
+    if args.json:
+        print(json.dumps(out, sort_keys=True))
+        return 0 if out.get("ok") else 1
+    if not out.get("ok"):
+        print("news search failed:", out.get("error", "feeds unreachable"))
+        return 1
+    q = out.get("query", "")
+    matched = out.get("matched") or []
+    if out.get("topic"):
+        tag = f"topic: headline text for \"{q}\""
+    elif matched:
+        tag = "matched: " + ", ".join(matched)
+    else:
+        tag = "none — general feed"
+    print(f"NEWS SEARCH — \"{q}\"  ({tag})")
+    print("=" * 64)
+    items = out.get("items", [])
+    if not items:
+        print("  (no headlines served)")
+    for it in items:
+        when = str(it.get("published", ""))
+        if when:
+            when = when.split(",", 1)[-1].strip()
+            when = when.rsplit(" ", 1)[0]  # drop the timezone word
+        print(f"  [{when}] {str(it.get('title', ''))[:64]}")
+        print(f"           — {it.get('source', '')}")
+    return 0
+
+
 def _agent_registry():
     """Full research registry: desk tools + crypto tools + web tools."""
     from .agent.desk_tools import desk_registry
@@ -760,6 +840,23 @@ def main(argv=None) -> int:
                         help="machine-readable result (used by the web)")
     p_desk.add_argument("--data-root", default=str(REPO_ROOT / "data"))
     p_desk.set_defaults(func=cmd_desk)
+
+    p_eco = sub.add_parser("markets-eco",
+                           help="economic calendar this week (ECO — "
+                                "ForexFactory mirror, static fallback)")
+    p_eco.add_argument("--json", action="store_true")
+    p_eco.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_eco.set_defaults(func=cmd_markets_eco)
+
+    p_nsec = sub.add_parser("markets-news",
+                            help="NSE-style news search — query → "
+                                 "merged Yahoo RSS headlines")
+    p_nsec.add_argument("query", nargs="+",
+                        help="search query (topic, symbol, alias: bitcoin, "
+                             "gold, nifty, inr/usd, crypto, aapl nvda ...)")
+    p_nsec.add_argument("--json", action="store_true")
+    p_nsec.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_nsec.set_defaults(func=cmd_markets_news)
 
     args = parser.parse_args(argv)
     return args.func(args)

@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useState } from "react";
 import type { DriverDTO, DriverValuesDTO } from "./useDeskData";
 import { DRIVERS, stanceFor } from "@/lib/desk/drivers";
 
@@ -32,48 +32,64 @@ const TIER_META: Record<number, { label: string; note: string }> = {
  * `overrideVal - d.value` (live minus SIMULATED), which produced a constant
  * offset that looked like signal but was meaningless noise.
  *
- * Implementation: the merged-with-deltas array lives in component state. The
- * `prevLiveRef` is only READ inside the effect (never during render) and
- * holds the previous round's live values so the next round can compute
- * `delta = newLive - prevLive` (or 0 on the very first reading). The ref is
- * safe to mutate inside the effect — that's the canonical pattern.
+ * Implementation (GAUNTLET-P15 lint fix): the merged-with-deltas view is
+ * DERIVED during render via the documented "adjust state when inputs
+ * change" pattern — when `values`/`drivers` move, the next round is
+ * recomputed and stored in one setState-during-render (no effect, no
+ * setState cascade). The previous round's live values ride in the same
+ * state slot so `delta = newLive - prevLive` (or 0 on the very first
+ * reading) works exactly as before; the ref-mutation + effect mirror is
+ * gone.
  */
 function useMergeReal(drivers: DriverDTO[], values: DriverValuesDTO | null) {
-  const [merged, setMerged] = useState<DriverDTO[]>(drivers);
-  const prevLiveRef = useRef<Record<string, number>>({});
-  useEffect(() => {
-    if (!values?.live) { setMerged(drivers); return; }
-    const prev = prevLiveRef.current;  // snapshot from last round
-    const next = drivers.map((d) => {
-      const real = values.live[d.id];
-      if (!real || typeof real.value !== "number") return d;
-      const def = DRIVERS.find((x) => x.id === d.id);
-      const overrideVal =
-        d.id === "D5" && typeof real.display_k === "number"
-          ? real.display_k
-          : real.value;
-      const prevVal = prev[d.id];
-      const delta = prevVal === undefined ? 0 : overrideVal - prevVal;
-      return {
-        ...d,
-        value: overrideVal,
-        stance: def ? stanceFor(def, overrideVal) : d.stance,
-        formatted: def ? def.format(overrideVal) : d.formatted,
-        delta,
-        live: true,
-        source: real.source,
-      };
-    });
-    // record this round's live values for the next delta computation
-    const nextPrev: Record<string, number> = {};
-    for (const [id, v] of Object.entries(values.live)) {
-      if (typeof v.value === "number") nextPrev[id] =
-        id === "D5" && typeof v.display_k === "number" ? v.display_k : v.value;
+  const live = values?.live ?? null;
+  const [round, setRound] = useState<{
+    live: typeof live;
+    drivers: DriverDTO[];
+    prev: Record<string, number>;
+    merged: DriverDTO[];
+  }>(() => ({ live: null, drivers, prev: {}, merged: drivers }));
+  if (live !== round.live || drivers !== round.drivers) {
+    // inputs moved → recompute this round during render (guarded, so
+    // it settles immediately rather than re-rendering in a loop)
+    let next: DriverDTO[];
+    let prev = round.prev;
+    if (!live) {
+      next = drivers;
+    } else {
+      const prevVals = round.prev; // snapshot from last round
+      next = drivers.map((d) => {
+        const real = live[d.id];
+        if (!real || typeof real.value !== "number") return d;
+        const def = DRIVERS.find((x) => x.id === d.id);
+        const overrideVal =
+          d.id === "D5" && typeof real.display_k === "number"
+            ? real.display_k
+            : real.value;
+        const prevVal = prevVals[d.id];
+        const delta = prevVal === undefined ? 0 : overrideVal - prevVal;
+        return {
+          ...d,
+          value: overrideVal,
+          stance: def ? stanceFor(def, overrideVal) : d.stance,
+          formatted: def ? def.format(overrideVal) : d.formatted,
+          delta,
+          live: true,
+          source: real.source,
+        };
+      });
+      // record this round's live values for the next delta computation
+      const nextPrev: Record<string, number> = {};
+      for (const [id, v] of Object.entries(live)) {
+        if (typeof v.value === "number")
+          nextPrev[id] =
+            id === "D5" && typeof v.display_k === "number" ? v.display_k : v.value;
+      }
+      prev = nextPrev;
     }
-    prevLiveRef.current = nextPrev;
-    setMerged(next);
-  }, [values, drivers]);
-  return merged;
+    setRound({ live, drivers, prev, merged: next });
+  }
+  return round.merged;
 }
 
 function DriverBoardImpl({

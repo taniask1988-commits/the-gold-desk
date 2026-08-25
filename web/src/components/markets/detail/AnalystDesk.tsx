@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import type { DeskPersona, DeskPm, DeskReport } from "../types";
 import { GREEN, RED, fmtAsOf } from "../lib";
 
@@ -149,11 +149,14 @@ const PmPanel = memo(PmPanelImpl);
  *  the symbol on demand — 6 LLM calls over the keyless Zen provider,
  *  runs take tens of seconds (spinner state on the button), the result
  *  is cached in component state ONLY (never refetched, never persisted;
- *  a fresh judgment needs a fresh click). */
-function AnalystDeskImpl({ symbol }: { symbol: string }) {
+ *  a fresh judgment needs a fresh click). GAUNTLET-P13: autoRun fires
+ *  once on mount — the command palette "run desk <symbol>" lands on
+ *  /markets/<sym>?desk=1 and the desk starts itself. */
+function AnalystDeskImpl({ symbol, autoRun = false }: { symbol: string; autoRun?: boolean }) {
   const [running, setRunning] = useState(false);
   const [report, setReport] = useState<DeskReport | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const autoFired = useRef(false);
 
   const run = useCallback(async () => {
     setRunning(true);
@@ -173,6 +176,13 @@ function AnalystDeskImpl({ symbol }: { symbol: string }) {
       setRunning(false);
     }
   }, [symbol]);
+
+  useEffect(() => {
+    if (autoRun && !autoFired.current) {
+      autoFired.current = true;
+      void run();
+    }
+  }, [autoRun, run]);
 
   return (
     <section className="gdc-panel px-3.5 pb-3 pt-3" aria-label="Analyst desk">

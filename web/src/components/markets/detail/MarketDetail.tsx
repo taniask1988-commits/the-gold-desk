@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { MarketsBoard, SymbolDetail } from "../types";
+import { CommandCenter, useCommands } from "../CommandCenter";
 import { MarketFooter } from "../MarketFooter";
 import { AnalystDesk } from "./AnalystDesk";
 import { CandleChart } from "./CandleChart";
@@ -17,6 +18,141 @@ import {
 } from "../lib";
 
 const REFRESH_MS = 30_000;
+
+/** Smart-ish round for prefill thresholds (price ±2%): 2dp at/above
+ *  100, 4dp at/above 1, 6dp below — mirrors fmtPrice precision. */
+function prefillPrice(x: number): number {
+  const dp = x >= 100 ? 2 : x >= 1 ? 4 : 6;
+  return Number(x.toFixed(dp));
+}
+
+/** + MONITOR popover — list picker fed by the command context. */
+function MonitorPicker({ symbol }: { symbol: string }) {
+  const cmds = useCommands();
+  const [open, setOpen] = useState(false);
+  const add = (id: string) => {
+    cmds.updateMonitors(
+      cmds.monitors.map((m) =>
+        m.id === id && !m.symbols.includes(symbol) && m.symbols.length < 30
+          ? { ...m, symbols: [...m.symbols, symbol] }
+          : m,
+      ),
+    );
+    cmds.pushToast("MONITOR", `${symbol} added`);
+    setOpen(false);
+  };
+  const addNew = () => {
+    if (cmds.monitors.length >= 5) return;
+    const id = `m${Date.now().toString(36)}`;
+    cmds.updateMonitors([
+      ...cmds.monitors,
+      { id, name: `LIST ${cmds.monitors.length + 1}`, symbols: [symbol] },
+    ]);
+    cmds.pushToast("MONITOR", `new list with ${symbol}`);
+    setOpen(false);
+  };
+  return (
+    <span className="relative">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="gdc-chip cursor-pointer text-[#aab4bf] transition-colors hover:text-[#e2c074]"
+        title="add this symbol to a monitor list"
+        aria-expanded={open}
+        aria-label="Add to monitor list"
+      >
+        + MONITOR
+      </button>
+      {open && (
+        <span className="absolute right-0 top-[calc(100%+6px)] z-[60] flex w-[210px] flex-col gap-1 rounded-sm border border-[#1a1f2c] bg-[#0f1219] px-2 py-2 shadow-lg">
+          <span className="gdc-data px-1 text-[8.5px] font-semibold uppercase tracking-[0.16em] text-[#8a93a6]">
+            add {symbol} to
+          </span>
+          {cmds.monitors.map((m) => (
+            <button
+              key={m.id}
+              onClick={() => add(m.id)}
+              className="gdc-data flex cursor-pointer items-center justify-between rounded-sm px-1.5 py-1 text-left text-[10.5px] text-[#c6cedb] transition-colors hover:bg-[#c8a04b]/[0.1] hover:text-[#e2c074]"
+            >
+              <span className="truncate">{m.name}</span>
+              <span className="text-[9px] tabular-nums text-[#6f7987]">
+                {m.symbols.includes(symbol) ? "✓" : `${m.symbols.length}/30`}
+              </span>
+            </button>
+          ))}
+          {cmds.monitors.length < 5 ? (
+            <button
+              onClick={addNew}
+              className="gdc-data cursor-pointer rounded-sm px-1.5 py-1 text-left text-[10.5px] text-[#c8a04b] transition-colors hover:bg-[#c8a04b]/[0.1]"
+            >
+              + NEW LIST
+            </button>
+          ) : (
+            <span className="px-1.5 text-[9.5px] text-[#6f7987]">
+              list cap reached (5)
+            </span>
+          )}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** The function-layer header buttons for the drill-down page. */
+function DetailCommandChips({
+  symbol,
+  price,
+}: {
+  symbol: string;
+  price: number | null;
+}) {
+  const cmds = useCommands();
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <button
+        onClick={() => cmds.openPalette()}
+        className="gdc-chip cursor-pointer border-[#c8a04b]/55 px-2 py-1 text-[10.5px] font-semibold text-[#e2c074] transition-colors hover:bg-[#c8a04b]/[0.12]"
+        aria-label="Open the command palette (Ctrl+K)"
+        title="Command palette — ⌘K / Ctrl+K / /"
+      >
+        ⌘K
+      </button>
+      <button
+        onClick={cmds.openEco}
+        className="gdc-chip cursor-pointer text-[#aab4bf] transition-colors hover:text-[#e2c074]"
+        title="ECO — economic calendar"
+      >
+        ECO
+      </button>
+      <button
+        onClick={() => cmds.openNews(symbol)}
+        className="gdc-chip cursor-pointer text-[#aab4bf] transition-colors hover:text-[#e2c074]"
+        title={`news search — ${symbol}`}
+      >
+        NEWS
+      </button>
+      <button
+        onClick={() =>
+          price != null
+            ? cmds.openAlerts({
+                symbol,
+                above: prefillPrice(price * 1.02),
+                below: prefillPrice(price * 0.98),
+              })
+            : cmds.openAlerts({ symbol })
+        }
+        className="gdc-chip gdc-data cursor-pointer text-[#aab4bf] transition-colors hover:text-[#e2c074]"
+        title={
+          price != null
+            ? `arm an alert on ${symbol} — prefilled ±2% around ${fmtPrice(price, symbol)}`
+            : `arm an alert on ${symbol}`
+        }
+      >
+        + ALERT
+      </button>
+      <MonitorPicker symbol={symbol} />
+    </div>
+  );
+}
 
 /** One stat cell in the stats row. */
 function Stat({
@@ -53,8 +189,21 @@ export function MarketDetail({ symbol }: { symbol: string }) {
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [countdown, setCountdown] = useState(REFRESH_MS / 1000);
+  // ?desk=1 (palette "run desk <symbol>") auto-triggers the analyst
+  // desk once the page mounts — read client-side like ChatRoom's ?q=
+  const [deskAuto, setDeskAuto] = useState(false);
 
   const nextAtRef = useRef<number>(Date.now() + REFRESH_MS);
+
+  useEffect(() => {
+    try {
+      setDeskAuto(
+        new URLSearchParams(window.location.search).get("desk") === "1",
+      );
+    } catch {
+      /* malformed query string — no auto-run */
+    }
+  }, []);
 
   const load = useCallback(async () => {
     setRefreshing(true);
@@ -151,37 +300,39 @@ export function MarketDetail({ symbol }: { symbol: string }) {
   const symDisplay = derived && derivedFrom ? derivedPairLabel(derivedFrom) : sym;
 
   return (
-    <div className="gdc-root flex min-h-screen flex-col">
-      {/* slim top bar: back to the board + breadcrumb */}
-      <header className="sticky top-0 z-50 border-b border-[#1a1f2c] bg-[#08090d]">
-        <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2 sm:px-7">
-          <Link
-            href="/markets"
-            className="gdc-chip border-[#c8a04b]/35 text-[#c8a04b] transition-colors hover:bg-[#c8a04b]/[0.12]"
-            aria-label="Back to the markets board"
-          >
-            <span aria-hidden>◂</span> Markets
-          </Link>
-          <span className="gdc-data truncate text-[11px] text-[#8a93a6]">
-            {/* P10 defect 2: breadcrumb shows the DECODED human symbol
-             * ("/markets/^NSEI"), never the URL-encoded form — the
-             * encoded form only ever lives in fetch/href URLs */}
-            /markets/{symDisplay}
-          </span>
-          <div className="ml-auto flex items-center gap-2">
-            <span className="gdc-chip gdc-data text-[#aab4bf]">
-              <span className="gdc-live-dot h-1.5 w-1.5 rounded-full bg-[#3fb950]" />
-              Live Detail
-            </span>
+    <CommandCenter board={board}>
+      <div className="gdc-root flex min-h-screen flex-col">
+        {/* slim top bar: back to the board + breadcrumb + function layer */}
+        <header className="sticky top-0 z-50 border-b border-[#1a1f2c] bg-[#08090d]">
+          <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2 sm:px-7">
             <Link
-              href="/"
+              href="/markets"
               className="gdc-chip border-[#c8a04b]/35 text-[#c8a04b] transition-colors hover:bg-[#c8a04b]/[0.12]"
+              aria-label="Back to the markets board"
             >
-              <span aria-hidden>◂</span> Deck
+              <span aria-hidden>◂</span> Markets
             </Link>
+            <span className="gdc-data truncate text-[11px] text-[#8a93a6]">
+              {/* P10 defect 2: breadcrumb shows the DECODED human symbol
+               * ("/markets/^NSEI"), never the URL-encoded form — the
+               * encoded form only ever lives in fetch/href URLs */}
+              /markets/{symDisplay}
+            </span>
+            <div className="ml-auto flex flex-wrap items-center gap-2">
+              <DetailCommandChips symbol={sym} price={detail?.price ?? null} />
+              <span className="gdc-chip gdc-data text-[#aab4bf]">
+                <span className="gdc-live-dot h-1.5 w-1.5 rounded-full bg-[#3fb950]" />
+                Live Detail
+              </span>
+              <Link
+                href="/"
+                className="gdc-chip border-[#c8a04b]/35 text-[#c8a04b] transition-colors hover:bg-[#c8a04b]/[0.12]"
+              >
+                <span aria-hidden>◂</span> Deck
+              </Link>
+            </div>
           </div>
-        </div>
-      </header>
+        </header>
 
       {/* P10 defect 3: space-y-3 + py-4 (was space-y-4/py-5) — news
           must begin above the fold on a 982px viewport */}
@@ -371,8 +522,9 @@ export function MarketDetail({ symbol }: { symbol: string }) {
 
               {/* multi-analyst desk (piece 4): on-demand, below news,
                   above the sector strip — 5 personas + PM consensus,
-                  result cached in component state only */}
-              <AnalystDesk symbol={sym} />
+                  result cached in component state only. ?desk=1 from
+                  the palette ("run desk <symbol>") auto-triggers. */}
+              <AnalystDesk symbol={sym} autoRun={deskAuto} />
 
               {/* sibling tiles from the same sector */}
               <SectorStrip board={board} sectorKey={detail.sector} currentSymbol={sym} />
@@ -388,6 +540,7 @@ export function MarketDetail({ symbol }: { symbol: string }) {
         onRefresh={manualRefresh}
         errorCount={error && !detail ? 1 : 0}
       />
-    </div>
+      </div>
+    </CommandCenter>
   );
 }

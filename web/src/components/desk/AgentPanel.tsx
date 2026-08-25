@@ -63,9 +63,16 @@ function AgentPanel() {
   }, []);
 
   useEffect(() => {
-    load();
-    const t = setInterval(load, 30_000);
-    return () => clearInterval(t);
+    // kick the first fetch on the next tick — load's setState happens
+    // post-await, but the synchronous call itself trips
+    // react-hooks/set-state-in-effect, so route it through a timer
+    // callback like the interval below (GAUNTLET-P15)
+    const t0 = setTimeout(load, 0);
+    const t = setInterval(() => void load(), 30_000);
+    return () => {
+      clearTimeout(t0);
+      clearInterval(t);
+    };
   }, [load]);
 
   const openReport = useCallback(async (file: string) => {

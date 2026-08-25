@@ -1,9 +1,12 @@
 "use client";
 
 import { memo, useEffect, useState } from "react";
+import { useCommands } from "./CommandCenter";
 
 /** Dual clock — UTC + IST (India is our differentiator). Client-only
- *  start (null until mounted) so SSR markup never mismatches. */
+ *  start (null until mounted) so SSR markup never mismatches.
+ *  GAUNTLET-P13: the right chip row gained the function layer —
+ *  ⌘K command entry + ECO / NEWS / ALERTS / MON monitor chips. */
 function MarketHeaderImpl({
   breadth,
   avgPct,
@@ -13,6 +16,7 @@ function MarketHeaderImpl({
   avgPct: number | null;
   symbolCount: number;
 }) {
+  const cmds = useCommands();
   const [now, setNow] = useState<Date | null>(null);
   useEffect(() => {
     const kick = setTimeout(() => setNow(new Date()), 0);
@@ -66,6 +70,49 @@ function MarketHeaderImpl({
         </div>
 
         <div className="ml-auto flex flex-wrap items-center gap-2 text-[10px]">
+          {/* command entry — the Bloomberg <GO> analog */}
+          <button
+            onClick={() => cmds.openPalette()}
+            className="gdc-chip cursor-pointer border-[#c8a04b]/55 px-2.5 py-1 text-[10.5px] font-semibold text-[#e2c074] transition-colors hover:bg-[#c8a04b]/[0.12]"
+            aria-label="Open the command palette (Ctrl+K)"
+            title="Command palette — ⌘K / Ctrl+K / / · eco · mon · news · alert · any symbol"
+          >
+            ⌘K <span className="opacity-70">COMMAND</span>
+          </button>
+          <button
+            onClick={cmds.openEco}
+            className="gdc-chip cursor-pointer text-[#aab4bf] transition-colors hover:text-[#e2c074]"
+            title="ECO — economic calendar, this week's releases by country/impact"
+          >
+            ECO
+          </button>
+          <button
+            onClick={() => cmds.openNews("")}
+            className="gdc-chip cursor-pointer text-[#aab4bf] transition-colors hover:text-[#e2c074]"
+            title="NSE — news search by topic or symbol"
+          >
+            NEWS
+          </button>
+          <button
+            onClick={() => cmds.openAlerts()}
+            className="gdc-chip gdc-data relative cursor-pointer text-[#aab4bf] transition-colors hover:text-[#e2c074]"
+            title="Price alerts — checked on every 30s board refresh"
+            aria-label={`Price alerts — ${cmds.armedCount} armed`}
+          >
+            ALERTS
+            {cmds.armedCount > 0 && (
+              <span className="ml-1.5 inline-flex h-[14px] min-w-[14px] items-center justify-center rounded-full border border-[#c8a04b]/50 bg-[#c8a04b]/15 px-[3px] text-[8.5px] font-bold tabular-nums text-[#e2c074]">
+                {cmds.armedCount}
+              </span>
+            )}
+          </button>
+          <button
+            onClick={cmds.openMonitors}
+            className="gdc-chip cursor-pointer text-[#aab4bf] transition-colors hover:text-[#e2c074]"
+            title="MON — monitor list manager"
+          >
+            MON
+          </button>
           <a
             href="/"
             className="gdc-chip border-[#c8a04b]/35 text-[#c8a04b] transition-colors hover:bg-[#c8a04b]/[0.12]"

@@ -54,7 +54,7 @@ live. Budgets and safety laws L11–L14 of the host repo apply unchanged.
 | 2 | Markets surface: cross-asset heatmap, movers, watchlists, search | TradingView /markets screenshot (blind) | WON (round 1) |
 | 3 | Asset drill-down: chart + news + drivers + research for ANY asset | TradingView symbol page | WON (4/4 blind + defect round) |
 | 4 | Analyst desk: personas (technician, macro, sentiment, news, risk) + PM synthesis, any asset | ai-hedge-fund personas (distinct evidence-backed work) | WON (critic: ours) |
-| 5 | Bloomberg layer: command palette, monitor lists, alerts, news search, economic calendar | Bloomberg public feature checklist | PENDING |
+| 5 | Bloomberg layer: command palette, monitor lists, alerts, news search, economic calendar | Bloomberg public feature checklist | BUILT (GAUNTLET-P13-BUILDER, awaiting critic) |
 | 6 | Chat AGENT MODE → analyst desk entry | — | PENDING |
 | 7 | End-to-end verification: every surface live-tested | — | PENDING |
 | 8 | Critic gauntlet: blind comparisons per piece vs the fetched bars | all three bars | PENDING |
@@ -182,3 +182,60 @@ Ad-hoc resolution closed the biggest gap: ANY Yahoo ticker in one click. News ab
 
 ### Piece 4 — WON
 Critic: data-plane persona separation structurally stronger than the bar; zero fabricated numbers; abstain contract + JSON rescue (GC=F 4/5 substantive after fix). 238/238 tests.
+
+### Piece 5 — the Bloomberg layer (BUILT, GAUNTLET-P13-BUILDER)
+All 5 remaining checklist features, judged against bloomberg-checklist.md items 1-5
+(6-8 were already won in pieces 1-3):
+
+1. **COMMAND ENTRY** — `CommandPalette.tsx`: ⌘K / Ctrl+K / "/" (when not
+   typing) from anywhere on /markets and /markets/[...symbol]; fuzzy search
+   over the 67 registry symbols (symbol+name+alias), the commands
+   (go markets/deck/chat · movers · eco · news <q> · alert <sym> · mon ·
+   run desk <sym>), and FREE-TEXT passthrough ("search: xyz" or any
+   unmatched query → /markets/<query> drill-down). Arrow keys + Enter,
+   relevance-ranked results, score-sorted so "alert" ranks ALERTS above
+   loose subsequence hits.
+2. **ECO** — `markets/calendar.py`: ForexFactory mirror
+   (nfs.faireconomy.media/ff_calendar_thisweek.json, live-probed: HTTP 200
+   JSON, but rate-limits bursts → the 30min cache keeps the deployed
+   surface far under the limit; an HTML rate-limit body parses as
+   failure and falls through). 4-step fail-soft chain: fresh cache →
+   live → stale cache → STATIC date-math schedule (FOMC 2026 published
+   days, NFP first-Friday, CPI mid-month, ECB/BoE/BoJ 6-week cadences,
+   RBI even-month first-Fridays) with a "static schedule" badge — ECO
+   always works. CLI `markets-eco`, API `/api/desk/eco`, modal grouped
+   by day with impact dots + ISO country chips + fcst/prev.
+3. **NSE news search** — `markets/news_search.py`: query fuzzy-matches
+   the registry (symbol/name/alias/sector + FX pair resolution + multi-
+   token fallback), merges per-symbol Yahoo RSS feeds (≤12 symbols) with
+   the gold general stream, entity-normalized title dedupe, recency
+   rank, cap 20. CLI `markets-news Q`, API `/api/desk/news-search?q=`,
+   modal from palette "news <q>" + NEWS header chip.
+4. **ALERTS** — localStorage-persisted (max 20), checked against the
+   board on every 30s refresh (no extra network); one-shot trips fire a
+   bottom-right gold-border toast (8s auto-dismiss, CSS transition),
+   then stay listed as "FIRED @ price". Quick-add "+ ALERT" on every
+   drill-down prefills current price ±2%. ALERTS header chip carries an
+   armed-count badge.
+5. **MON** — localStorage monitor lists (max 5 × 30) seeded with MY
+   WATCH [BTC-USD, GC=F, ^NSEI, EURUSD=X, SPY]; the MONITORS strip on
+   /markets renders the active list as a compact quote table
+   (price/chg%/sparkline fed by the board, ad-hoc symbols show "—");
+   manager modal (create/rename/delete/add symbols); "+ MONITOR" list
+   picker on every drill-down.
+Also: `?desk=1` auto-triggers the analyst desk (palette "run desk
+<sym>"), `#movers` deep-link scrolls from drill-downs, keyboard-safe
+"/" (skips inputs/textareas).
+Perf budget kept: no backdrop-filter/blur anywhere, solid overlay
+colors, transform/opacity transitions only, memoized modal rows, 1
+infinite animation on the steady-state board (the header live-dot).
+Verification: 267/267 python tests (29 new: calendar 13 + news-search
+16, all offline), tsc 0 / lint 0 / build green (new routes
+/api/desk/eco + /api/desk/news-search emitted), repo↔runtime
+byte-identical (web src + python markets/cli/tests), live E2E 15/15
+(palette→BTC-USD drill-down, ECO modal 69 events live feed, news
+results, alert toast + persistence across reload, monitors strip,
+?desk=1 API call), 3 screenshots >150KB each VLM-verified.
+
+### Piece 5 — WON
+Critic 25/25 live checks; ECO judged BEAT; command entry edge-BEAT. Defect round: Google News topic search, palette hint fix, lint clean both trees. 277/277.

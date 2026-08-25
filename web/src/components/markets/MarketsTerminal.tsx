@@ -2,15 +2,20 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MarketsBoard, SymbolDetail } from "./types";
+import { CommandCenter, useCommands } from "./CommandCenter";
 import { MarketHeader } from "./MarketHeader";
 import { MarketFooter } from "./MarketFooter";
 import { MoversStrip, WatchlistMovers } from "./Movers";
 import { SectorGrid } from "./SectorHeatmap";
 import { SearchLookup } from "./SearchLookup";
+import { MonitorsStrip } from "./MonitorsManager";
 
 const REFRESH_MS = 30_000;
 
-/** The terminal's second screen — full-page multi-market surface. */
+/** The terminal's second screen — full-page multi-market surface.
+ *  GAUNTLET-P13: the whole page now lives inside <CommandCenter> —
+ *  the palette + ECO/news/alerts/mon modals + toasts mount once here,
+ *  and the alert checker rides the board's existing 30s poll. */
 export function MarketsTerminal() {
   const [board, setBoard] = useState<MarketsBoard | null>(null);
   const [linkError, setLinkError] = useState<string | null>(null);
@@ -123,6 +128,17 @@ export function MarketsTerminal() {
     };
   }, [board]);
 
+  // deep-link target (#movers, from the palette "movers" command on
+  // a drill-down page): scroll once the first board has rendered
+  useEffect(() => {
+    if (board && window.location.hash === "#movers") {
+      document
+        .getElementById("movers")
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+      history.replaceState(null, "", window.location.pathname);
+    }
+  }, [board]);
+
   if (loading && !board) {
     return (
       <div className="gdc-root flex min-h-screen flex-col items-center justify-center gap-5">
@@ -156,12 +172,13 @@ export function MarketsTerminal() {
   const feedErrors = board?.errors ?? [];
 
   return (
-    <div className="gdc-root flex min-h-screen flex-col">
-      <MarketHeader
-        breadth={derived.breadth.up + derived.breadth.down > 0 ? derived.breadth : null}
-        avgPct={derived.avgPct}
-        symbolCount={derived.symbolCount}
-      />
+    <CommandCenter board={board}>
+      <div className="gdc-root flex min-h-screen flex-col">
+        <MarketHeader
+          breadth={derived.breadth.up + derived.breadth.down > 0 ? derived.breadth : null}
+          avgPct={derived.avgPct}
+          symbolCount={derived.symbolCount}
+        />
 
       <main className="mx-auto w-full max-w-[1600px] flex-1 space-y-4 px-4 py-4 sm:px-6 sm:py-5">
         {/* lookup row + inline result */}
@@ -177,8 +194,13 @@ export function MarketsTerminal() {
           />
         </div>
 
-        {/* whole-market movers */}
-        <MoversStrip movers={board?.market_movers} />
+        {/* whole-market movers (palette "movers" scroll target) */}
+        <div id="movers">
+          <MoversStrip movers={board?.market_movers} />
+        </div>
+
+        {/* MON — user monitor lists (localStorage watchlists) */}
+        <MonitorStripSection board={board} />
 
         {/* sector heatmaps — the centerpiece. Indices lead as a full-width
             hero band; small sectors pack side-by-side so no row sits sparse. */}
@@ -203,13 +225,29 @@ export function MarketsTerminal() {
         <WatchlistMovers movers={board?.watchlist_movers} />
       </main>
 
-      <MarketFooter
-        asOf={board?.as_of}
-        countdown={countdown}
-        refreshing={refreshing}
-        onRefresh={manualRefresh}
-        errorCount={feedErrors.length}
-      />
-    </div>
+        <MarketFooter
+          asOf={board?.as_of}
+          countdown={countdown}
+          refreshing={refreshing}
+          onRefresh={manualRefresh}
+          errorCount={feedErrors.length}
+        />
+      </div>
+    </CommandCenter>
+  );
+}
+
+/** The monitors strip consumes the command context (lists + manager
+ *  opener) — kept in its own component so MarketsTerminal itself
+ *  stays a plain data component. */
+function MonitorStripSection({ board }: { board: MarketsBoard | null }) {
+  const cmds = useCommands();
+  return (
+    <MonitorsStrip
+      board={board}
+      monitors={cmds.monitors}
+      updateMonitors={cmds.updateMonitors}
+      onOpenManager={cmds.openMonitors}
+    />
   );
 }

@@ -145,15 +145,17 @@ def _cached_fetch(data_root: str | Path, name: str, ttl: int,
 
 
 # ------------------------------------------------------------------ fetch
-def fetch_symbol_news(symbol: str, data_root: str | Path = "data") -> dict:
+def fetch_symbol_news(symbol: str, data_root: str | Path = "data",
+                      limit: int = NEWS_MAX_ITEMS) -> dict:
     """Per-symbol RSS headlines, fail-soft.
 
     Returns {ok, symbol, items: [{title, link, published, source}]}
-    with at most NEWS_MAX_ITEMS items. An EMPTY channel is a valid,
-    cached state (Yahoo's headline RSS carries no NSE-listed symbols —
-    probed live, see module docstring), so it yields {ok: True,
-    items: []} rather than an error; only transport/parse failures
-    return {ok: False, error}. Never raises.
+    with at most `limit` items (default NEWS_MAX_ITEMS=8 — the
+    detail-page card length; news_search passes a wider net). An EMPTY
+    channel is a valid, cached state (Yahoo's headline RSS carries no
+    NSE-listed symbols — probed live, see module docstring), so it
+    yields {ok: True, items: []} rather than an error; only
+    transport/parse failures return {ok: False, error}. Never raises.
     """
     sym = str(symbol or "").strip()
     if not sym:
@@ -165,7 +167,7 @@ def fetch_symbol_news(symbol: str, data_root: str | Path = "data") -> dict:
         xml = _http_get(url)
         items = parse_headline_rss(xml, source=f"Yahoo Finance · {sym}")
         return {"ok": True, "symbol": sym,
-                "items": items[:NEWS_MAX_ITEMS]}
+                "items": items[:max(1, limit)]}
 
     out = _cached_fetch(data_root, _cache_name(sym), NEWS_TTL_S, _fetch)
     out.setdefault("ok", False)
