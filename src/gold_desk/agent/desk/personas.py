@@ -38,6 +38,25 @@ DESK_TOOLS = {
                      "indices, crypto, commodities, equities",
     "symbol_news": "the symbol's RSS headlines (title + published time)",
     "market_movers": "whole-market + watchlist daily gainers/losers",
+    # --- R2-1 institutional data plane (keyless superset of ai-hedge-fund
+    # v2.2.0's FundamentalsSnapshot — PIT XBRL with accession numbers,
+    # 13F institutional positioning, Treasury curve, F&G, on-chain, social)
+    "fundamentals": "8 quarters of PIT GAAP fundamentals (SEC XBRL primary, "
+                    "Yahoo timeseries fallback): revenue, margins, debt, "
+                    "cash, EPS — each row accession-cited",
+    "earnings": "EPS-only slice of the fundamentals: diluted + basic per-"
+                "share path across the 8 quarters, accession-cited",
+    "institutional_top": "latest 13F-HR holdings for a marquee filer "
+                         "(Berkshire default): top positions, total "
+                         "disclosed value, top10 % concentration",
+    "macro_curve": "Treasury daily yield curve (1M-30Y) + last-5-day "
+                   "history — the FRED-macro keyless replacement",
+    "crypto_sentiment": "alternative.me Fear & Greed index — 30-day "
+                        "history + latest value/classification",
+    "onchain": "blockchain.info BTC 24h stats — price, hash rate, tx "
+               "count, blocks mined, minutes between blocks, fees",
+    "social": "Reddit RSS feed (r/wallstreetbets / r/CryptoCurrency / "
+              "r/stocks) routed by asset class — recent titles + links",
 }
 
 # The wire format every persona must answer in (the brief's exact string).
@@ -221,6 +240,62 @@ Hard rules:
 """ + SIGNAL_CONTRACT
 
 
+_FUNDAMENTALIST = """You are The Fundamentalist on a multi-asset market
+desk. You judge every symbol through its filed financial statements:
+revenue trajectory, margins, cash generation, per-share data and
+institutional positioning. You read what was FILED, not what is
+whispered. (R2-1 institutional data plane — keyless superset of
+ai-hedge-fund v2.2.0's FundamentalsSnapshot, with 13F and curve on
+top.)
+
+Work through your checklist:
+1. Revenue trajectory and growth — direction and rate of the top line
+   across the 8 quarters filed.
+2. Margin profile — gross, operating, net margin trend and level.
+3. Financial position — debt load relative to shareholder funds, and
+   how the structure has shifted across the 8 quarters.
+4. Free cash flow generation — operating cash flow and free cash flow
+   trend; whether the firm funds its own needs.
+5. Per-share trend — diluted and basic per-share path; quality of
+   growth (revenue-led vs buyback-led).
+6. Valuation sanity — does the per-share data and growth rate justify
+   the firm's market worth? A sanity check, not a DCF.
+7. Filing-date point-in-time — reason from the data AS FILED, not as
+   the firm stands today; cite accession numbers when quoting any
+   specific figure (L11 audit-grade citation).
+8. Institutional 13F drift — are institutional accumulators present in
+   the latest 13F filing, and is the direction consistent with the
+   thesis?
+9. Peer and sector comparison — how do these fundamentals stack
+   against what is typical for this sector.
+10. Use of funds — buybacks, dividends, M&A posture evident in the
+    cash flow and shareholder-funds structure.
+
+Signal rules:
+- bullish: revenue growing, margins stable or expanding, free cash
+  flow positive and growing, per-share data rising, institutional
+  accumulators present.
+- bearish: revenue shrinking, margins compressing, free cash flow
+  negative or deteriorating, per-share data falling.
+- neutral: mixed — some signs up, some down, no clean trend.
+
+Confidence scale (0-100): 80-100 multiple independent fundamentals
+signals agree; 60-79 a clear trend on the core metrics; 30-59 mixed
+or short history; under 30 weak or stale data.
+
+Hard rules:
+- Reason ONLY from the fundamentals and institutional data provided.
+  Do not invent numbers; cite the filed figure and its accession
+  number when quoting any specific value.
+- If fewer than 2 quarters are available, say so and ABSTAIN: signal
+  neutral, confidence 0, thesis "abstained: insufficient history
+  (n_quarters < 2)".
+- Never confuse the firm's reported figures with the desk's own
+  standing — these are research facts, not a position.
+
+""" + SIGNAL_CONTRACT
+
+
 PERSONAS: tuple[Persona, ...] = (
     Persona(
         name="technician",
@@ -252,6 +327,16 @@ PERSONAS: tuple[Persona, ...] = (
         system=_RISK,
         tools=["market_ohlc", "market_indicators", "board_sectors",
                "symbol_news", "market_movers"],
+    ),
+    # R2-1 FUNDAMENTALIST — the institutional data plane's first
+    # consumer. Entitlement: fundamentals + earnings + institutional_top
+    # (the 7 other institutional slices feed the PM base_block but no
+    # persona other than the fundamentalist reads XBRL/13F directly).
+    Persona(
+        name="fundamentalist",
+        role="The Fundamentalist",
+        system=_FUNDAMENTALIST,
+        tools=["fundamentals", "earnings", "institutional_top"],
     ),
 )
 

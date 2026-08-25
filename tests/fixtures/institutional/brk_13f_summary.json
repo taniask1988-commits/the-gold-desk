@@ -1,0 +1,41 @@
+{
+ "file": "56757.xml",
+ "n_entries": 89,
+ "sample": [
+  {
+   "issuer": "ALLY FINL INC",
+   "value": "577211815",
+   "shares": "12561737",
+   "type": "SH",
+   "cusip": "02005N100"
+  },
+  {
+   "issuer": "ALLY FINL INC",
+   "value": "128838056",
+   "shares": "2803875",
+   "type": "SH",
+   "cusip": "02005N100"
+  },
+  {
+   "issuer": "ALLY FINL INC",
+   "value": "194285790",
+   "shares": "4228200",
+   "type": "SH",
+   "cusip": "02005N100"
+  },
+  {
+   "issuer": "ALLY FINL INC",
+   "value": "78463301",
+   "shares": "1707580",
+   "type": "SH",
+   "cusip": "02005N100"
+  },
+  {
+   "issuer": "ALLY FINL INC",
+   "value": "203264788",
+   "shares": "4423608",
+   "type": "SH",
+   "cusip": "02005N100"
+  }
+ ]
+}

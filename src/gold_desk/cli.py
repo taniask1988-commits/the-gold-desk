@@ -543,6 +543,210 @@ def cmd_markets_news(args) -> int:
     return 0
 
 
+# ---------------- R2-1 institutional data plane (keyless superset) ----------------
+
+def cmd_markets_fundamentals(args) -> int:
+    """markets-fundamentals SYMBOL — 8 quarters of PIT GAAP fundamentals
+    (SEC XBRL primary, Yahoo timeseries fallback), accession-cited."""
+    from .markets.institutional import fetch_fundamentals
+    out = fetch_fundamentals(args.symbol, data_root=args.data_root)
+    if args.json:
+        print(json.dumps(out, sort_keys=True, default=str))
+        return 0 if out.get("ok") else 1
+    if not out.get("ok"):
+        print("fundamentals unreachable for", args.symbol, ":", out.get("error"))
+        return 1
+    print(f"FUNDAMENTALS — {out['symbol']}  "
+          f"[source: {out.get('source')}, CIK {out.get('cik') or 'n/a'}]")
+    print("=" * 64)
+    print(f"latest quarter: {out.get('latest_quarter')}  "
+          f"(n_quarters: {out.get('n_quarters')})")
+    print()
+    print(f"{'fp':4s} {'fy':6s} {'filed':12s} {'revenue':>16s} "
+          f"{'net_income':>16s} {'eps_dil':>8s}  accession")
+    print("-" * 80)
+    for p in out.get("periods") or []:
+        def _b(v):
+            return f"{v/1e9:,.2f}B" if isinstance(v, (int, float)) \
+                and abs(v) >= 1e9 else (f"{v:,.0f}" if isinstance(v,
+                                                                   (int, float)) else "-")
+        eps = p.get("eps_diluted")
+        eps_s = f"{eps:.2f}" if isinstance(eps, (int, float)) else "-"
+        print(f"{p.get('fp','?'):4s} {str(p.get('fy','')):6s} "
+              f"{p.get('filed','?'):12s} {_b(p.get('revenue')):>16s} "
+              f"{_b(p.get('net_income')):>16s} {eps_s:>8s}  "
+              f"{p.get('accn','?')}")
+    return 0
+
+
+def cmd_markets_13f(args) -> int:
+    """markets-13f [CIK] — latest 13F-HR holdings (default Berkshire
+    0001067983). Shows top-10 positions, total disclosed value, top10 %."""
+    from .markets.institutional import fetch_institutional
+    out = fetch_institutional(cik=args.cik, data_root=args.data_root)
+    if args.json:
+        print(json.dumps(out, sort_keys=True, default=str))
+        return 0 if out.get("ok") else 1
+    if not out.get("ok"):
+        print("13F unreachable:", out.get("error"))
+        return 1
+    print(f"13F INSTITUTIONAL HOLDINGS — {out.get('fund')}")
+    print("=" * 64)
+    print(f"filed: {out.get('filed')}  accession: {out.get('accession')}")
+    print(f"n_positions: {out.get('n_positions')}  "
+          f"total_value: ${out.get('total_value'):,.0f}  "
+          f"top10_pct: {out.get('top10_pct')}%")
+    print()
+    print(f"{'issuer':32s} {'value':>16s} {'shares':>14s} {'type':4s}  cusip")
+    print("-" * 80)
+    positions = sorted(out.get("positions") or [],
+                       key=lambda p: p.get("value", 0), reverse=True)[:10]
+    for p in positions:
+        val = p.get("value", 0)
+        shrs = p.get("shares", 0)
+        val_s = f"${val/1e9:,.2f}B" if val >= 1e9 else f"${val:,.0f}"
+        shrs_s = f"{shrs/1e6:,.2f}M" if shrs >= 1e6 else f"{shrs:,.0f}"
+        print(f"{(p.get('issuer') or '')[:32]:32s} {val_s:>16s} "
+              f"{shrs_s:>14s} {(p.get('type') or 'SH'):4s}  "
+              f"{p.get('cusip','')}")
+    return 0
+
+
+def cmd_markets_curve(args) -> int:
+    """markets-curve — Treasury daily yield curve (1M-30Y)."""
+    from .markets.institutional import fetch_yield_curve
+    out = fetch_yield_curve(data_root=args.data_root)
+    if args.json:
+        print(json.dumps(out, sort_keys=True, default=str))
+        return 0 if out.get("ok") else 1
+    if not out.get("ok"):
+        print("yield curve unreachable:", out.get("error"))
+        return 1
+    print(f"US TREASURY YIELD CURVE — {out.get('latest_date')}")
+    print("=" * 64)
+    curve = out.get("curve") or {}
+    for tenor in ("1M", "3M", "6M", "1Y", "2Y", "5Y", "10Y", "20Y", "30Y"):
+        v = curve.get(tenor)
+        if isinstance(v, (int, float)):
+            print(f"  {tenor:4s} {v:.3f}%")
+    print()
+    print(f"last 5 days:")
+    for d in out.get("history_last_5") or []:
+        ten = d.get("date", "?")
+        y10 = d.get("10Y")
+        y2 = d.get("2Y")
+        print(f"  {ten}  2Y={y2}  10Y={y10}")
+    return 0
+
+
+def cmd_markets_sentiment(args) -> int:
+    """markets-sentiment — alternative.me Fear & Greed index (30d history)."""
+    from .markets.institutional import fetch_crypto_sentiment
+    out = fetch_crypto_sentiment(data_root=args.data_root)
+    if args.json:
+        print(json.dumps(out, sort_keys=True, default=str))
+        return 0 if out.get("ok") else 1
+    if not out.get("ok"):
+        print("F&G unreachable:", out.get("error"))
+        return 1
+    latest = out.get("latest") or {}
+    print(f"CRYPTO FEAR & GREED — {latest.get('value')} "
+          f"({latest.get('classification')})")
+    print("=" * 64)
+    print(f"history ({out.get('n_days')} days):")
+    for h in (out.get("history") or [])[:10]:
+        from datetime import datetime as _dt
+        ts = h.get("ts")
+        if ts:
+            when = _dt.utcfromtimestamp(ts).strftime("%Y-%m-%d")
+        else:
+            when = "?"
+        print(f"  {when} {h.get('value'):>4} {h.get('classification')}")
+    return 0
+
+
+def cmd_markets_onchain(args) -> int:
+    """markets-onchain — blockchain.info BTC 24h stats."""
+    from .markets.institutional import fetch_onchain
+    out = fetch_onchain(data_root=args.data_root)
+    if args.json:
+        print(json.dumps(out, sort_keys=True, default=str))
+        return 0 if out.get("ok") else 1
+    if not out.get("ok"):
+        print("onchain unreachable:", out.get("error"))
+        return 1
+    print(f"BTC ON-CHAIN — {out.get('as_of')}")
+    print("=" * 64)
+    print(f"  market price : ${out.get('market_price_usd'):,.2f}")
+    print(f"  hash rate    : {out.get('hash_rate'):,.0f} H/s")
+    print(f"  n_tx         : {out.get('n_tx'):,}")
+    print(f"  n_btc_mined : {out.get('n_btc_mined'):,.0f}")
+    print(f"  min/blocks  : {out.get('minutes_between_blocks'):.2f}")
+    print(f"  total_fees   : {out.get('total_fees_btc'):,.0f} BTC")
+    return 0
+
+
+def cmd_markets_social(args) -> int:
+    """markets-social [SUB] — Reddit RSS feed (asset-class routed)."""
+    from .markets.institutional import fetch_social
+    out = fetch_social(symbol=args.symbol, data_root=args.data_root)
+    if args.json:
+        print(json.dumps(out, sort_keys=True, default=str))
+        return 0 if out.get("ok") else 1
+    if not out.get("ok"):
+        print("social unreachable:", out.get("error"))
+        return 1
+    print(f"SOCIAL — r/{out.get('sub')}  (n={out.get('n')})")
+    print("=" * 64)
+    for it in (out.get("items") or [])[:10]:
+        pub = it.get("published", "")
+        if pub:
+            pub = pub.split("T")[0]
+        print(f"  [{pub}] {str(it.get('title',''))[:70]}")
+    return 0
+
+
+def cmd_markets_institutional(args) -> int:
+    """markets-institutional SYMBOL — the 7-slice aggregator (fail-soft
+    per slice). The fundamentals/curve/sentiment slices are required;
+    institutional_top is fund-positioning (Berkshire default)."""
+    from .markets.institutional import gather_institutional_context
+    out = gather_institutional_context(args.symbol, data_root=args.data_root)
+    if args.json:
+        print(json.dumps(out, sort_keys=True, default=str))
+        return 0 if out.get("ok") else 1
+    print(f"INSTITUTIONAL CONTEXT — {args.symbol}")
+    print("=" * 64)
+    slices = out.get("slices") or {}
+    for key in ("fundamentals", "institutional_top", "macro_curve",
+                "crypto_sentiment", "onchain", "global_crypto", "social"):
+        s = slices.get(key) or {}
+        ok = s.get("ok")
+        mark = "OK " if ok else "ERR"
+        line = f"  {mark} {key:18s}"
+        if ok:
+            if key == "fundamentals":
+                line += f"  n={s.get('n_quarters')} source={s.get('source')}"
+            elif key == "institutional_top":
+                line += f"  n={s.get('n_positions')} total=${s.get('total_value'):,.0f}"
+            elif key == "macro_curve":
+                c = s.get("curve") or {}
+                line += f"  10Y={c.get('10Y')}  latest={s.get('latest_date')}"
+            elif key == "crypto_sentiment":
+                l = s.get("latest") or {}
+                line += f"  {l.get('value')} {l.get('classification')}"
+            elif key == "onchain":
+                line += f"  BTC=${s.get('market_price_usd'):,.2f}"
+            elif key == "global_crypto":
+                line += f"  BTC dom={s.get('btc_dominance')}%"
+            elif key == "social":
+                line += f"  r/{s.get('sub')} n={s.get('n')}"
+        else:
+            line += f"  err: {s.get('error', 'unknown')}"
+        print(line)
+    return 0
+
+
 def _agent_registry():
     """Full research registry: desk tools + crypto tools + web tools +
     the multi-analyst desk bridge (piece 6)."""
@@ -834,7 +1038,8 @@ def main(argv=None) -> int:
     p_watch.set_defaults(func=cmd_watch)
 
     p_desk = sub.add_parser(
-        "desk", help="multi-analyst desk: 5 personas + PM consensus")
+        "desk", help="multi-analyst desk: 6 personas + PM consensus "
+                     "(technician/macro/news/sentiment/risk/fundamentalist)")
     p_desk.add_argument("symbol",
                         help="any Yahoo symbol or alias (btc, AAPL, GC=F, "
                              "^NSEI, TOP, eur/usd ...)")
@@ -861,6 +1066,66 @@ def main(argv=None) -> int:
     p_nsec.add_argument("--json", action="store_true")
     p_nsec.add_argument("--data-root", default=str(REPO_ROOT / "data"))
     p_nsec.set_defaults(func=cmd_markets_news)
+
+    # --- R2-1 institutional data plane subcommands ---
+    p_fund = sub.add_parser("markets-fundamentals",
+                             help="8Q PIT GAAP fundamentals for a symbol "
+                                  "(SEC XBRL primary, Yahoo fallback, "
+                                  "accession-cited)")
+    p_fund.add_argument("symbol",
+                        help="any US equity ticker (AAPL, MSFT, GOOGL ...)")
+    p_fund.add_argument("--json", action="store_true")
+    p_fund.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_fund.set_defaults(func=cmd_markets_fundamentals)
+
+    p_13f = sub.add_parser("markets-13f",
+                            help="latest 13F-HR institutional holdings "
+                                 "(default: Berkshire Hathaway)")
+    p_13f.add_argument("cik", nargs="?", default=None,
+                        help="10-digit CIK (default: 0001067983 = Berkshire)")
+    p_13f.add_argument("--json", action="store_true")
+    p_13f.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_13f.set_defaults(func=cmd_markets_13f)
+
+    p_curve = sub.add_parser("markets-curve",
+                              help="US Treasury daily yield curve (1M-30Y)")
+    p_curve.add_argument("--json", action="store_true")
+    p_curve.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_curve.set_defaults(func=cmd_markets_curve)
+
+    p_sent = sub.add_parser("markets-sentiment",
+                             help="crypto Fear & Greed index (alternative.me, "
+                                  "30-day history)")
+    p_sent.add_argument("--json", action="store_true")
+    p_sent.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_sent.set_defaults(func=cmd_markets_sentiment)
+
+    p_onch = sub.add_parser("markets-onchain",
+                             help="BTC 24h on-chain stats (blockchain.info)")
+    p_onch.add_argument("--json", action="store_true")
+    p_onch.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_onch.set_defaults(func=cmd_markets_onchain)
+
+    p_soc = sub.add_parser("markets-social",
+                            help="Reddit RSS social feed (asset-class routed: "
+                                 "crypto→r/CryptoCurrency, equity→r/stocks, "
+                                 "else→r/wallstreetbets)")
+    p_soc.add_argument("symbol", nargs="?", default=None,
+                        help="optional symbol to route sub by asset class")
+    p_soc.add_argument("--json", action="store_true")
+    p_soc.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_soc.set_defaults(func=cmd_markets_social)
+
+    p_inst = sub.add_parser("markets-institutional",
+                             help="7-slice institutional context aggregator "
+                                  "(fundamentals + 13F + curve + F&G + "
+                                  "onchain + global + social, fail-soft per slice)")
+    p_inst.add_argument("symbol",
+                        help="any symbol (XBRL for US equities; Yahoo fallback "
+                             "elsewhere)")
+    p_inst.add_argument("--json", action="store_true")
+    p_inst.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_inst.set_defaults(func=cmd_markets_institutional)
 
     args = parser.parse_args(argv)
     return args.func(args)

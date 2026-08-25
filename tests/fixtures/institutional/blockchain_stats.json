@@ -1,0 +1,22 @@
+{
+ "timestamp": 1787671044000.0,
+ "market_price_usd": 79125.41,
+ "hash_rate": 919323843382.0626,
+ "total_fees_btc": -45937500000,
+ "n_btc_mined": 45937500000,
+ "n_tx": 630371,
+ "n_blocks_mined": 147,
+ "minutes_between_blocks": 9.1644,
+ "totalbc": 2007505625000000,
+ "n_blocks_total": 964018,
+ "estimated_transaction_volume_usd": 11759103266.241901,
+ "blocks_size": 232226006,
+ "miners_revenue_usd": 0.0,
+ "nextretarget": 965663,
+ "difficulty": 125807076547197,
+ "estimated_btc_sent": 14861348922226,
+ "miners_revenue_btc": 0,
+ "total_btc_sent": 119854277608961,
+ "trade_volume_btc": 7557.26,
+ "trade_volume_usd": 597971295.9766
+}

@@ -45,6 +45,9 @@ from ...markets.board import (
     fetch_detail,
     fetch_market_movers,
 )
+from ...markets.institutional import (
+    gather_institutional_context,
+)
 from ...ulid import new_ulid
 from ..budgets import Budget, BudgetExceeded
 from ..loop import resolve_models
@@ -61,13 +64,13 @@ class DeskContextError(RuntimeError):
 
 # --------------------------------------------------------------------- PM
 
-PM_SYSTEM = """You are The Portfolio Manager of a five-analyst market desk
-(a technician, a macro strategist, a news analyst, a sentiment reader
-and a risk manager). Each analyst has just returned a signal on one
-symbol, and you have the market context they judged.
+PM_SYSTEM = """You are The Portfolio Manager of a six-analyst market desk
+(a technician, a macro strategist, a news analyst, a sentiment reader,
+a risk manager, and a fundamentalist). Each analyst has just returned a
+signal on one symbol, and you have the market context they judged.
 
 Your job:
-1. Weigh the five signals — a high-confidence specialist outweighs a
+1. Weigh the six signals — a high-confidence specialist outweighs a
    low-confidence one; an abstained analyst carries no weight.
 2. Name the consensus: bullish, bearish, neutral, or mixed when the
    desk genuinely splits.
@@ -172,8 +175,20 @@ def run_desk(
     _emit("context", {"symbol": detail.get("symbol"), "bars":
                       len(detail.get("bars") or [])})
 
-    context = _build_context(detail, board, movers)
-    base_block = _base_block(detail, board)
+    # ---- 1b. institutional context gather — R2-1 data plane, fail-soft
+    # per slice. A dead XBRL or 429'd CoinGecko degrades to ok:False on
+    # its slice and never raises — the desk still runs with whatever
+    # lived (mirrors the per-symbol fail-soft in markets/board.py).
+    # The fundamentalist persona abstains if its slice is empty.
+    try:
+        inst = gather_institutional_context(str(detail.get("symbol")
+                                              or symbol), data_root)
+    except Exception:  # noqa: BLE001 — institutional slice fail-soft
+        inst = {"ok": False, "slices": {}}
+    inst_slices = (inst or {}).get("slices") or {}
+
+    context = _build_context(detail, board, movers, inst_slices)
+    base_block = _base_block(detail, board, inst_slices)
 
     # ---- 2. the five personas, in PARALLEL (one completion_json each) --
     personas_out: list[dict] = []
@@ -533,20 +548,64 @@ def _mechanical_pm(personas_out: list[dict], error: Exception) -> dict:
 
 # ------------------------------------------------------- context slicing
 
-def _build_context(detail: dict, board: dict, movers: dict) -> dict:
+def _build_context(detail: dict, board: dict, movers: dict,
+                   inst_slices: dict | None = None) -> dict:
     """The desk's whole context, keyed by DESK_TOOLS names so each
-    persona slice is just its tools' blocks (+ a small shared header)."""
-    return {
+    persona slice is just its tools' blocks (+ a small shared header).
+
+    R2-1: the institutional slices (fundamentals, earnings,
+    institutional_top, macro_curve, crypto_sentiment, onchain, social)
+    are merged in fail-soft — a slice returning {ok: False} is still
+    passed to the persona, which knows to abstain when its data is
+    empty. The fundamentalist's three entitlements come straight from
+    these slices."""
+    ctx = {
         "market_ohlc": _slice_ohlc(detail),
         "market_indicators": _slice_indicators(detail),
         "board_sectors": _slice_board(board),
         "symbol_news": _slice_news(detail),
         "market_movers": _slice_movers(movers, board),
     }
+    inst_slices = inst_slices or {}
+    # the 7 institutional slices — ok:False stays in the slice so the
+    # fundamentalist can see "the XBRL feed is down" and abstain honestly
+    ctx["fundamentals"] = _slice_fundamentals(
+        inst_slices.get("fundamentals"))
+    ctx["earnings"] = _slice_earnings(
+        inst_slices.get("fundamentals"))
+    ctx["institutional_top"] = _slice_institutional(
+        inst_slices.get("institutional_top"))
+    ctx["macro_curve"] = _slice_curve(inst_slices.get("macro_curve"))
+    ctx["crypto_sentiment"] = inst_slices.get("crypto_sentiment") or \
+        {"ok": False}
+    ctx["onchain"] = inst_slices.get("onchain") or {"ok": False}
+    ctx["social"] = _slice_social(inst_slices.get("social"))
+    return ctx
 
 
-def _base_block(detail: dict, board: dict) -> dict:
-    """The compact context the PM sees (no bars, no full board)."""
+def _base_block(detail: dict, board: dict,
+                inst_slices: dict | None = None) -> dict:
+    """The compact context the PM sees (no bars, no full board).
+
+    R2-1: the PM also sees a fundamentals headline — latest revenue +
+    latest EPS + 8Q growth direction + top-3 13F positions + latest 10Y
+    yield + F&G value + on-chain price — so the synthesis weighs the
+    fundamentalist voice against the chart/macro/news voices without
+    reading the full XBRL bundle. Each headline field is null when its
+    slice was fail-soft."""
+    inst = inst_slices or {}
+    fund = (inst.get("fundamentals") or {})
+    inst13 = (inst.get("institutional_top") or {})
+    curve = (inst.get("macro_curve") or {})
+    fng = (inst.get("crypto_sentiment") or {})
+    onchain = (inst.get("onchain") or {})
+    fund_head = _fundamentals_headline(fund) if fund.get("ok") else None
+    inst_head = _institutional_headline(inst13) \
+        if inst13.get("ok") else None
+    curve_head = _curve_headline(curve) if curve.get("ok") else None
+    fng_head = ((fng.get("latest") or {}) if fng.get("ok") else None)
+    onchain_head = ({"price": onchain.get("market_price_usd")}
+                    if onchain.get("ok") else None)
     return {
         "symbol": detail.get("symbol"),
         "name": detail.get("name"),
@@ -558,10 +617,122 @@ def _base_block(detail: dict, board: dict) -> dict:
         "board_headline": [
             {"sector": s.get("key"),
              "avg_change_pct": _avg(
-                 [r.get("change_pct") for r in s.get("rows") or []])}
+                [r.get("change_pct") for r in s.get("rows") or []])}
             for s in (board.get("sectors") or [])
         ],
+        "fundamentals_headline": fund_head,
+        "institutional_headline": inst_head,
+        "macro_curve_headline": curve_head,
+        "crypto_sentiment_headline": fng_head,
+        "onchain_headline": onchain_head,
     }
+
+
+def _fundamentals_headline(fund: dict) -> dict:
+    """Compact PM-facing fundamentals: latest revenue, latest EPS,
+    8Q revenue growth direction, accession-cited."""
+    periods = fund.get("periods") or []
+    if not periods:
+        return {"ok": False, "error": "no periods"}
+    latest = periods[0]
+    rev = latest.get("revenue")
+    eps = latest.get("eps_diluted") or latest.get("eps_basic")
+    # 8Q growth direction: compare latest vs oldest revenue
+    oldest = periods[-1]
+    growth = None
+    if isinstance(rev, (int, float)) and \
+            isinstance(oldest.get("revenue"), (int, float)) \
+            and oldest["revenue"]:
+        growth = round((rev - oldest["revenue"]) /
+                      oldest["revenue"] * 100, 2)
+    return {
+        "ok": True, "n_quarters": len(periods),
+        "latest_quarter": fund.get("latest_quarter"),
+        "latest_revenue": rev,
+        "latest_eps": eps,
+        "latest_accession": latest.get("accn"),
+        "latest_filed": latest.get("filed"),
+        "revenue_growth_8q_pct": growth,
+        "source": fund.get("source"),
+    }
+
+
+def _institutional_headline(inst: dict) -> dict:
+    """Top-3 13F positions + total disclosed value + top10 %."""
+    positions = inst.get("positions") or []
+    top3 = sorted(positions, key=lambda p: p.get("value", 0),
+                  reverse=True)[:3]
+    return {
+        "fund": inst.get("fund"),
+        "filed": inst.get("filed"),
+        "accession": inst.get("accession"),
+        "total_value": inst.get("total_value"),
+        "n_positions": inst.get("n_positions"),
+        "top10_pct": inst.get("top10_pct"),
+        "top3": [{"issuer": p.get("issuer"), "value": p.get("value"),
+                  "type": p.get("type")} for p in top3],
+    }
+
+
+def _curve_headline(curve: dict) -> dict:
+    """Latest 10Y yield + 2Y/10Y shape."""
+    c = curve.get("curve") or {}
+    return {
+        "latest_date": curve.get("latest_date"),
+        "yields": {k: c.get(k) for k in ("1M", "3M", "6M", "1Y", "2Y",
+                                        "5Y", "10Y", "20Y", "30Y")
+                   if k in c},
+    }
+
+
+def _slice_fundamentals(fund: dict | None) -> dict:
+    """Pass through the fundamentals slice for the fundamentalist;
+    None becomes {ok: False} so the persona can abstain cleanly."""
+    if not fund or not isinstance(fund, dict):
+        return {"ok": False, "error": "no fundamentals slice"}
+    return fund
+
+
+def _slice_earnings(fund: dict | None) -> dict:
+    """EPS-only slice of the fundamentals — the fundamentalist's
+    earnings entitlement. Pulls diluted + basic per-share across the
+    8 quarters, accession-cited."""
+    if not fund or not isinstance(fund, dict) or not fund.get("ok"):
+        return {"ok": False, "error": "no fundamentals for earnings slice"}
+    periods = fund.get("periods") or []
+    eps_rows = [{"fy": p.get("fy"), "fp": p.get("fp"),
+                 "filed": p.get("filed"), "accn": p.get("accn"),
+                 "eps_diluted": p.get("eps_diluted"),
+                 "eps_basic": p.get("eps_basic")}
+                for p in periods]
+    return {"ok": True, "symbol": fund.get("symbol"),
+            "source": fund.get("source"), "periods": eps_rows,
+            "latest_quarter": fund.get("latest_quarter"),
+            "n_quarters": len(eps_rows)}
+
+
+def _slice_institutional(inst: dict | None) -> dict:
+    """The fundamentalist's 13F entitlement — the latest 13F-HR
+    holdings for the default filer (Berkshire). The slice is fund-
+    positioning, not per-symbol; the fundamentalist cites top
+    holdings and concentration."""
+    if not inst or not isinstance(inst, dict):
+        return {"ok": False, "error": "no institutional slice"}
+    return inst
+
+
+def _slice_curve(curve: dict | None) -> dict:
+    """The macro_curve slice — Treasury yield curve."""
+    if not curve or not isinstance(curve, dict):
+        return {"ok": False, "error": "no curve slice"}
+    return curve
+
+
+def _slice_social(soc: dict | None) -> dict:
+    """The social slice — Reddit RSS by sub."""
+    if not soc or not isinstance(soc, dict):
+        return {"ok": False, "error": "no social slice"}
+    return soc
 
 
 def _slice_ohlc(detail: dict) -> dict:
@@ -707,7 +878,7 @@ def _persona_user_msg(persona: Persona, context: dict, detail: dict) -> str:
         f"Briefing for {detail.get('symbol')} "
         f"({detail.get('name')}), sector {detail.get('sector')}, "
         f"as of {_now_iso()}.\n\n"
-        f"You are one of five analysts on this desk. Judge only from "
+        f"You are one of six analysts on this desk. Judge only from "
         f"your checklist and the data below.\n\n"
         f"DATA (JSON):\n{json.dumps(blocks, ensure_ascii=False, default=str)}"
     )

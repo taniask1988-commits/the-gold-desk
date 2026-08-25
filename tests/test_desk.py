@@ -44,6 +44,7 @@ _MARKERS = {
     "You are The News Analyst": "news",
     "You are The Sentiment Reader": "sentiment",
     "You are The Risk Manager": "risk",
+    "You are The Fundamentalist": "fundamentalist",
     "You are The Portfolio Manager": "pm",
 }
 
@@ -71,6 +72,13 @@ PERSONA_REPLIES = {
              "thesis": "Stops are survivable but the tape is 3h stale.",
              "key_evidence": ["swing high 106.3 is 0.7 ATR away",
                               "last bar 180 minutes old"]},
+    "fundamentalist": {"signal": "bullish", "confidence": 64,
+                       "thesis": "Revenue and EPS rose across the 8 "
+                                 "filed quarters; accession-cited growth.",
+                       "key_evidence": ["latest revenue 109.4B (acc "
+                                        "0000320193-26-000020)",
+                                        "EPS diluted path rising 1.40 to 2.02",
+                                        "13F top position AMEX 50.4B"]},
 }
 
 PM_REPLY = {"consensus": "bullish", "conviction": 64,
@@ -146,6 +154,11 @@ def _patch_context(monkeypatch):
     monkeypatch.setattr(eng, "fetch_detail", lambda s, d: _detail())
     monkeypatch.setattr(eng, "fetch_board", lambda d: _board())
     monkeypatch.setattr(eng, "fetch_market_movers", lambda d: _movers())
+    # R2-1: institutional context gather is fail-soft per slice; the
+    # test patches it to empty slices so the fundamentalist persona
+    # sees no XBRL and abstains (mirrors the dead-feed contract).
+    monkeypatch.setattr(eng, "gather_institutional_context",
+                        lambda s, d: {"ok": False, "slices": {}})
 
 
 def _fake_complete_json(calls=None, barrier=None, fail=()):
@@ -169,14 +182,17 @@ def _fake_complete_json(calls=None, barrier=None, fail=()):
 # -------------------------------------------------------- persona shape
 
 def test_personas_are_checklists_with_signal_contract():
-    """Each persona: role, numbered checklist, signal rules, contract."""
-    assert len(PERSONAS) == 5
+    """Each persona: role, numbered checklist, signal rules, contract.
+    R2-1: 5→6 personas (fundamentalist added with the institutional
+    data plane)."""
+    assert len(PERSONAS) == 6
     names = [p.name for p in PERSONAS]
-    assert names == ["technician", "macro", "news", "sentiment", "risk"]
+    assert names == ["technician", "macro", "news", "sentiment",
+                     "risk", "fundamentalist"]
     roles = [p.role for p in PERSONAS]
     assert roles == ["The Technician", "The Macro Strategist",
                      "The News Analyst", "The Sentiment Reader",
-                     "The Risk Manager"]
+                     "The Risk Manager", "The Fundamentalist"]
     for p in PERSONAS:
         assert "Work through your checklist:" in p.system
         # numbered checklist items (1..4/5)
@@ -188,7 +204,11 @@ def test_personas_are_checklists_with_signal_contract():
 
 
 def test_persona_tools_are_desk_tool_subsets():
-    """Every persona has tools, ⊆ DESK_TOOLS, with the briefed mapping."""
+    """Every persona has tools, ⊆ DESK_TOOLS, with the briefed mapping.
+    R2-1: the risk persona still sees the 5 market-data tools (its tools
+    list was not extended — the new institutional slices feed the PM
+    base_block instead; the fundamentalist is the only persona reading
+    XBRL/13F directly)."""
     for p in PERSONAS:
         assert p.tools, f"{p.name} has no tools"
         assert set(p.tools) <= set(DESK_TOOLS), (
@@ -201,7 +221,14 @@ def test_persona_tools_are_desk_tool_subsets():
     assert by_name["news"].tools == ["symbol_news"]
     assert by_name["sentiment"].tools == ["market_movers",
                                           "board_sectors"]
-    assert set(by_name["risk"].tools) == set(DESK_TOOLS)   # devil's advocate
+    assert set(by_name["risk"].tools) == {"market_ohlc",
+                                          "market_indicators",
+                                          "board_sectors",
+                                          "symbol_news",
+                                          "market_movers"}   # devil's advocate
+    assert by_name["fundamentalist"].tools == ["fundamentals",
+                                                "earnings",
+                                                "institutional_top"]
 
 
 def test_persona_prompts_no_account_or_balance_keys():
@@ -225,8 +252,11 @@ def test_persona_prompts_reason_only_from_provided_data():
 
 # ------------------------------------------------------------- run_desk
 
-def test_run_desk_scripted_five_personas_and_pm(monkeypatch, tmp_path):
-    """5 scripted persona replies → parsed signals; PM synthesized."""
+def test_run_desk_scripted_six_personas_and_pm(monkeypatch, tmp_path):
+    """6 scripted persona replies → parsed signals; PM synthesized.
+    Renamed from test_run_desk_scripted_five_personas_and_pm when R2-1
+    added the fundamentalist (the 5-party barrier test below proves
+    parallelism for any N)."""
     _patch_context(monkeypatch)
     calls: list = []
     monkeypatch.setattr(eng, "complete_json",
@@ -238,7 +268,7 @@ def test_run_desk_scripted_five_personas_and_pm(monkeypatch, tmp_path):
     assert out["price"] == 106.0
     assert isinstance(out["as_of"], str) and out["as_of"].endswith("Z")
     assert isinstance(out["elapsed_ms"], int)
-    assert len(out["personas"]) == 5
+    assert len(out["personas"]) == 6
     for row in out["personas"]:
         reply = PERSONA_REPLIES[row["name"]]
         assert row["signal"] == reply["signal"]
@@ -249,10 +279,11 @@ def test_run_desk_scripted_five_personas_and_pm(monkeypatch, tmp_path):
         assert row["model"]            # model recorded
         assert row["latency_ms"] >= 0
         assert row["role"]             # display role present
-    # 6 LLM calls: 5 personas + 1 PM
+    # 7 LLM calls: 6 personas + 1 PM
     keys = [k for k, _ in calls]
     assert sorted(k for k in keys if k != "pm") == \
-        ["macro", "news", "risk", "sentiment", "technician"]
+        ["fundamentalist", "macro", "news", "risk", "sentiment",
+         "technician"]
     assert keys.count("pm") == 1
     # PM synthesis from the scripted PM reply
     assert out["pm"]["consensus"] == "bullish"
@@ -265,7 +296,8 @@ def test_run_desk_scripted_five_personas_and_pm(monkeypatch, tmp_path):
 def test_run_desk_one_persona_abstains_others_still_run(monkeypatch,
                                                          tmp_path):
     """LLMUnavailable for one persona → abstention (neutral, 0, flagged);
-    the other four run and the desk report is still ok."""
+    the other five run and the desk report is still ok. R2-1: 5→6
+    personas."""
     _patch_context(monkeypatch)
     monkeypatch.setattr(eng, "complete_json",
                         _fake_complete_json(fail=("technician",)))
@@ -279,12 +311,13 @@ def test_run_desk_one_persona_abstains_others_still_run(monkeypatch,
     assert tech["thesis"].startswith("abstained:")
     assert "zen down for technician" in tech["thesis"]
     assert tech["key_evidence"] == []
-    for other in ("macro", "news", "sentiment", "risk"):
+    for other in ("macro", "news", "sentiment", "risk",
+                  "fundamentalist"):
         assert by_name[other]["abstained"] is False
         assert by_name[other]["signal"] == \
             PERSONA_REPLIES[other]["signal"]
     assert out["abstained"] == 1
-    # the PM still synthesized (non-mechanical) over 4 live + 1 abstain
+    # the PM still synthesized (non-mechanical) over 5 live + 1 abstain
     assert out["pm"]["mechanical"] is False
     assert out["pm"]["consensus"] == "bullish"
 
@@ -311,7 +344,10 @@ def test_run_desk_garbage_persona_json_abstains(monkeypatch, tmp_path):
 
 def test_run_desk_pm_failure_falls_back_to_mechanical_vote(monkeypatch,
                                                            tmp_path):
-    """PM model down → mechanical majority vote, labeled, never silent."""
+    """PM model down → mechanical majority vote, labeled, never silent.
+    R2-1: 6 personas now — conviction is the mean across the 5 live
+    (technician 72 + macro 55 + news 61 + sentiment 48 + risk 50 +
+    fundamentalist 64 = 350 / 6 ≈ 58)."""
     _patch_context(monkeypatch)
     monkeypatch.setattr(eng, "complete_json",
                         _fake_complete_json(fail=("pm",)))
@@ -320,16 +356,18 @@ def test_run_desk_pm_failure_falls_back_to_mechanical_vote(monkeypatch,
     assert pm["mechanical"] is True
     assert pm["model"] == ""
     # live signals: bullish(72) bullish(61) neutral(55) neutral(50)
-    #                bearish(48) → no strict majority → mixed
+    #                bearish(48) bullish(64) → no strict majority → mixed
     assert pm["consensus"] == "mixed"
-    assert pm["conviction"] == round((72 + 55 + 61 + 48 + 50) / 5)
+    assert pm["conviction"] == round((72 + 55 + 61 + 48 + 50 + 64) / 6)
     assert "mechanical" in pm["summary"].lower()
     assert any("pm synthesis unavailable" in f for f in pm["risk_flags"])
     assert out["ok"] is True
 
 
 def test_context_error_propagates_fail_loud(monkeypatch, tmp_path):
-    """A raising context gather PROPAGATES — never five silent neutrals."""
+    """A raising context gather PROPAGATES — never five silent neutrals.
+    R2-1: institutional slices are fail-soft (NOT in the loud set); only
+    the original 3 markets-plane calls (detail/board/movers) propagate."""
     def boom(symbol, data_root):
         raise RuntimeError("yahoo is on fire")
     monkeypatch.setattr(eng, "fetch_detail", boom)
@@ -341,7 +379,9 @@ def test_context_error_propagates_fail_loud(monkeypatch, tmp_path):
 
 def test_context_ok_false_raises_desk_context_error(monkeypatch, tmp_path):
     """The markets plane is fail-soft ({ok: False}); the desk is not —
-    a dead detail/board/movers becomes DeskContextError."""
+    a dead detail/board/movers becomes DeskContextError. R2-1: the
+    institutional gather is fail-soft per slice and does NOT trigger
+    DeskContextError (only the original 3 markets-plane calls do)."""
     monkeypatch.setattr(eng, "fetch_detail",
                         lambda s, d: {"ok": False, "error": "unknown "
                                                           "symbol: 'ZZZ'"})
@@ -366,11 +406,13 @@ def test_context_ok_false_raises_desk_context_error(monkeypatch, tmp_path):
 
 
 def test_personas_run_in_parallel(monkeypatch, tmp_path):
-    """A 5-party threading barrier inside complete_json only releases
-    when all five persona calls overlap in time — a sequential desk
-    would deadlock into abstentions."""
+    """An N-party threading barrier inside complete_json only releases
+    when all N persona calls overlap in time — a sequential desk would
+    deadlock into abstentions. R2-1: parameterized from Barrier(5) to
+    Barrier(len(PERSONAS)) so the test proves parallelism for any N
+    (currently 6). The barrier PROVES parallelism regardless of count."""
     _patch_context(monkeypatch)
-    barrier = threading.Barrier(5)
+    barrier = threading.Barrier(len(PERSONAS))
     monkeypatch.setattr(eng, "complete_json",
                         _fake_complete_json(barrier=barrier))
     out = run_desk("BTC-USD", data_root=tmp_path)
@@ -381,8 +423,9 @@ def test_personas_run_in_parallel(monkeypatch, tmp_path):
 
 
 def test_desk_report_events_journaled(monkeypatch, tmp_path):
-    """AgentRunStarted → 5 persona AgentSteps + PM AgentStep →
-    DeskReport → AgentRunFinished; agent kinds carry no reason codes."""
+    """AgentRunStarted → 6 persona AgentSteps + PM AgentStep →
+    DeskReport → AgentRunFinished; agent kinds carry no reason codes.
+    R2-1: 5→6 persona steps + PM = 7 steps total."""
     _patch_context(monkeypatch)
     monkeypatch.setattr(eng, "complete_json", _fake_complete_json())
     jr = Journal(tmp_path, "desk-test-hash")
@@ -392,22 +435,32 @@ def test_desk_report_events_journaled(monkeypatch, tmp_path):
     assert kinds.count("AgentRunStarted") == 1
     assert kinds.count("DeskReport") == 1
     assert kinds.count("AgentRunFinished") == 1
-    # 5 persona steps + 1 pm step
+    # 6 persona steps + 1 pm step
     steps = [e for e in events if e["kind"] == "AgentStep"]
-    assert len(steps) == 6
+    assert len(steps) == 7
     persona_steps = [e for e in steps if e["payload"].get("persona")]
     assert sorted(e["payload"]["persona"] for e in persona_steps) == \
-        ["macro", "news", "risk", "sentiment", "technician"]
+        ["fundamentalist", "macro", "news", "risk", "sentiment",
+         "technician"]
     assert any(e["payload"].get("step") == "pm" for e in steps)
     # DeskReport payload shape
     rep = next(e for e in events if e["kind"] == "DeskReport")
     assert rep["payload"]["symbol"] == "BTC-USD"
-    assert len(rep["payload"]["personas"]) == 5
+    assert len(rep["payload"]["personas"]) == 6
     assert rep["payload"]["pm"]["consensus"] == "bullish"
     # the run-start event carries the union of persona tools + pm
+    # R2-1: the union is now 8 keys (technician 2 + macro 1 + news 1 +
+    # sentiment 2 + risk 5 + fundamentalist 3 = 8 unique), NOT all 12
+    # DESK_TOOLS — the 4 PM-only institutional slices (macro_curve,
+    # crypto_sentiment, onchain, social) feed the PM base_block, not
+    # any persona's tools list. The test pins the actual union +
+    # pm_synthesis.
     started = next(e for e in events if e["kind"] == "AgentRunStarted")
-    assert set(started["payload"]["tools"]) == set(DESK_TOOLS) | \
-        {"pm_synthesis"}
+    expected_tools = set()
+    for p in PERSONAS:
+        expected_tools |= set(p.tools)
+    expected_tools.add("pm_synthesis")
+    assert set(started["payload"]["tools"]) == expected_tools
     # agent kinds never carry reason codes (L13-adjacent invariant)
     for e in events:
         if e["kind"] in ("AgentRunStarted", "AgentStep", "AgentRunFinished",
@@ -423,7 +476,7 @@ def test_on_event_progress_stream(monkeypatch, tmp_path):
     out = run_desk("BTC-USD", data_root=tmp_path,
                    on_event=lambda ev: seen.append(ev["kind"]))
     assert "context" in seen
-    assert seen.count("persona") == 5
+    assert seen.count("persona") == 6
     assert "pm" in seen
     assert out["ok"] is True
 
@@ -455,7 +508,7 @@ def test_cli_desk_json_shape(monkeypatch, tmp_path, capsys):
     assert isinstance(payload["as_of"], str)
     assert payload["price"] == 106.0
     assert isinstance(payload["elapsed_ms"], int)
-    assert len(payload["personas"]) == 5
+    assert len(payload["personas"]) == 6
     for row in payload["personas"]:
         for key in ("name", "role", "signal", "confidence", "thesis",
                     "key_evidence", "abstained", "model", "latency_ms"):
@@ -497,7 +550,7 @@ def test_cli_desk_human_output(monkeypatch, tmp_path, capsys):
     assert "BTC-USD" in out and "Bitcoin USD" in out
     for role in ("THE TECHNICIAN", "THE MACRO STRATEGIST",
                  "THE NEWS ANALYST", "THE SENTIMENT READER",
-                 "THE RISK MANAGER"):
+                 "THE RISK MANAGER", "THE FUNDAMENTALIST"):
         assert role in out
     # persona line format: ROLE signal NN% thesis
     assert "bullish   72%" in out or "bullish  72%" in out
