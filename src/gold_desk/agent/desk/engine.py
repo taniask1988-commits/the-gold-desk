@@ -39,12 +39,21 @@ from typing import Callable
 
 from ...events import Journal
 from ..journal_util import default_journal
+from ..memory import (
+    ReflectiveMemory,
+    default_memory_dir as _default_memory_dir,
+)
 from ...features.quant import compute_indicators as _compute_indicators
 from ...features.verified_snapshot import (
     build_verified_snapshot as _build_verified_snapshot,
     flag_claim_conflicts as _flag_claim_conflicts,
 )
 from ...llm.zen_client import LLMInvalidJSON, LLMUnavailable, complete_json
+from ...llm.prompt_cache import (
+    PromptCache,
+    default_cache_dir as _default_cache_dir,
+    prompt_key as _prompt_key,
+)
 from ...markets.board import (
     fetch_board,
     fetch_daily_bars,
@@ -211,6 +220,8 @@ def run_desk(
     on_event: Callable[[dict], None] | None = None,
     personas: tuple[Persona, ...] | list[Persona] | None = None,
     debate: bool = True,
+    cache: "PromptCache | None" = None,
+    memory: "ReflectiveMemory | None" = None,
 ) -> dict:
     """Run the multi-analyst desk + PM synthesis for one symbol.
 
@@ -239,6 +250,28 @@ def run_desk(
 
     When debate=False, runs the legacy Phase 1 + PM flow (used by the
     pre-R2-3 test_desk.py tests for backward-compat coverage).
+
+    R2-4 — reflective memory + PromptCache (judged vs TradingAgents'
+    TradingMemoryLog + Reflector and ai-hedge-fund's PromptCache):
+      - ``cache`` (optional PromptCache): when provided, every
+        ``_run_persona`` call (analysts + researchers + manager +
+        trader + debators) AND the rewired PM call check the cache
+        BEFORE invoking the LLM. A hit with ``parse_ok=True`` short-
+        circuits the LLM call entirely ($0 cost on a re-run over an
+        unchanged prompt). A miss falls through to the LLM and the
+        parsed result is persisted on success; a failed parse is
+        persisted via ``put_failure`` (the AHF debug-trail concept,
+        but with explicit failure records the audit trail can iterate).
+      - ``memory`` (optional ReflectiveMemory): when provided, the
+        PM's user_msg gets a "RECENT LESSONS" block prepended (the
+        last k=3 reflected lessons for this symbol/regime, formatted
+        as ``- [date | action | alpha +X.XX%]: lesson``). When
+        memory is None or no lessons exist, the block is omitted
+        (cold start). After the PM returns, the PM's decision is
+        stored as a pending entry on the memory log — Phase B
+        (deferred reflection when the 5d return is known) is a
+        separate CLI subcommand (``gold-desk reflect`` — wired in a
+        follow-up round; the storage path is in place now).
 
     Raises DeskContextError (or whatever the markets plane raised) when
     the context gather fails — fail loud, never five silent neutrals.
@@ -395,7 +428,7 @@ def run_desk(
                     p.name, PERSONA_DEFAULT_MAX_TOKENS)
                 futures[ex.submit(_run_persona, p, user, chain, budget,
                                   timeout, max_tok,
-                                  verified_snapshot)] = p
+                                  verified_snapshot, cache=cache)] = p
             for fut in as_completed(futures):
                 p = futures[fut]
                 try:
@@ -466,7 +499,18 @@ def run_desk(
         # analyst_outputs slice). Both theses are flag-checked against
         # the verified_snapshot (machine-checked conflict-flag discipline
         # extended to the researchers — the brief's ask).
-        context["analyst_outputs"] = personas_out
+        #
+        # R2-4 — strip latency_ms from the analyst_outputs slice before
+        # adding to context. latency_ms is a display/audit field, NOT a
+        # reasoning input — but it makes the bull_researcher's user_msg
+        # non-deterministic across cache hits/misses (cache hit →
+        # latency_ms=0; real call → latency_ms=large). Stripping it
+        # makes the user_msg (and therefore the cache key) deterministic
+        # so a second run_desk call with the same cache hits on every
+        # persona, not just the Phase-1 analysts. The full personas_out
+        # (with latency_ms) stays in the report + journal for the audit
+        # trail; only the LLM-context slice is stripped.
+        context["analyst_outputs"] = _strip_latency(personas_out)
         researchers_out: list[dict] = []
         try:
             with ThreadPoolExecutor(max_workers=len(RESEARCHER_PERSONAS)) as ex:
@@ -477,7 +521,8 @@ def run_desk(
                         p.name, PERSONA_DEFAULT_MAX_TOKENS)
                     futures[ex.submit(_run_persona, p, user, chain, budget,
                                       timeout, max_tok,
-                                      verified_snapshot)] = p
+                                      verified_snapshot,
+                                      cache=cache)] = p
                 for fut in as_completed(futures):
                     p = futures[fut]
                     try:
@@ -536,14 +581,15 @@ def run_desk(
         # researcher_outputs slice is added to the context for the
         # manager's user_msg. Abstention: the manager has no verified_
         # snapshot entitlement, so no claim-conflict flag is applied.
-        context["researcher_outputs"] = researchers_out
+        # R2-4 — strip latency_ms (same reason as analyst_outputs).
+        context["researcher_outputs"] = _strip_latency(researchers_out)
         try:
             user = _persona_user_msg(MANAGER_PERSONA, context, detail)
             max_tok = PERSONA_MAX_TOKENS.get(
                 MANAGER_PERSONA.name, PERSONA_DEFAULT_MAX_TOKENS)
             research_memo = _run_persona(MANAGER_PERSONA, user, chain,
                                          budget, timeout, max_tok,
-                                         verified_snapshot)
+                                         verified_snapshot, cache=cache)
         except BudgetExceeded as e:
             jr.emit("BudgetExceeded", {"run_id": run_id, "reason": str(e)})
             jr.emit("AgentRunFinished", {
@@ -574,14 +620,15 @@ def run_desk(
         # into a concrete trade plan with entry/stop/target/size + the
         # harness mechanically re-computes r:r. The research_memo slice
         # is added to the context for the trader's user_msg.
-        context["research_memo"] = research_memo
+        # R2-4 — strip latency_ms from research_memo (cache-key determinism).
+        context["research_memo"] = _strip_latency_dict(research_memo)
         try:
             user = _persona_user_msg(TRADER_PERSONA, context, detail)
             max_tok = PERSONA_MAX_TOKENS.get(
                 TRADER_PERSONA.name, PERSONA_DEFAULT_MAX_TOKENS)
             trader_plan = _run_persona(TRADER_PERSONA, user, chain,
                                         budget, timeout, max_tok,
-                                        verified_snapshot)
+                                        verified_snapshot, cache=cache)
         except BudgetExceeded as e:
             jr.emit("BudgetExceeded", {"run_id": run_id, "reason": str(e)})
             jr.emit("AgentRunFinished", {
@@ -627,7 +674,8 @@ def run_desk(
         # slices (their entitlements). Each debator's reasoning is
         # flag-checked against the verified_snapshot (the brief's
         # machine-check extension to debators' reasoning).
-        context["trader_plan"] = trader_plan
+        # R2-4 — strip latency_ms from trader_plan (cache-key determinism).
+        context["trader_plan"] = _strip_latency_dict(trader_plan)
         debators_out: list[dict] = []
         try:
             with ThreadPoolExecutor(max_workers=len(DEBATOR_PERSONAS)) as ex:
@@ -638,7 +686,8 @@ def run_desk(
                         p.name, PERSONA_DEFAULT_MAX_TOKENS)
                     futures[ex.submit(_run_persona, p, user, chain, budget,
                                       timeout, max_tok,
-                                      verified_snapshot)] = p
+                                      verified_snapshot,
+                                      cache=cache)] = p
                 for fut in as_completed(futures):
                     p = futures[fut]
                     try:
@@ -689,7 +738,8 @@ def run_desk(
                     "run_id": run_id}
         order_d = {p.name: i for i, p in enumerate(DEBATOR_PERSONAS)}
         debators_out.sort(key=lambda r: order_d.get(r["name"], 99))
-        context["debator_verdicts"] = debators_out
+        # R2-4 — strip latency_ms from debator_verdicts (cache-key determinism).
+        context["debator_verdicts"] = _strip_latency(debators_out)
 
         # ---- Phase 6: PM (rewired) — synthesizes research_memo +
         # trader_plan + 3 debator verdicts into the final trade-decision
@@ -698,7 +748,8 @@ def run_desk(
         try:
             pm = _run_pm_debate(personas_out, researchers_out,
                                 research_memo, trader_plan, debators_out,
-                                base_block, detail, chain, budget, timeout)
+                                base_block, detail, chain, budget, timeout,
+                                memory=memory, cache=cache)
         except BudgetExceeded as e:
             jr.emit("BudgetExceeded", {"run_id": run_id, "reason": str(e)})
             jr.emit("AgentRunFinished", {
@@ -721,6 +772,34 @@ def run_desk(
         _emit("pm", {"consensus": pm.get("consensus"),
                      "conviction": pm.get("conviction"),
                      "action": pm.get("action")})
+
+        # R2-4 — store the PM's decision as a pending entry on the
+        # reflective memory log (Phase A). Phase B (deferred reflection
+        # when the 5d return is known) is a separate CLI subcommand;
+        # the storage path is wired here so the operator can run
+        # reflection on any pending entry as soon as the realized
+        # return is known. Fail-soft — never break the desk on a
+        # memory write failure (the desk report still returns ok).
+        if memory is not None:
+            try:
+                memory.store_decision(
+                    run_id=run_id,
+                    symbol=str(detail.get("symbol") or symbol),
+                    action=str(pm.get("action") or "HOLD"),
+                    entry_price=pm.get("entry_price"),
+                    stop_price=pm.get("stop_price"),
+                    target_price=pm.get("target_price"),
+                    position_size_pct=pm.get("position_size_pct"),
+                    conviction_label=str(pm.get("conviction_label")
+                                          or "LOW"),
+                    kill_criteria=pm.get("kill_criteria") or [],
+                    evidence_cited=pm.get("evidence_cited") or [],
+                    transcript_ref=str(pm.get("transcript_ref") or ""),
+                    regime=_regime_tag(verified_snapshot),
+                    benchmark="SPY",
+                )
+            except Exception:
+                pass  # memory is fail-soft
 
         elapsed_ms = int((time.monotonic() - started) * 1000)
         report = {
@@ -873,7 +952,8 @@ def run_desk(
 def _run_persona(persona: Persona, user_msg: str, models: list[str],
                  budget: Budget, timeout: float,
                  max_tokens: int = PERSONA_DEFAULT_MAX_TOKENS,
-                 verified_snapshot: dict | None = None) -> dict:
+                 verified_snapshot: dict | None = None,
+                 cache: PromptCache | None = None) -> dict:
     """One persona = one complete_json call (with model fall-through).
 
     Never raises: any LLM/parse failure becomes an abstention. The
@@ -901,22 +981,49 @@ def _run_persona(persona: Persona, user_msg: str, models: list[str],
     validation ValueError becomes an abstention without re-recording
     the step. This matters because the new manager/trader/debator
     personas produce more validation errors than the legacy 6 analyst
-    personas (which never raised under the analyst validator)."""
+    personas (which never raised under the analyst validator).
+
+    R2-4 — PromptCache integration. When ``cache`` is provided, the
+    cache key is sha256(persona_name | model | system | user)[:24]
+    (mirrors AHF's ``prompt_key``). Before the LLM call, the cache is
+    checked: a hit with ``parse_ok=True`` short-circuits the LLM call
+    entirely (the parsed result is returned as-is, $0 cost); a hit
+    with ``parse_ok=False`` is treated as a miss (the LLM is re-called
+    and a new failure record overwrites the old one — but no retry
+    loop). On success, the parsed result is cached; on failure
+    (LLMInvalidJSON with raw_response attached, or LLMUnavailable),
+    the failure record is persisted via ``cache.put_failure`` (the
+    AHF debug-trail concept, but with explicit failure records the
+    audit trail can iterate). When ``cache`` is None (the default for
+    the 507 pre-R2-4 tests), the function is identical to its pre-R2-4
+    behavior — no cache lookup, no cache write."""
     t0 = time.monotonic()
     messages = [
         {"role": "system", "content": persona.system},
         {"role": "user", "content": user_msg},
     ]
+    # R2-4 — compute the cache key BEFORE the LLM call. The key is
+    # sha256(persona_name | model | system | user)[:24] — same shape
+    # as AHF's prompt_key. None when cache is None (no caching) or
+    # models is empty (no primary model — desk is misconfigured).
+    cache_key: str | None = None
+    if cache is not None and models:
+        cache_key = _prompt_key(persona.name, models[0],
+                                persona.system, user_msg)
     model_used = ""
     parsed: dict | None = None
     try:
         budget.check_step()
         parsed, model_used = _complete_json_with_fallback(
-            messages, models, timeout, max_tokens=max_tokens)
+            messages, models, timeout, max_tokens=max_tokens,
+            cache=cache, cache_key=cache_key, persona_name=persona.name)
     except BudgetExceeded:
         raise
     except Exception as e:  # noqa: BLE001 — LLM call failed, abstain
         # record the step ONCE — the LLM call attempt itself counts
+        # (the failure record was already persisted inside
+        # _complete_json_with_fallback via cache.put_failure, so we
+        # don't re-persist here)
         try:
             budget.record_step(time.monotonic() - t0)
         except Exception:
@@ -961,7 +1068,10 @@ def _run_persona(persona: Persona, user_msg: str, models: list[str],
 
 def _complete_json_with_fallback(messages: list[dict], models: list[str],
                                  timeout: float,
-                                 max_tokens: int = 2400) -> tuple[dict, str]:
+                                 max_tokens: int = 2400,
+                                 cache: PromptCache | None = None,
+                                 cache_key: str | None = None,
+                                 persona_name: str = "") -> tuple[dict, str]:
     """complete_json over the model chain, honoring a wall clock.
 
     max_tokens is generous (2400): reasoning-first free models burn
@@ -980,9 +1090,44 @@ def _complete_json_with_fallback(messages: list[dict], models: list[str],
     Returns (parsed, model_used). Raises the last LLM error when every
     model in the chain failed — the caller decides what that means
     (persona → abstain; PM → mechanical fallback).
+
+    R2-4 — PromptCache integration (judged vs AHF cache.py:25-48).
+    When ``cache`` + ``cache_key`` + ``persona_name`` are provided:
+      - BEFORE the LLM call: ``cache.get(key)`` is checked. A hit with
+        ``parse_ok=True`` returns the cached parsed result + model_used
+        (the LLM is NOT called — $0 cost on a re-run over an unchanged
+        prompt). A hit with ``parse_ok=False`` is treated as a miss
+        (the LLM is re-called; if it fails again, the failure record
+        is overwritten with the new raw_response — but no retry loop).
+      - AFTER the LLM succeeds: ``cache.put(key, {persona, model_used,
+        response, parsed})`` so the next call with the same prompt
+        hits. The raw response isn't captured here (complete_json
+        doesn't expose it on success) — only the parsed JSON + the
+        model that produced it. The audit trail gets the parsed
+        payload, not the raw reasoning text.
+      - AFTER the LLM fails: ``cache.put_failure_with_meta(key,
+        raw_response, error, persona, model_used)`` persists the
+        failure record. ``raw_response`` comes from the new
+        ``LLMInvalidJSON.raw_response`` attribute (None on transport
+        failures — LLMUnavailable — where no response was returned).
+
+    When ``cache`` is None, the function is identical to its pre-R2-4
+    behavior — no cache lookup, no cache write. The 507 pre-R2-4
+    tests pass cache=None and exercise the pre-R2-4 contract.
     """
+    # R2-4 — cache hit path. Return the cached parsed result + the
+    # model that produced it. A hit with parse_ok=False falls through
+    # to the LLM call (treated as a miss).
+    if cache is not None and cache_key is not None:
+        cached = cache.get(cache_key)
+        if cached is not None and cached.get("parse_ok"):
+            return (cached.get("parsed") or {}), \
+                cached.get("model_used") or (models[0] if models else "")
+        # if cached and not parse_ok, treat as miss (fall through)
     deadline = time.monotonic() + timeout
     last: Exception | None = None
+    last_raw: str | None = None       # raw response from the last failed parse
+    last_model: str = ""
     for i, m in enumerate(models):
         remaining = deadline - time.monotonic()
         if i > 0 and remaining <= 0:
@@ -994,9 +1139,21 @@ def _complete_json_with_fallback(messages: list[dict], models: list[str],
             parsed = complete_json(
                 messages, m, timeout=attempt_timeout,
                 temperature=0.2, max_tokens=max_tokens, retries=2)
+            # R2-4 — cache the successful parse. The raw response isn't
+            # captured here (complete_json doesn't expose it on
+            # success); the audit trail gets the parsed payload only.
+            if cache is not None and cache_key is not None:
+                cache.put(cache_key, {
+                    "persona": persona_name,
+                    "model_used": m,
+                    "response": None,
+                    "parsed": parsed,
+                })
             return parsed, m
         except LLMInvalidJSON as e:
             last = e
+            last_raw = getattr(e, "raw_response", None)
+            last_model = m
             # one JSON-only re-prompt on the same model (cheap rescue:
             # often the model just wrapped the JSON in prose)
             remaining = deadline - time.monotonic()
@@ -1013,13 +1170,37 @@ def _complete_json_with_fallback(messages: list[dict], models: list[str],
                 parsed = complete_json(
                     rescue, m, timeout=max(10.0, min(timeout, remaining)),
                     temperature=0.0, max_tokens=max_tokens, retries=1)
+                if cache is not None and cache_key is not None:
+                    cache.put(cache_key, {
+                        "persona": persona_name,
+                        "model_used": m,
+                        "response": None,
+                        "parsed": parsed,
+                    })
                 return parsed, m
             except (LLMUnavailable, LLMInvalidJSON) as e2:
                 last = e2
+                if isinstance(e2, LLMInvalidJSON):
+                    last_raw = getattr(e2, "raw_response", None)
+                else:
+                    last_raw = None  # transport failure — no raw response
                 continue
         except LLMUnavailable as e:
             last = e
+            last_raw = None  # transport failure — no raw response
+            last_model = m
             continue
+    # R2-4 — persist the failure record. The AHF debug-trail concept:
+    # failed parses keep the raw response on disk. OURS extends it
+    # with an explicit ``parse_ok=False`` structured record the audit
+    # trail can iterate (grep the cache dir for parse_ok=false).
+    if cache is not None and cache_key is not None:
+        try:
+            cache.put_failure_with_meta(
+                cache_key, last_raw, str(last) if last else "unknown",
+                persona=persona_name, model_used=last_model)
+        except Exception:
+            pass  # cache write must never break the desk
     raise last or LLMUnavailable("desk: model chain exhausted")
 
 
@@ -1579,7 +1760,9 @@ def _run_pm_debate(personas_out: list[dict],
                    debators_out: list[dict],
                    base_block: dict, detail: dict,
                    models: list[str], budget: Budget,
-                   timeout: float) -> dict:
+                   timeout: float,
+                   memory: ReflectiveMemory | None = None,
+                   cache: PromptCache | None = None) -> dict:
     """The R2-3 rewired PM — synthesizes research_memo + trader_plan +
     3 debator verdicts into the final trade-decision artifact.
 
@@ -1608,6 +1791,24 @@ def _run_pm_debate(personas_out: list[dict],
     stop_price, target_price, position_size_pct, risk_reward_ratio,
     conviction_label, kill_criteria, reasoning, evidence_cited,
     transcript_ref). The journal contract is EXTENDED, not broken.
+
+    R2-4 — reflective memory + PromptCache (judged vs TradingAgents'
+    TradingMemoryLog + Reflector + ai-hedge-fund's PromptCache):
+      - ``memory`` (optional ReflectiveMemory): when provided, the PM's
+        user_msg gets a "RECENT LESSONS" block prepended (the last k=3
+        reflected lessons for this symbol/regime, formatted as
+        ``- [date | action | alpha +X.XX%]: lesson``). Cold start
+        (no lessons or memory=None) → no block (don't pad the prompt).
+        Mirrors TA's ``get_past_context`` re-injection but with
+        STRUCTURED lessons (machine-formatable, no re-parsing of
+        prose) — the brief's edge over TA.
+      - ``cache`` (optional PromptCache): when provided, the PM's LLM
+        call goes through the same cache check/put/failure-persist
+        path as ``_run_persona``. A hit with ``parse_ok=True`` short-
+        circuits the LLM call entirely (the cached parsed PM dict is
+        re-validated mechanically — same r:r re-compute, conviction
+        calibration, abstention discipline — so a cache hit still
+        goes through the mechanical layer, not around it).
     """
     t0 = time.monotonic()
     signals = [
@@ -1651,9 +1852,26 @@ def _run_pm_debate(personas_out: list[dict],
          "abstained": r.get("abstained")}
         for r in debators_out
     ]
+    # R2-4 — pull recent reflected lessons for this symbol/regime from
+    # the reflective memory log (the brief's "PM re-injection" piece).
+    # Mirrors TA's ``get_past_context`` but with STRUCTURED lessons
+    # (the brief's edge over TA's 2-4 sentences of plain prose). When
+    # memory is None or no lessons exist, the block is omitted (cold
+    # start — don't pad the prompt).
+    lessons_block = ""
+    if memory is not None:
+        try:
+            symbol = str(detail.get("symbol") or "")
+            regime = _regime_tag(base_block.get("verified_snapshot_headline")
+                                  or {})
+            lessons = memory.recent_lessons(symbol, regime, k=3)
+            lessons_block = _format_lessons_block(lessons)
+        except Exception:
+            lessons_block = ""  # memory is fail-soft — never break the PM
     user = (
         f"Debate desk report for {detail.get('symbol')} "
         f"({detail.get('name')}).\n\n"
+        f"{lessons_block}"
         f"MARKET CONTEXT (JSON):\n"
         f"{json.dumps(base_block, default=str)}\n\n"
         f"PHASE 1 — ANALYST SIGNALS (JSON):\n"
@@ -1670,10 +1888,19 @@ def _run_pm_debate(personas_out: list[dict],
     )
     messages = [{"role": "system", "content": PM_DEBATE_SYSTEM},
                 {"role": "user", "content": user}]
+    # R2-4 — compute the PM's cache key BEFORE the LLM call (same
+    # shape as the persona cache key: sha256(persona_name | model |
+    # system | user)[:24] with persona_name="portfolio_manager").
+    pm_cache_key: str | None = None
+    if cache is not None and models:
+        pm_cache_key = _prompt_key("portfolio_manager", models[0],
+                                   PM_DEBATE_SYSTEM, user)
     try:
         budget.check_step()
         parsed, model_used = _complete_json_with_fallback(
-            messages, models, timeout, max_tokens=3600)
+            messages, models, timeout, max_tokens=3600,
+            cache=cache, cache_key=pm_cache_key,
+            persona_name="portfolio_manager")
         budget.record_step(time.monotonic() - t0)
         pm = _validate_pm_debate(parsed)
         pm["model"] = model_used
@@ -2407,6 +2634,117 @@ def _r4(v):
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(
         timespec="seconds").replace("+00:00", "Z")
+
+
+# ------------------------------------------------------- R2-4 memory helpers
+
+def _format_lessons_block(lessons: list[dict]) -> str:
+    """Format the recent-lessons block the PM's user_msg prepends.
+
+    Each lesson is rendered as:
+      ``- [date | action | alpha +X.XX%]: lesson``
+    (the brief's exact format). The block is empty when lessons is
+    empty (cold start) so the PM's prompt isn't padded. Mirrors TA's
+    ``get_past_context`` re-injection but with STRUCTURED lessons
+    (machine-formatable from the JSON lesson dict) — the brief's edge
+    over TA's 2-4 sentences of plain prose.
+    """
+    if not lessons:
+        return ""
+    lines = ["RECENT LESSONS (apply to this decision):"]
+    for L in lessons:
+        date = str(L.get("date") or "?")[:10]
+        action = str(L.get("action") or "?")
+        # alpha_pct: prefer the top-level field (the parsed tag carries
+        # it as a float); fall back to the nested lesson dict, then 0.0.
+        alpha = L.get("alpha_pct")
+        if alpha is None:
+            nested = L.get("lesson")
+            if isinstance(nested, dict):
+                alpha = nested.get("alpha_pct", 0.0)
+        try:
+            alpha_f = float(alpha) if alpha is not None else 0.0
+        except (TypeError, ValueError):
+            alpha_f = 0.0
+        # lesson_text: prefer the convenience field, then the nested
+        # dict's "lesson" key, then the bare string form.
+        lesson_text = L.get("lesson_text")
+        if not lesson_text:
+            nested = L.get("lesson")
+            if isinstance(nested, dict):
+                lesson_text = nested.get("lesson", "")
+            elif isinstance(nested, str):
+                lesson_text = nested
+        if not lesson_text:
+            lesson_text = ""
+        lines.append(
+            f"- [{date} | {action} | alpha {alpha_f:+.2f}%]: "
+            f"{str(lesson_text)[:200]}")
+    return "\n".join(lines) + "\n\n"
+
+
+def _regime_tag(verified_snapshot: dict | None) -> str:
+    """Extract a compact regime-tag string from the verified snapshot.
+
+    Used as the ``regime`` argument to ``memory.recent_lessons`` so the
+    regime-peer fallback can find lessons from OTHER symbols in the
+    same regime when THIS symbol has < k of its own. The tag is a
+    pipe-joined sorted-keys string of the snapshot's ``regime_labels``
+    dict (e.g. ``"trend:up|vol:calm|momentum:turning"``). When the
+    snapshot is None or has no regime labels, returns ``"unknown"`` —
+    the regime-peer fallback still finds same-regime=unknown lessons
+    (every cold-start lesson is "unknown" until a reflection runs).
+    """
+    if not isinstance(verified_snapshot, dict):
+        return "unknown"
+    reg = verified_snapshot.get("regime_labels") or {}
+    if not isinstance(reg, dict) or not reg:
+        return "unknown"
+    # join the keys (the regime dimensions, not the values) so two
+    # symbols in the same regime shape match regardless of which
+    # specific value each dimension takes. The matching is coarse on
+    # purpose — a regime tag is a peer-set hint, not a hard partition.
+    parts = [f"{k}:{reg[k]}" for k in sorted(reg.keys())
+             if isinstance(reg.get(k), (str, int, float))]
+    if not parts:
+        return "unknown"
+    return "|".join(parts)[:80]
+
+
+def _strip_latency(outputs: list[dict] | dict | None) -> list[dict]:
+    """Return a copy of ``outputs`` (list of dicts) with the
+    ``latency_ms`` field removed from each entry.
+
+    R2-4 — latency_ms is a display/audit field, NOT a reasoning input.
+    But it makes the user_msg non-deterministic across cache hits/
+    misses (cache hit → latency_ms≈0; real call → latency_ms=large),
+    which makes the cache key (sha256(persona|model|system|user)) non-
+    deterministic across runs. Stripping latency_ms from the LLM-
+    context slice (``context["analyst_outputs"]``, ``context
+    ["researcher_outputs"]``, ``context["debator_verdicts"]``) makes
+    the user_msg deterministic so a second run_desk call with the same
+    cache hits on every persona, not just the Phase-1 analysts.
+
+    The full outputs (with latency_ms) stay in the report + journal for
+    the audit trail; only the LLM-context slice is stripped.
+    """
+    if outputs is None:
+        return []
+    if isinstance(outputs, dict):
+        return [_strip_latency_dict(outputs)]  # treat as 1-element list
+    if not isinstance(outputs, list):
+        return []
+    return [{k: v for k, v in (d or {}).items() if k != "latency_ms"}
+            if isinstance(d, dict) else d
+            for d in outputs]
+
+
+def _strip_latency_dict(d: dict | None) -> dict:
+    """Single-dict form of ``_strip_latency`` for research_memo /
+    trader_plan (which are single dicts, not lists)."""
+    if not isinstance(d, dict):
+        return d or {}
+    return {k: v for k, v in d.items() if k != "latency_ms"}
 
 
 def _sha16(text: str) -> str:

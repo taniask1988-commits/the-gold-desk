@@ -22,6 +22,21 @@ __pycache__/
 /data/agent_runs/*
 !/data/agent_runs/.gitkeep
 
+# R2-4 — reflective memory + PromptCache runtime artifacts. The cache/
+# root lives next to data/ (sibling of data_root). The cache contents
+# are runtime artifacts (per-symbol memory logs + per-LLM-call JSON
+# records), not source — never committed. The .gitkeep keeps the
+# memory/ and llm/ subdirs visible so the cache can be inspected by
+# operators without first running the desk.
+/cache/*
+!/cache/.gitkeep
+!/cache/memory/
+/cache/memory/*
+!/cache/memory/.gitkeep
+!/cache/llm/
+/cache/llm/*
+!/cache/llm/.gitkeep
+
 # Node / Next.js
 node_modules/
 .next/

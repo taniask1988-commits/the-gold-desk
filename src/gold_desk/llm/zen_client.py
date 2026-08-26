@@ -32,7 +32,21 @@ class LLMUnavailable(RuntimeError):
 
 
 class LLMInvalidJSON(RuntimeError):
-    """Model output not parseable as the required JSON — caller treats as VETO."""
+    """Model output not parseable as the required JSON — caller treats as VETO.
+
+    R2-4 — carries the ``raw_response`` attribute when the model
+    returned text we couldn't extract JSON from. The PromptCache's
+    debug-trail ``put_failure`` reads this attribute to persist the
+    unparseable response on disk so the operator can inspect it
+    without re-running the desk. None when the model returned nothing
+    (empty content / no choices) — those cases have no raw text to
+    persist. Backward-compat: callers that ignore the attribute are
+    unaffected (it's optional).
+    """
+
+    def __init__(self, msg: str, raw_response: str | None = None) -> None:
+        super().__init__(msg)
+        self.raw_response = raw_response
 
 
 def base_url() -> str:
@@ -179,7 +193,12 @@ def complete_json(
     try:
         return extract_json_object(content)
     except ValueError as e:
-        raise LLMInvalidJSON(str(e)) from e
+        # R2-4 — attach the raw content so the PromptCache's
+        # put_failure can persist the unparseable response on disk
+        # for the debug trail (mirrors AHF cache.py's "failed parses
+        # keep the raw response on disk" but with an explicit
+        # structured record the audit trail can iterate).
+        raise LLMInvalidJSON(str(e), raw_response=content) from e
 
 
 def complete_stream(
