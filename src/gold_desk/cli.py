@@ -37,6 +37,32 @@
     python -m gold_desk.cli markets-news QUERY [--json]
                                                     # NSE-style news search:
                                                     # query → merged Yahoo RSS
+    python -m gold_desk.cli news-sentiment "HEADLINE" [--json]
+                                                    # R3-2: NLP sentiment score
+                                                    # (polarity/magnitude/
+                                                    # subjectivity + assets +
+                                                    # relevance + novelty +
+                                                    # LLM fallback)
+    python -m gold_desk.cli news-sentiment --tape [--limit 20] [--json]
+                                                    # score the live news tape
+                                                    # (8 instrument feeds;
+                                                    # local-only — the LLM
+                                                    # second opinion is a
+                                                    # single-headline feature)
+    python -m gold_desk.cli risk [--returns JSON] [--positions JSON]
+                                 [--benchmark-returns JSON] [--json]
+                                                    # R3-2: VaR (parametric/
+                                                    # historical/Monte-Carlo)
+                                                    # + ES + beta + stress
+                                                    # (GFC/COVID/2022)
+    python -m gold_desk.cli backtest [--bars 1y] [--setup guess] [--seed 7]
+                                     [--journal PATH] [--json]
+                                                    # R3-2: GUESS setup vs 1y
+                                                    # GC=F 1h bars — Sharpe/
+                                                    # Sortino/MaxDD/Calmar/
+                                                    # hit-rate/profit-factor
+                                                    # + equity journal +
+                                                    # buy-and-hold compare
 """
 from __future__ import annotations
 
@@ -1164,6 +1190,332 @@ def cmd_account_alpaca(args) -> int:
     return 0
 
 
+def _polarity_gauge(polarity: float, width: int = 21) -> str:
+    """ASCII gauge from −1 (all ◀) to +1 (all ▶), center-marked."""
+    p = max(-1.0, min(1.0, polarity))
+    center = width // 2
+    filled = int(round((p + 1.0) / 2.0 * (width - 1)))
+    cells = ["·"] * width
+    for i in range(width):
+        if i < filled and i > center - 1 and p >= 0:
+            cells[i] = "▓"
+        elif i >= filled and i < center + 1 and p < 0:
+            cells[i] = "▓"
+    cells[center] = "│"
+    return "[" + "".join(cells) + f"] {p:+.3f}"
+
+
+def cmd_news_sentiment(args) -> int:
+    """news-sentiment — R3-2 Build 3: NLP sentiment for one headline or
+    the live news tape. Local lexicon (polarity/magnitude/subjectivity) +
+    8-instrument asset detection + relevance + novelty, with a
+    fail-closed Zen free-tier LLM second opinion for ambiguous stories.
+    """
+    from .markets.news_sentiment import NewsSentimentAnalyzer, score_tape
+    if args.tape:
+        # bulk tape scoring is local-only (see score_tape docstring): a
+        # 20-story tape must never fan out 20 sequential LLM second opinions
+        out = score_tape(data_root=args.data_root, limit=args.limit,
+                         llm_enabled=False)
+        if args.json:
+            print(json.dumps(out, sort_keys=True, default=str))
+            return 0 if out.get("ok") else 1
+        if not out.get("ok"):
+            print("news tape unreachable:", out.get("error", "all feeds failed"))
+            return 1
+        print(f"NEWS SENTIMENT TAPE — {out.get('n_feeds', 0)}/"
+              f"{out.get('n_feeds_requested', 8)} feeds · "
+              f"{out.get('n_stories', 0)} stories scored")
+        print("=" * 72)
+        for s in out.get("stories") or []:
+            pol = s.get("polarity", 0.0)
+            assets = ", ".join(a.get("symbol", "?") for a in s.get("assets") or [])
+            print(f"{pol:+.3f} nov={s.get('novelty', 0):.2f} "
+                  f"[{s.get('feed_symbol', '?'):<9s}] "
+                  f"{(s.get('headline') or '')[:60]}  {{{assets}}}")
+        return 0
+
+    headline = (args.headline or "").strip()
+    if not headline:
+        if args.json:
+            print(json.dumps({"ok": False, "error": "no headline "
+                              "(pass a quoted headline or --tape)"}))
+        else:
+            print("news-sentiment: pass a quoted headline or --tape")
+        return 1
+    analyzer = NewsSentimentAnalyzer(data_root=args.data_root,
+                                     llm_enabled=not args.no_llm)
+    out = analyzer.score(headline)
+    if args.json:
+        print(json.dumps(out, sort_keys=True, default=str))
+        return 0 if out.get("ok") else 1
+    if not out.get("ok"):
+        print("news-sentiment failed:", out.get("error"))
+        return 1
+    print("NEWS SENTIMENT — local lexicon + LLM fallback (R3-2)")
+    print("=" * 64)
+    print(f"headline    : {out.get('headline')}")
+    print(f"polarity    : {_polarity_gauge(out.get('polarity', 0.0))}"
+          f"  ({out.get('label')})")
+    print(f"magnitude   : {out.get('magnitude', 0):.3f}    "
+          f"subjectivity: {out.get('subjectivity', 0):.3f}")
+    print(f"novelty     : {out.get('novelty', 0):.3f}    "
+          f"relevance   : {out.get('relevance', 0):.3f}")
+    assets = out.get("assets") or []
+    if assets:
+        parts = [f"{a['symbol']} ({a['name']}, conf {a['confidence']:.1f}, "
+                 f"rel {a['relevance']:.2f})" for a in assets]
+        print(f"assets      : " + " | ".join(parts))
+    else:
+        print("assets      : (none of the 8 desk instruments detected)")
+    terms = out.get("terms_fired") or []
+    if terms:
+        parts = [f"{t['term']} {t['contribution']:+.2f}"
+                 + (f" ×{t['multiplier']:g}" if t["multiplier"] != 1.0 else "")
+                 + (" [negated]" if t["negated"] else "")
+                 for t in terms]
+        print(f"terms fired : " + " | ".join(parts))
+    else:
+        print("terms fired : (no lexicon terms matched)")
+    if out.get("llm_fallback_used"):
+        print(f"llm 2nd op. : blended 50/50 — llm polarity "
+              f"{out.get('llm_polarity', 0):+.3f}"
+              + (f" ({out.get('llm_note', '')})" if out.get("llm_note") else ""))
+    elif out.get("llm_fallback_failed"):
+        print("llm 2nd op. : FAILED — local score kept (fail-closed)")
+    else:
+        print("llm 2nd op. : not needed (|polarity| ≥ 0.15 or low signal)")
+    return 0
+
+
+# default live portfolio for `risk` — keyless Yahoo daily bars, 1y
+DEFAULT_RISK_PORTFOLIO = [
+    {"symbol": "SPY", "weight": 0.40},
+    {"symbol": "GC=F", "weight": 0.30},
+    {"symbol": "BTC-USD", "weight": 0.15},
+    {"symbol": "CASH", "weight": 0.15},
+]
+
+
+def _risk_default_portfolio(data_root: str):
+    """Live default portfolio: 1y daily closes per symbol (keyless Yahoo,
+    cached, fail-soft per symbol), DATE-ALIGNED across calendars (the
+    R3-1 D2 lesson) and blended by weight. Returns (positions, benchmark)
+    where benchmark is the SPY return series; None on any fetch failure
+    (fail-closed — a missing leg must never silently re-weight).
+    """
+    from datetime import datetime, timezone
+
+    from .markets.board import fetch_daily_bars
+    from .risk.metrics import date_aligned_returns, portfolio_returns
+
+    def _day_key(bar: dict) -> str | None:
+        """fetch_daily_bars stamps bars with EPOCH-MS integers (board.py's
+        shape) — convert to a UTC YYYY-MM-DD key; tolerate ISO strings too.
+        Returns None on an unusable timestamp (bar dropped, not crashed)."""
+        ts = bar.get("ts")
+        try:
+            if isinstance(ts, (int, float)):
+                return datetime.fromtimestamp(float(ts) / 1000.0,
+                                              tz=timezone.utc
+                                              ).strftime("%Y-%m-%d")
+            if isinstance(ts, str):
+                return ts[:10]
+        except (OverflowError, OSError, ValueError):
+            return None
+        return None
+
+    closes: dict[str, dict[str, float]] = {}
+    for pos in DEFAULT_RISK_PORTFOLIO:
+        sym = pos["symbol"]
+        if sym == "CASH":
+            continue
+        bars = fetch_daily_bars(sym, "1y", data_root=data_root)
+        by_date = {}
+        for b in bars:
+            c = b.get("c")
+            day = _day_key(b)
+            if c is not None and day:
+                by_date[day] = float(c)
+        if len(by_date) < 30:
+            return None
+        closes[sym] = by_date
+    aligned = date_aligned_returns(closes)
+    positions = [{**pos, "returns": aligned.get(pos["symbol"], [])}
+                 for pos in DEFAULT_RISK_PORTFOLIO if pos["symbol"] != "CASH"]
+    bench = aligned.get("SPY") or []
+    return positions, bench
+
+
+def _parse_json_list(raw: str, flag: str):
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        return None, f"--{flag}: invalid JSON ({e})"
+    if not isinstance(data, list):
+        return None, f"--{flag}: expected a JSON list"
+    return data, None
+
+
+def cmd_risk(args) -> int:
+    """risk — R3-2 Build 4: VaR (parametric Gaussian / historical /
+    Monte Carlo) at 95%+99%, Expected Shortfall, beta-adjusted exposure
+    and the GFC/COVID/2022 stress scenarios for a portfolio.
+    """
+    from .risk.metrics import risk_report
+    positions = None
+    returns = None
+    benchmark = None
+    portfolio_label = "explicit series"
+
+    if args.returns:
+        returns, err = _parse_json_list(args.returns, "returns")
+        if err:
+            print(json.dumps({"ok": False, "error": err}) if args.json else err)
+            return 1
+        returns = [float(r) for r in returns]
+        if args.benchmark_returns:
+            benchmark, err = _parse_json_list(args.benchmark_returns,
+                                              "benchmark-returns")
+            if err:
+                print(json.dumps({"ok": False, "error": err}) if args.json else err)
+                return 1
+            benchmark = [float(r) for r in benchmark]
+        if args.positions:
+            positions, err = _parse_json_list(args.positions, "positions")
+            if err:
+                print(json.dumps({"ok": False, "error": err}) if args.json else err)
+                return 1
+    else:
+        built = _risk_default_portfolio(args.data_root)
+        if built is None:
+            msg = ("default portfolio fetch failed (Yahoo daily bars "
+                   "unreachable — pass --returns '[...]' for an offline "
+                   "series)")
+            print(json.dumps({"ok": False, "error": msg}) if args.json else msg)
+            return 1
+        positions, benchmark = built
+        from .risk.metrics import portfolio_returns
+        returns = portfolio_returns(positions)
+        portfolio_label = "default 40% SPY / 30% GC=F / 15% BTC-USD / 15% cash"
+        if args.positions:
+            positions, err = _parse_json_list(args.positions, "positions")
+            if err:
+                print(json.dumps({"ok": False, "error": err}) if args.json else err)
+                return 1
+
+    out = risk_report(returns, benchmark=benchmark, positions=positions)
+    out["portfolio"] = portfolio_label
+    if args.json:
+        print(json.dumps(out, sort_keys=True, default=str))
+        return 0 if out.get("ok") else 1
+    if not out.get("ok"):
+        print("risk report needs ≥2 returns (got "
+              f"{out.get('n_observations', 0)})")
+        return 1
+    print("RISK REPORT — VaR · ES · beta · stress (R3-2)")
+    print("=" * 64)
+    print(f"portfolio   : {out.get('portfolio')}")
+    print(f"observations: {out.get('n_observations')}   "
+          f"mean {out.get('mean'):+.5f}   σ {out.get('stdev'):.5f}")
+    print()
+    print(f"{'method':<14s}{'VaR 95%':>12s}{'VaR 99%':>12s}")
+    print("-" * 40)
+    for method, label in (("parametric", "Gaussian"),
+                          ("historical", "historical"),
+                          ("monte_carlo", "Monte Carlo")):
+        row = (out.get("var") or {}).get(method) or {}
+        v95, v99 = row.get("95"), row.get("99")
+        print(f"{label:<14s}"
+              f"{(f'{v95:+.4%}' if v95 is not None else 'n/a'):>12s}"
+              f"{(f'{v99:+.4%}' if v99 is not None else 'n/a'):>12s}")
+    es = out.get("expected_shortfall") or {}
+    print()
+    print(f"expected shortfall (tail mean): "
+          f"95% {es.get('historical_95', 0):+.4%}   "
+          f"99% {es.get('historical_99', 0):+.4%}")
+    beta = out.get("beta")
+    if beta and beta.get("beta") is not None:
+        print(f"beta vs benchmark: {beta['beta']:.4f}   "
+              f"α/period {beta['alpha']:+.6f}   "
+              f"R² {beta['r_squared']:.3f}   n={beta['n']}")
+    stress = out.get("stress")
+    if stress:
+        print()
+        print("STRESS SCENARIOS")
+        print("-" * 64)
+        for s in stress.get("scenarios") or []:
+            unshocked = s.get("unshocked") or []
+            note = (f"  (unshocked: {', '.join(unshocked)})" if unshocked
+                    else "")
+            print(f"  {s.get('label', s.get('name')):<34s}"
+                  f"{s.get('portfolio_shock', 0):+.2%}{note}")
+    return 0
+
+
+def cmd_backtest(args) -> int:
+    """backtest — R3-2 Build 4: the GUESS London-range-breakout setup run
+    against keyless GC=F 1h bars (default 1y) with mechanical exits,
+    equity journal and the full stat grid + buy-and-hold comparison.
+    Deterministic: seed-pinned, no wall-clock in the output.
+    """
+    from .risk.backtest import BacktestEngine, fetch_hourly_bars
+    try:
+        bars = fetch_hourly_bars(args.symbol, args.bars,
+                                 data_root=args.data_root)
+    except Exception as e:  # noqa: BLE001 — surface fetch failure honestly
+        msg = f"bar fetch failed for {args.symbol} ({args.bars}): {e}"
+        print(json.dumps({"ok": False, "error": msg}) if args.json else msg)
+        return 1
+    journal = args.journal or str(Path(args.data_root) / "backtest_equity.jsonl")
+    engine = BacktestEngine(bars, seed=args.seed,
+                            slippage_atr_mult=args.slippage)
+    out = engine.run(journal_path=journal)
+    out["symbol"] = args.symbol
+    out["range"] = args.bars
+    out["journal_path"] = journal
+    if args.json:
+        print(json.dumps(out, sort_keys=True, default=str))
+        return 0 if out.get("ok") else 1
+    print(f"BACKTEST — {args.symbol} {args.bars} · setup "
+          f"{out.get('setup_id')} v{out.get('setup_version')} (R3-2)")
+    print("=" * 64)
+    print(f"bars        : {out.get('n_bars')}  "
+          f"({out.get('first_bar')} → {out.get('last_bar')})")
+    print(f"equity      : {out.get('equity_start'):,.0f} → "
+          f"{out.get('equity_end'):,.0f}  "
+          f"({out.get('total_return', 0):+.2%})")
+    print(f"buy & hold  : {out.get('buy_hold_return', 0):+.2%}"
+          + ("   ← benchmark" if out.get("buy_hold_return") is not None else ""))
+    print(f"sharpe      : {_fmt(out.get('sharpe'))}   "
+          f"sortino: {_fmt(out.get('sortino'))}   "
+          f"calmar: {_fmt(out.get('calmar'))}")
+    print(f"max drawdown: {out.get('max_drawdown', 0):.2%}")
+    print(f"trades      : {out.get('n_trades')}  "
+          f"({out.get('n_wins')}W/{out.get('n_losses')}L  "
+          f"hit {out.get('hit_rate', 0):.1%})  "
+          f"profit factor: {_fmt(out.get('profit_factor'))}")
+    print(f"avg win/loss: {_fmt(out.get('avg_win'))} / "
+          f"{_fmt(out.get('avg_loss'))}")
+    print(f"determinism : seed {out.get('seed')} · journal sha256 "
+          f"{(out.get('equity_curve_sha256') or '')[:16]}…")
+    print(f"journal     : {journal} (JSONL, bar-by-bar equity)")
+    trades = out.get("trades") or []
+    if trades:
+        print()
+        print(f"{'side':<6s}{'entry':>10s}{'exit':>10s}"
+              f"{'pnl':>10s}  {'reason':<10s}{'bars':>5s}")
+        print("-" * 56)
+        for t in trades[-6:]:
+            print(f"{t['side']:<6s}{t['entry']:>10.2f}{t['exit']:>10.2f}"
+                  f"{t['pnl']:>10.2f}  {t['reason']:<10s}{t['bars_held']:>5d}")
+    return 0
+
+
+def _fmt(v, spec: str = "{:+.3f}") -> str:
+    return spec.format(v) if isinstance(v, (int, float)) else "n/a"
+
+
 def _agent_registry():
     """Full research registry: desk tools + crypto tools + web tools +
     the multi-analyst desk bridge (piece 6)."""
@@ -1624,6 +1976,65 @@ def main(argv=None) -> int:
                         help="REST timeout seconds (default 8)")
     p_alp.add_argument("--data-root", default=str(REPO_ROOT / "data"))
     p_alp.set_defaults(func=cmd_account_alpaca)
+
+    p_nsent = sub.add_parser("news-sentiment",
+                              help="R3-2: NLP sentiment for a headline or "
+                                   "the live tape — polarity/magnitude/"
+                                   "subjectivity + 8-asset detection + "
+                                   "relevance + novelty + LLM fallback")
+    p_nsent.add_argument("headline", nargs="?", default=None,
+                          help="headline to score (quoted)")
+    p_nsent.add_argument("--tape", action="store_true",
+                          help="score the live news tape (8 instrument feeds)")
+    p_nsent.add_argument("--limit", type=int, default=20,
+                          help="tape: max stories to score (default 20)")
+    p_nsent.add_argument("--no-llm", action="store_true", dest="no_llm",
+                          help="disable the Zen LLM second opinion")
+    p_nsent.add_argument("--json", action="store_true")
+    p_nsent.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_nsent.set_defaults(func=cmd_news_sentiment)
+
+    p_risk = sub.add_parser("risk",
+                             help="R3-2: VaR (Gaussian/historical/Monte "
+                                  "Carlo) + ES + beta + stress scenarios "
+                                  "(GFC/COVID/2022) for a portfolio")
+    p_risk.add_argument("--returns", default=None,
+                         help="JSON list of returns (offline mode; default: "
+                              "live 40%% SPY / 30%% GC=F / 15%% BTC / 15%% "
+                              "cash from keyless Yahoo)")
+    p_risk.add_argument("--benchmark-returns", default=None, dest="benchmark_returns",
+                         help="JSON list of benchmark returns (enables the "
+                              "beta block in offline mode)")
+    p_risk.add_argument("--positions", default=None,
+                         help="JSON list of {symbol, weight} positions for "
+                              "the stress scenarios")
+    p_risk.add_argument("--json", action="store_true")
+    p_risk.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_risk.set_defaults(func=cmd_risk)
+
+    p_bt = sub.add_parser("backtest",
+                           help="R3-2: GUESS London-range-breakout backtest "
+                                "vs keyless GC=F 1h bars — Sharpe/Sortino/"
+                                "MaxDD/Calmar/hit-rate/profit-factor + "
+                                "equity journal + buy-and-hold")
+    p_bt.add_argument("--bars", default="1y",
+                       choices=["1mo", "3mo", "6mo", "1y", "2y"],
+                       help="bar range (default 1y)")
+    p_bt.add_argument("--setup", default="guess", choices=["guess"],
+                       help="setup spec (only the GUESS rule exists)")
+    p_bt.add_argument("--symbol", default="GC=F",
+                       help="Yahoo symbol for the bars (default GC=F)")
+    p_bt.add_argument("--seed", type=int, default=7,
+                       help="determinism seed (slippage RNG)")
+    p_bt.add_argument("--slippage", type=float, default=0.0, dest="slippage",
+                       help="adverse slippage in ATR multiples (default 0 "
+                            "= pure mechanical fills)")
+    p_bt.add_argument("--journal", default=None,
+                       help="equity journal JSONL path (default "
+                            "<data-root>/backtest_equity.jsonl)")
+    p_bt.add_argument("--json", action="store_true")
+    p_bt.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_bt.set_defaults(func=cmd_backtest)
 
     args = parser.parse_args(argv)
     return args.func(args)
