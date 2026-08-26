@@ -268,7 +268,11 @@ def test_run_desk_scripted_six_personas_and_pm(monkeypatch, tmp_path):
     calls: list = []
     monkeypatch.setattr(eng, "complete_json",
                         _fake_complete_json(calls=calls))
-    out = run_desk("btc", data_root=tmp_path)
+    # R2-3 — debate=False opts out of the new 6-phase flow so the
+    # legacy Phase 1 + PM contract (7 LLM calls) is preserved for this
+    # backward-compat test. The full 6-phase flow is exercised by
+    # tests/test_debate.py.
+    out = run_desk("btc", data_root=tmp_path, debate=False)
     assert out["ok"] is True
     assert out["symbol"] == "BTC-USD"
     assert out["name"] == "Bitcoin USD"
@@ -308,7 +312,7 @@ def test_run_desk_one_persona_abstains_others_still_run(monkeypatch,
     _patch_context(monkeypatch)
     monkeypatch.setattr(eng, "complete_json",
                         _fake_complete_json(fail=("technician",)))
-    out = run_desk("BTC-USD", data_root=tmp_path)
+    out = run_desk("BTC-USD", data_root=tmp_path, debate=False)
     assert out["ok"] is True
     by_name = {r["name"]: r for r in out["personas"]}
     tech = by_name["technician"]
@@ -342,7 +346,7 @@ def test_run_desk_garbage_persona_json_abstains(monkeypatch, tmp_path):
         return _fake_complete_json()(messages, model, **kwargs)
 
     monkeypatch.setattr(eng, "complete_json", fake)
-    out = run_desk("BTC-USD", data_root=tmp_path)
+    out = run_desk("BTC-USD", data_root=tmp_path, debate=False)
     by_name = {r["name"]: r for r in out["personas"]}
     assert by_name["news"]["abstained"] is True
     assert "invalid signal" in by_name["news"]["thesis"]
@@ -358,7 +362,7 @@ def test_run_desk_pm_failure_falls_back_to_mechanical_vote(monkeypatch,
     _patch_context(monkeypatch)
     monkeypatch.setattr(eng, "complete_json",
                         _fake_complete_json(fail=("pm",)))
-    out = run_desk("BTC-USD", data_root=tmp_path)
+    out = run_desk("BTC-USD", data_root=tmp_path, debate=False)
     pm = out["pm"]
     assert pm["mechanical"] is True
     assert pm["model"] == ""
@@ -381,7 +385,7 @@ def test_context_error_propagates_fail_loud(monkeypatch, tmp_path):
     monkeypatch.setattr(eng, "fetch_board", lambda d: _board())
     monkeypatch.setattr(eng, "fetch_market_movers", lambda d: _movers())
     with pytest.raises(RuntimeError, match="yahoo is on fire"):
-        run_desk("BTC-USD", data_root=tmp_path)
+        run_desk("BTC-USD", data_root=tmp_path, debate=False)
 
 
 def test_context_ok_false_raises_desk_context_error(monkeypatch, tmp_path):
@@ -395,21 +399,21 @@ def test_context_ok_false_raises_desk_context_error(monkeypatch, tmp_path):
     monkeypatch.setattr(eng, "fetch_board", lambda d: _board())
     monkeypatch.setattr(eng, "fetch_market_movers", lambda d: _movers())
     with pytest.raises(DeskContextError, match="detail"):
-        run_desk("ZZZ", data_root=tmp_path)
+        run_desk("ZZZ", data_root=tmp_path, debate=False)
 
     _patch_context(monkeypatch)
     monkeypatch.setattr(eng, "fetch_board",
                         lambda d: {"ok": False, "error": "all fetches "
                                                         "failed"})
     with pytest.raises(DeskContextError, match="board"):
-        run_desk("BTC-USD", data_root=tmp_path)
+        run_desk("BTC-USD", data_root=tmp_path, debate=False)
 
     monkeypatch.setattr(eng, "fetch_board", lambda d: _board())
     monkeypatch.setattr(eng, "fetch_market_movers",
                         lambda d: {"ok": False, "error": "screener "
                                                         "unreachable"})
     with pytest.raises(DeskContextError, match="movers"):
-        run_desk("BTC-USD", data_root=tmp_path)
+        run_desk("BTC-USD", data_root=tmp_path, debate=False)
 
 
 def test_personas_run_in_parallel(monkeypatch, tmp_path):
@@ -422,7 +426,7 @@ def test_personas_run_in_parallel(monkeypatch, tmp_path):
     barrier = threading.Barrier(len(PERSONAS))
     monkeypatch.setattr(eng, "complete_json",
                         _fake_complete_json(barrier=barrier))
-    out = run_desk("BTC-USD", data_root=tmp_path)
+    out = run_desk("BTC-USD", data_root=tmp_path, debate=False)
     assert out["ok"] is True
     assert out["abstained"] == 0, (
         "personas did not run concurrently (barrier timed out): "
@@ -436,7 +440,7 @@ def test_desk_report_events_journaled(monkeypatch, tmp_path):
     _patch_context(monkeypatch)
     monkeypatch.setattr(eng, "complete_json", _fake_complete_json())
     jr = Journal(tmp_path, "desk-test-hash")
-    run_desk("BTC-USD", data_root=tmp_path, journal=jr)
+    run_desk("BTC-USD", data_root=tmp_path, journal=jr, debate=False)
     events = Journal.read_events(tmp_path)
     kinds = [e["kind"] for e in events]
     assert kinds.count("AgentRunStarted") == 1
@@ -481,7 +485,8 @@ def test_on_event_progress_stream(monkeypatch, tmp_path):
     monkeypatch.setattr(eng, "complete_json", _fake_complete_json())
     seen: list[str] = []
     out = run_desk("BTC-USD", data_root=tmp_path,
-                   on_event=lambda ev: seen.append(ev["kind"]))
+                   on_event=lambda ev: seen.append(ev["kind"]),
+                   debate=False)
     assert "context" in seen
     assert seen.count("persona") == 6
     assert "pm" in seen
@@ -502,7 +507,8 @@ def test_cli_desk_json_shape(monkeypatch, tmp_path, capsys):
     import gold_desk.agent.desk as desk_pkg
     monkeypatch.setattr(desk_pkg, "run_desk",
                         lambda s, **k: run_desk(s, **{
-                            **k, "data_root": tmp_path}))
+                            **k, "data_root": tmp_path,
+                            "debate": False}))
     _patch_context(monkeypatch)
     monkeypatch.setattr(eng, "complete_json", _fake_complete_json())
     rc, out = _run_cli(["desk", "BTC-USD", "--json",
@@ -547,7 +553,8 @@ def test_cli_desk_human_output(monkeypatch, tmp_path, capsys):
     import gold_desk.agent.desk as desk_pkg
     monkeypatch.setattr(desk_pkg, "run_desk",
                         lambda s, **k: run_desk(s, **{
-                            **k, "data_root": tmp_path}))
+                            **k, "data_root": tmp_path,
+                            "debate": False}))
     _patch_context(monkeypatch)
     monkeypatch.setattr(eng, "complete_json", _fake_complete_json())
     rc, out = _run_cli(["desk", "BTC-USD",
@@ -747,7 +754,7 @@ def test_run_desk_passes_per_persona_max_tokens_to_complete_json(
             return dict(PM_REPLY)
         return dict(PERSONA_REPLIES[key])
     monkeypatch.setattr(eng, "complete_json", fake)
-    out = run_desk("btc", data_root=tmp_path)
+    out = run_desk("btc", data_root=tmp_path, debate=False)
     assert out["ok"] is True
     # the fundamentalist gets 4800; every other persona gets 2400
     assert seen["fundamentalist"] == 4800
@@ -791,7 +798,7 @@ def test_run_desk_fundamentalist_sees_trimmed_13f_in_prompt(
                     if system.startswith(marker)), None)
         return dict(PERSONA_REPLIES[key])
     monkeypatch.setattr(eng, "complete_json", fake)
-    out = run_desk("AAPL", data_root=tmp_path)
+    out = run_desk("AAPL", data_root=tmp_path, debate=False)
     assert out["ok"] is True
     user = captured["user"]
     # the trim happened: only 10 positions appear in the user message

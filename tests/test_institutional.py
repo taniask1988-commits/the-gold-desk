@@ -1282,7 +1282,12 @@ def test_engine_dead_xbrl_desk_still_runs_5_persona_context(monkeypatch,
         return {"signal": "bullish", "confidence": 70,
                 "thesis": "chart bullish.", "key_evidence": ["price up"]}
     monkeypatch.setattr(eng, "complete_json", fake)
-    out = eng.run_desk("AAPL", data_root=tmp_path)
+    # R2-3 — debate=False opts out of the new 6-phase flow so the legacy
+    # Phase 1 + PM contract (the test's scripted PM reply is the legacy
+    # {consensus, conviction, ...} shape, not the rewired PM's {action,
+    # entry_price, ...} shape). The rewired PM is exercised by
+    # tests/test_debate.py.
+    out = eng.run_desk("AAPL", data_root=tmp_path, debate=False)
     assert out["ok"] is True
     assert len(out["personas"]) == 6
     fund = [p for p in out["personas"] if p["name"] == "fundamentalist"][0]

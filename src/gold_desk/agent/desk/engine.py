@@ -57,11 +57,29 @@ from ...markets.institutional import (
 from ...ulid import new_ulid
 from ..budgets import Budget, BudgetExceeded
 from ..loop import resolve_models
-from .personas import DESK_TOOLS, PERSONAS, Persona
+from .personas import (
+    DESK_TOOLS,
+    PERSONAS,
+    Persona,
+    RESEARCHER_PERSONAS,
+    MANAGER_PERSONA,
+    TRADER_PERSONA,
+    DEBATOR_PERSONAS,
+)
 
 DEFAULT_TIMEOUT_S = 60.0          # per-persona / PM wall clock
 VALID_SIGNALS = ("bullish", "bearish", "neutral")
 VALID_CONSENSUS = ("bullish", "bearish", "neutral", "mixed")
+# R2-3 — debate persona wire-format enums (mirrors TradingAgents'
+# PortfolioRating + TraderAction enums in agents/schemas.py, but the
+# PM's 4-tier action is stricter than the bar's 5-tier rating: we add
+# ABSTAIN as the no-decision outcome the brief mandates when any
+# debator REJECTs, the bull+bear both return neutral, OR r:r < 1.0).
+VALID_ACTIONS = ("BUY", "SELL", "HOLD", "ABSTAIN")
+VALID_THESES = ("LONG", "SHORT", "NEUTRAL")
+VALID_CONVICTION_LABELS = ("LOW", "MED", "HIGH")
+VALID_VERDICTS = ("UPSIZE", "HOLD", "DOWNSIZE", "REJECT")
+VALID_HORIZONS = ("intraday", "swing", "position")
 
 # R2-1 fix — defect 1: per-persona max_tokens override. The desk-wide
 # default 2400 fits every persona EXCEPT the fundamentalist, whose
@@ -75,6 +93,13 @@ VALID_CONSENSUS = ("bullish", "bearish", "neutral", "mixed")
 PERSONA_DEFAULT_MAX_TOKENS = 2400
 PERSONA_MAX_TOKENS: dict[str, int] = {
     "fundamentalist": 4800,
+    # R2-3 — the manager/trader/PM produce larger structured payloads
+    # (research_memo with 4-5 arrays + the PM's full trade-decision
+    # artifact with 11 fields). Bumping to 3600 gives the JSON room to
+    # land without truncation. The debators stay at 2400 (their verdict
+    # is a small 3-field object).
+    "research_manager": 3600,
+    "trader": 3600,
 }
 
 
@@ -110,6 +135,69 @@ Return ONLY JSON: {"consensus": "bullish"|"bearish"|"neutral"|"mixed",
 "risk_flags": ["up to 5 short concrete flags"]}"""
 
 
+# R2-3 — the rewired PM (debate flow). System prompt for the PM that
+# synthesizes the full debate (research_memo + trader_plan + 3 debator
+# verdicts) into the final trade decision. Mirrors TradingAgents'
+# portfolio_manager.py:43-67 prompt structure (rating scale + research
+# plan + trader proposal + debate history + decisive call) with the
+# brief's mechanical-validation additions:
+PM_DEBATE_SYSTEM = """You are The Portfolio Manager of a six-analyst
+market desk (technician / macro / news / sentiment / risk /
+fundamentalist) PLUS an adversarial debate layer (bull_researcher +
+bear_researcher + research_manager + trader + 3 risk debators). The
+full debate has just completed; you synthesize it into the FINAL
+trade decision.
+
+Your job:
+1. Decide the action: BUY, SELL, HOLD, or ABSTAIN.
+   - BUY when the research memo thesis is LONG AND ≥2 debators verdict
+     UPSIZE/HOLD AND no debator REJECTs.
+   - SELL when the memo thesis is SHORT AND ≥2 debators verdict
+     DOWNSIZE/HOLD AND no debator REJECTs.
+   - HOLD when the memo thesis is NEUTRAL OR the debate is split.
+   - ABSTAIN when ANY debator REJECTs, OR the bull+bear both returned
+     neutral, OR the trader's r:r < 1.0.
+2. Carry over entry_price / stop_price / target_price / position_size_
+   pct from the trader's plan (do NOT invent new numbers).
+3. Calibrate conviction_label honestly: LOW / MED / HIGH.
+   - HIGH requires r:r ≥ 2.0 AND ≥2 supporting debator verdicts.
+   - MED requires r:r ≥ 1.5.
+   - LOW is default.
+4. List 2-3 kill_criteria — concrete, falsifiable events that would
+   invalidate the position (carry over from the research_memo if the
+   LLM leaves them empty).
+5. Set conviction 0-100 honestly (separate from conviction_label; this
+   is the LLM's gut number for the consensus strength).
+6. Name consensus: bullish/bearish/neutral/mixed (mapped from action:
+   BUY→bullish, SELL→bearish, HOLD→neutral, ABSTAIN→neutral).
+7. summary 2-3 sentences; disagreements one sentence; risk_flags up
+   to 5 short concrete flags.
+
+Hard rules:
+- Reason ONLY from the research_memo, trader_plan, debator_verdicts,
+  and market context provided. Do not invent numbers.
+- The harness will MECHANICALLY re-compute risk_reward_ratio from
+  entry/stop/target and DOWNGRADE conviction_label if your claimed
+  r:r drifts >0.01 from the mechanical value.
+- kill_criteria MUST be non-empty for BUY/SELL — the harness will
+  ABSTAIN the decision if you leave them empty.
+
+Return ONLY JSON: {"action": "BUY"|"SELL"|"HOLD"|"ABSTAIN",
+"entry_price": float|null, "stop_price": float|null,
+"target_price": float|null, "position_size_pct": float|null,
+"conviction_label": "LOW"|"MED"|"HIGH",
+"risk_reward_ratio": float|null,
+"kill_criteria": ["up to 3 falsifiable events"],
+"reasoning": "one sentence on the decision logic",
+"evidence_cited": [{"persona": "name", "claim": "quoted text",
+"source": "analyst_outputs|researcher_outputs|research_memo|"
+"trader_plan|debator_verdicts|verified_snapshot"}],
+"consensus": "bullish"|"bearish"|"neutral"|"mixed",
+"conviction": 0-100, "summary": "2-3 sentences",
+"disagreements": "one sentence on where the desk splits",
+"risk_flags": ["up to 5 short concrete flags"]}"""
+
+
 # ------------------------------------------------------------- entry point
 
 def run_desk(
@@ -122,13 +210,41 @@ def run_desk(
     max_model_fallbacks: int = 2,
     on_event: Callable[[dict], None] | None = None,
     personas: tuple[Persona, ...] | list[Persona] | None = None,
+    debate: bool = True,
 ) -> dict:
-    """Run the 5-persona desk + PM synthesis for one symbol.
+    """Run the multi-analyst desk + PM synthesis for one symbol.
+
+    R2-3 — adversarial debate + execution architecture (judged vs
+    TradingAgents v0.3.1 tradingagents/agents/). When debate=True
+    (the default), runs the full 6-phase flow:
+
+      Phase 1: 6 analyst personas in parallel (unchanged from R2-1)
+      Phase 2: bull_researcher + bear_researcher in parallel
+               (cross-examine Phase 1 outputs; cite specific analyst
+               claims; verified_snapshot conflict-flag applies to
+               their theses too)
+      Phase 3: research_manager (synthesizes Phase 2 into a memo with
+               thesis/conviction/supporting_evidence/counter_evidence/
+               kill_criteria)
+      Phase 4: trader (turns the memo into entry/stop/target/size +
+               mechanical r:r re-compute)
+      Phase 5: 3 risk debators in parallel (aggressive/conservative/
+               neutral — each takes the trader's plan and argues for/
+               against from their risk posture; output verdict +
+               reasoning + evidence_cited)
+      Phase 6: PM (rewired; synthesizes research_memo + trader_plan +
+               3 debator verdicts into the final trade-decision artifact
+               with mechanical validation: r:r re-compute, conviction
+               calibration, abstention discipline)
+
+    When debate=False, runs the legacy Phase 1 + PM flow (used by the
+    pre-R2-3 test_desk.py tests for backward-compat coverage).
 
     Raises DeskContextError (or whatever the markets plane raised) when
     the context gather fails — fail loud, never five silent neutrals.
     Never raises for LLM failures: personas abstain, the PM falls back
-    to a mechanical vote.
+    to a mechanical vote (debate=False path) or to an ABSTAIN decision
+    (debate=True path).
     """
     jr = journal or default_journal(data_root)
     run_id = new_ulid()
@@ -138,8 +254,20 @@ def run_desk(
     chain = models[: 1 + max_model_fallbacks]
     primary = models[0]
 
-    budget = Budget(data_root, max_steps=len(persona_list) + 2,
-                    max_minutes=10.0, max_tool_calls=8)
+    # R2-3 — budget grows to fit the full debate flow: 6 analysts + 2
+    # researchers + 1 manager + 1 trader + 3 debators + 1 PM = 14 LLM
+    # calls (vs the legacy 7). The 6-phase wall clock stays under 6
+    # minutes (per the brief): 6 parallel phases × 60s per-persona
+    # timeout = 360s worst case. The legacy debate=False path uses the
+    # original budget of len(persona_list) + 2 = 8.
+    if debate:
+        budget = Budget(data_root,
+                        max_steps=len(persona_list) + 2 + len(RESEARCHER_PERSONAS)
+                                  + 1 + 1 + len(DEBATOR_PERSONAS),
+                        max_minutes=10.0, max_tool_calls=8)
+    else:
+        budget = Budget(data_root, max_steps=len(persona_list) + 2,
+                        max_minutes=10.0, max_tool_calls=8)
 
     def _emit(kind: str, payload: dict) -> None:
         try:
@@ -323,6 +451,356 @@ def run_desk(
     personas_out.sort(key=lambda r: order.get(r["name"], 99))
 
     # ---- 3. PM synthesis (one more call; mechanical fallback on failure)
+    #
+    # R2-3 — when debate=True (the default), Phase 1 is followed by the
+    # full adversarial debate + execution flow (Phases 2-5) BEFORE the
+    # rewired PM. The rewired PM synthesizes research_memo + trader_plan
+    # + 3 debator verdicts into the final trade-decision artifact with
+    # mechanical validation (r:r re-compute, conviction calibration,
+    # abstention discipline). When debate=False, the legacy PM call runs
+    # over just the 6 analyst outputs + the base_block (the pre-R2-3
+    # contract preserved for the test_desk.py backward-compat suite).
+    if debate:
+        # ---- Phase 2: bull_researcher + bear_researcher in parallel --
+        # both see the 6 analyst outputs (added to the context as the
+        # analyst_outputs slice). Both theses are flag-checked against
+        # the verified_snapshot (machine-checked conflict-flag discipline
+        # extended to the researchers — the brief's ask).
+        context["analyst_outputs"] = personas_out
+        researchers_out: list[dict] = []
+        try:
+            with ThreadPoolExecutor(max_workers=len(RESEARCHER_PERSONAS)) as ex:
+                futures = {}
+                for p in RESEARCHER_PERSONAS:
+                    user = _persona_user_msg(p, context, detail)
+                    max_tok = PERSONA_MAX_TOKENS.get(
+                        p.name, PERSONA_DEFAULT_MAX_TOKENS)
+                    futures[ex.submit(_run_persona, p, user, chain, budget,
+                                      timeout, max_tok,
+                                      verified_snapshot)] = p
+                for fut in as_completed(futures):
+                    p = futures[fut]
+                    try:
+                        out = fut.result()
+                    except BudgetExceeded:
+                        raise
+                    except Exception as e:  # noqa: BLE001
+                        out = _abstain_result(p, "", e)
+                    # R2-3 — extend the verified_snapshot conflict-flag
+                    # to the researchers' theses (the brief: "the
+                    # verified_snapshot conflict-flag discipline MUST
+                    # apply to the new personas' outputs (bull_researcher's
+                    # thesis, bear_researcher's thesis, debators'
+                    # reasoning)").
+                    claim_conflicts: list[dict] = []
+                    if (not out.get("abstained")
+                            and verified_snapshot.get("ok")
+                            and "verified_snapshot" in p.tools):
+                        try:
+                            claim_conflicts = _flag_claim_conflicts(
+                                out.get("thesis", ""), verified_snapshot)
+                        except Exception:  # noqa: BLE001
+                            claim_conflicts = []
+                    if claim_conflicts:
+                        out["claim_conflicts"] = claim_conflicts
+                    researchers_out.append(out)
+                    sp = {"run_id": run_id, "step": "researcher",
+                          "persona": p.name, "signal": out["signal"],
+                          "confidence": out["confidence"],
+                          "abstained": out["abstained"],
+                          "model": out.get("model") or "",
+                          "ms": out["latency_ms"]}
+                    if claim_conflicts:
+                        sp["claim_conflicts"] = claim_conflicts
+                    jr.emit("AgentStep", sp)
+                    _emit("persona", {"name": p.name,
+                                      "signal": out["signal"],
+                                      "confidence": out["confidence"],
+                                      "abstained": out["abstained"]})
+        except BudgetExceeded as e:
+            jr.emit("BudgetExceeded", {"run_id": run_id, "reason": str(e)})
+            jr.emit("AgentRunFinished", {
+                "run_id": run_id, "steps": budget.steps,
+                "tool_calls": 3, "elapsed_ms": int(
+                    (time.monotonic() - started) * 1000),
+                "status": "budget", "detail": str(e)})
+            return {"ok": False, "symbol": str(symbol),
+                    "status": "budget", "error": str(e),
+                    "run_id": run_id}
+        order_r = {p.name: i for i, p in enumerate(RESEARCHER_PERSONAS)}
+        researchers_out.sort(key=lambda r: order_r.get(r["name"], 99))
+
+        # ---- Phase 3: research_manager (single call) — synthesizes
+        # bull + bear into a research memo with thesis/conviction/
+        # supporting_evidence/counter_evidence/kill_criteria. The
+        # researcher_outputs slice is added to the context for the
+        # manager's user_msg. Abstention: the manager has no verified_
+        # snapshot entitlement, so no claim-conflict flag is applied.
+        context["researcher_outputs"] = researchers_out
+        try:
+            user = _persona_user_msg(MANAGER_PERSONA, context, detail)
+            max_tok = PERSONA_MAX_TOKENS.get(
+                MANAGER_PERSONA.name, PERSONA_DEFAULT_MAX_TOKENS)
+            research_memo = _run_persona(MANAGER_PERSONA, user, chain,
+                                         budget, timeout, max_tok,
+                                         verified_snapshot)
+        except BudgetExceeded as e:
+            jr.emit("BudgetExceeded", {"run_id": run_id, "reason": str(e)})
+            jr.emit("AgentRunFinished", {
+                "run_id": run_id, "steps": budget.steps,
+                "tool_calls": 3, "elapsed_ms": int(
+                    (time.monotonic() - started) * 1000),
+                "status": "budget", "detail": str(e)})
+            return {"ok": False, "symbol": str(symbol),
+                    "status": "budget", "error": str(e),
+                    "run_id": run_id}
+        except Exception as e:  # noqa: BLE001 — abstain, never die
+            research_memo = _abstain_manager_result(MANAGER_PERSONA, "", e, 0.0)
+        jr.emit("AgentStep", {
+            "run_id": run_id, "step": "research_manager",
+            "persona": MANAGER_PERSONA.name,
+            "thesis": research_memo.get("thesis"),
+            "conviction": research_memo.get("conviction"),
+            "abstained": research_memo.get("abstained"),
+            "model": research_memo.get("model") or "",
+            "ms": research_memo.get("latency_ms", 0),
+        })
+        _emit("persona", {"name": MANAGER_PERSONA.name,
+                          "thesis": research_memo.get("thesis"),
+                          "conviction": research_memo.get("conviction"),
+                          "abstained": research_memo.get("abstained")})
+
+        # ---- Phase 4: trader (single call) — turns the research_memo
+        # into a concrete trade plan with entry/stop/target/size + the
+        # harness mechanically re-computes r:r. The research_memo slice
+        # is added to the context for the trader's user_msg.
+        context["research_memo"] = research_memo
+        try:
+            user = _persona_user_msg(TRADER_PERSONA, context, detail)
+            max_tok = PERSONA_MAX_TOKENS.get(
+                TRADER_PERSONA.name, PERSONA_DEFAULT_MAX_TOKENS)
+            trader_plan = _run_persona(TRADER_PERSONA, user, chain,
+                                        budget, timeout, max_tok,
+                                        verified_snapshot)
+        except BudgetExceeded as e:
+            jr.emit("BudgetExceeded", {"run_id": run_id, "reason": str(e)})
+            jr.emit("AgentRunFinished", {
+                "run_id": run_id, "steps": budget.steps,
+                "tool_calls": 3, "elapsed_ms": int(
+                    (time.monotonic() - started) * 1000),
+                "status": "budget", "detail": str(e)})
+            return {"ok": False, "symbol": str(symbol),
+                    "status": "budget", "error": str(e),
+                    "run_id": run_id}
+        except Exception as e:  # noqa: BLE001 — abstain, never die
+            trader_plan = _abstain_trader_result(TRADER_PERSONA, "", e, 0.0)
+        # mechanical r:r re-compute (the brief: "r:r is mechanical"). The
+        # trader's claimed r:r is preserved in `trader_plan["risk_reward_
+        # ratio"]`; the engine records the mechanically-recomputed value
+        # in `trader_plan["risk_reward_ratio_computed"]` for the PM to
+        # cross-check conviction calibration.
+        trader_plan["risk_reward_ratio_computed"] = _compute_rr(
+            trader_plan.get("action"),
+            trader_plan.get("entry_price"),
+            trader_plan.get("stop_price"),
+            trader_plan.get("target_price"))
+        jr.emit("AgentStep", {
+            "run_id": run_id, "step": "trader",
+            "persona": TRADER_PERSONA.name,
+            "action": trader_plan.get("action"),
+            "risk_reward_ratio": trader_plan.get("risk_reward_ratio"),
+            "risk_reward_ratio_computed":
+                trader_plan.get("risk_reward_ratio_computed"),
+            "abstained": trader_plan.get("abstained"),
+            "model": trader_plan.get("model") or "",
+            "ms": trader_plan.get("latency_ms", 0),
+        })
+        _emit("persona", {"name": TRADER_PERSONA.name,
+                          "action": trader_plan.get("action"),
+                          "rr": trader_plan.get("risk_reward_ratio"),
+                          "abstained": trader_plan.get("abstained")})
+
+        # ---- Phase 5: 3 risk debators in parallel — each takes the
+        # trader's plan and argues for/against it from their risk
+        # posture. The trader_plan slice is added to the context; the
+        # debators also see the research_memo + verified_snapshot
+        # slices (their entitlements). Each debator's reasoning is
+        # flag-checked against the verified_snapshot (the brief's
+        # machine-check extension to debators' reasoning).
+        context["trader_plan"] = trader_plan
+        debators_out: list[dict] = []
+        try:
+            with ThreadPoolExecutor(max_workers=len(DEBATOR_PERSONAS)) as ex:
+                futures = {}
+                for p in DEBATOR_PERSONAS:
+                    user = _persona_user_msg(p, context, detail)
+                    max_tok = PERSONA_MAX_TOKENS.get(
+                        p.name, PERSONA_DEFAULT_MAX_TOKENS)
+                    futures[ex.submit(_run_persona, p, user, chain, budget,
+                                      timeout, max_tok,
+                                      verified_snapshot)] = p
+                for fut in as_completed(futures):
+                    p = futures[fut]
+                    try:
+                        out = fut.result()
+                    except BudgetExceeded:
+                        raise
+                    except Exception as e:  # noqa: BLE001
+                        out = _abstain_debator_result(p, "", e, 0.0)
+                    # R2-3 — flag the debator's reasoning against the
+                    # verified_snapshot (the brief's machine-check
+                    # extension). The reasoning field carries the
+                    # debator's prose; the evidence_cited field carries
+                    # the structured citations.
+                    claim_conflicts = []
+                    if (not out.get("abstained")
+                            and verified_snapshot.get("ok")
+                            and "verified_snapshot" in p.tools):
+                        try:
+                            claim_conflicts = _flag_claim_conflicts(
+                                out.get("reasoning", ""),
+                                verified_snapshot)
+                        except Exception:  # noqa: BLE001
+                            claim_conflicts = []
+                    if claim_conflicts:
+                        out["claim_conflicts"] = claim_conflicts
+                    debators_out.append(out)
+                    sp = {"run_id": run_id, "step": "debator",
+                          "persona": p.name,
+                          "verdict": out.get("verdict"),
+                          "abstained": out.get("abstained"),
+                          "model": out.get("model") or "",
+                          "ms": out.get("latency_ms", 0)}
+                    if claim_conflicts:
+                        sp["claim_conflicts"] = claim_conflicts
+                    jr.emit("AgentStep", sp)
+                    _emit("persona", {"name": p.name,
+                                      "verdict": out.get("verdict"),
+                                      "abstained": out.get("abstained")})
+        except BudgetExceeded as e:
+            jr.emit("BudgetExceeded", {"run_id": run_id, "reason": str(e)})
+            jr.emit("AgentRunFinished", {
+                "run_id": run_id, "steps": budget.steps,
+                "tool_calls": 3, "elapsed_ms": int(
+                    (time.monotonic() - started) * 1000),
+                "status": "budget", "detail": str(e)})
+            return {"ok": False, "symbol": str(symbol),
+                    "status": "budget", "error": str(e),
+                    "run_id": run_id}
+        order_d = {p.name: i for i, p in enumerate(DEBATOR_PERSONAS)}
+        debators_out.sort(key=lambda r: order_d.get(r["name"], 99))
+        context["debator_verdicts"] = debators_out
+
+        # ---- Phase 6: PM (rewired) — synthesizes research_memo +
+        # trader_plan + 3 debator verdicts into the final trade-decision
+        # artifact with mechanical validation (r:r re-compute,
+        # conviction calibration, abstention discipline).
+        try:
+            pm = _run_pm_debate(personas_out, researchers_out,
+                                research_memo, trader_plan, debators_out,
+                                base_block, detail, chain, budget, timeout)
+        except BudgetExceeded as e:
+            jr.emit("BudgetExceeded", {"run_id": run_id, "reason": str(e)})
+            jr.emit("AgentRunFinished", {
+                "run_id": run_id, "steps": budget.steps,
+                "tool_calls": 3, "elapsed_ms": int(
+                    (time.monotonic() - started) * 1000),
+                "status": "budget", "detail": str(e)})
+            return {"ok": False, "symbol": str(symbol),
+                    "status": "budget", "error": str(e),
+                    "run_id": run_id}
+        jr.emit("AgentStep", {
+            "run_id": run_id, "step": "pm",
+            "consensus": pm.get("consensus"),
+            "conviction": pm.get("conviction"),
+            "action": pm.get("action"),
+            "conviction_label": pm.get("conviction_label"),
+            "model": pm.get("model") or "",
+            "ms": pm.get("latency_ms", 0),
+        })
+        _emit("pm", {"consensus": pm.get("consensus"),
+                     "conviction": pm.get("conviction"),
+                     "action": pm.get("action")})
+
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        report = {
+            "ok": True,
+            "symbol": detail.get("symbol") or str(symbol),
+            "requested": str(symbol),
+            "name": detail.get("name"),
+            "sector": detail.get("sector"),
+            "as_of": _now_iso(),
+            "price": detail.get("price"),
+            "change_pct": detail.get("change_pct"),
+            "range_5d_change_pct": detail.get("range_5d_change_pct"),
+            "quant_indicators": quant_indicators,
+            "verified_snapshot": verified_snapshot,
+            "claim_conflicts_count": sum(
+                len(r.get("claim_conflicts") or [])
+                for r in (*personas_out, *researchers_out, *debators_out)),
+            "personas": personas_out,
+            "researchers": researchers_out,
+            "research_memo": research_memo,
+            "trader_plan": trader_plan,
+            "debators": debators_out,
+            "pm": pm,
+            "abstained": sum(1 for r in (*personas_out, *researchers_out,
+                                          trader_plan, *debators_out)
+                             if r.get("abstained")),
+            "model": primary,
+            "run_id": run_id,
+            "elapsed_ms": elapsed_ms,
+        }
+
+        jr.emit("DeskReport", {
+            "run_id": run_id,
+            "symbol": report["symbol"],
+            "name": report["name"],
+            "price": report["price"],
+            "personas": [
+                {"name": r["name"], "signal": r["signal"],
+                 "confidence": r["confidence"], "abstained": r["abstained"],
+                 "model": r.get("model") or ""}
+                for r in personas_out
+            ],
+            "researchers": [
+                {"name": r["name"], "signal": r["signal"],
+                 "confidence": r["confidence"], "abstained": r["abstained"],
+                 "model": r.get("model") or ""}
+                for r in researchers_out
+            ],
+            "research_memo": {"thesis": research_memo.get("thesis"),
+                              "conviction": research_memo.get("conviction"),
+                              "abstained": research_memo.get("abstained")},
+            "trader_plan": {"action": trader_plan.get("action"),
+                            "rr": trader_plan.get("risk_reward_ratio"),
+                            "rr_computed":
+                                trader_plan.get("risk_reward_ratio_computed"),
+                            "abstained": trader_plan.get("abstained")},
+            "debators": [
+                {"name": r["name"], "verdict": r.get("verdict"),
+                 "abstained": r.get("abstained"),
+                 "model": r.get("model") or ""}
+                for r in debators_out
+            ],
+            "pm": {"consensus": pm.get("consensus"),
+                   "conviction": pm.get("conviction"),
+                   "action": pm.get("action"),
+                   "conviction_label": pm.get("conviction_label"),
+                   "mechanical": pm.get("mechanical", False)},
+            "elapsed_ms": elapsed_ms,
+        }, model_id=primary)
+        jr.emit("AgentRunFinished", {
+            "run_id": run_id,
+            "steps": len(persona_list) + 1 + len(RESEARCHER_PERSONAS) + 1
+            + 1 + len(DEBATOR_PERSONAS),
+            "tool_calls": 3, "elapsed_ms": elapsed_ms, "status": "ok",
+            "detail": f"{report['abstained']} abstention(s)",
+        })
+        return report
+
+    # ---- legacy PM path (debate=False) — backward-compat with the
+    # pre-R2-3 test_desk.py suite
     try:
         pm = _run_pm(personas_out, base_block, detail, chain, budget,
                      timeout)
@@ -405,29 +883,80 @@ def _run_persona(persona: Persona, user_msg: str, models: list[str],
     signature symmetry with the caller's submit loop; the claim-
     conflict flag is run by the caller (the loop has access to the
     persona's tools list and the snapshot) so this function stays
-    LLM-pure."""
+    LLM-pure.
+
+    R2-3 — dispatches the parsed JSON to the right validator by
+    persona.kind (analyst | researcher | manager | trader | debator).
+    Each kind has its own wire format the LLM must produce; a parse
+    failure on any kind becomes an abstention with the kind-specific
+    envelope (researcher/analyst share the signal contract envelope;
+    manager/trader/debator have their own shapes the engine consumes
+    downstream).
+
+    R2-3 fix — double-increment bug: the prior pattern recorded a step
+    in the try block AND in the except block, double-counting any
+    validator failure. The new pattern: budget.record_step is called
+    ONCE per persona call (right after the LLM completes, BEFORE the
+    validator runs). The validator is OUTSIDE the LLM try/except — a
+    validation ValueError becomes an abstention without re-recording
+    the step. This matters because the new manager/trader/debator
+    personas produce more validation errors than the legacy 6 analyst
+    personas (which never raised under the analyst validator)."""
     t0 = time.monotonic()
     messages = [
         {"role": "system", "content": persona.system},
         {"role": "user", "content": user_msg},
     ]
     model_used = ""
+    parsed: dict | None = None
     try:
         budget.check_step()
         parsed, model_used = _complete_json_with_fallback(
             messages, models, timeout, max_tokens=max_tokens)
-        budget.record_step(time.monotonic() - t0)
-        return _persona_result(persona, parsed, model_used,
-                               time.monotonic() - t0)
     except BudgetExceeded:
         raise
-    except Exception as e:  # noqa: BLE001 — abstain, never die
+    except Exception as e:  # noqa: BLE001 — LLM call failed, abstain
+        # record the step ONCE — the LLM call attempt itself counts
         try:
             budget.record_step(time.monotonic() - t0)
         except Exception:
             pass
-        return _abstain_result(persona, model_used, e,
-                               time.monotonic() - t0)
+        elapsed = time.monotonic() - t0
+        kind = getattr(persona, "kind", "analyst")
+        if kind == "manager":
+            return _abstain_manager_result(persona, model_used, e, elapsed)
+        if kind == "trader":
+            return _abstain_trader_result(persona, model_used, e, elapsed)
+        if kind == "debator":
+            return _abstain_debator_result(persona, model_used, e, elapsed)
+        return _abstain_result(persona, model_used, e, elapsed)
+    # LLM succeeded — record the step ONCE, then run the kind-specific
+    # validator OUTSIDE the try/except so a validation ValueError
+    # becomes an abstention without double-counting the step.
+    try:
+        budget.record_step(time.monotonic() - t0)
+    except Exception:
+        pass
+    elapsed = time.monotonic() - t0
+    kind = getattr(persona, "kind", "analyst")
+    try:
+        if kind in ("analyst", "researcher"):
+            return _persona_result(persona, parsed, model_used, elapsed)
+        if kind == "manager":
+            return _manager_result(persona, parsed, model_used, elapsed)
+        if kind == "trader":
+            return _trader_result(persona, parsed, model_used, elapsed)
+        if kind == "debator":
+            return _debator_result(persona, parsed, model_used, elapsed)
+        return _persona_result(persona, parsed, model_used, elapsed)
+    except Exception as e:  # noqa: BLE001 — validator failed, abstain
+        if kind == "manager":
+            return _abstain_manager_result(persona, model_used, e, elapsed)
+        if kind == "trader":
+            return _abstain_trader_result(persona, model_used, e, elapsed)
+        if kind == "debator":
+            return _abstain_debator_result(persona, model_used, e, elapsed)
+        return _abstain_result(persona, model_used, e, elapsed)
 
 
 def _complete_json_with_fallback(messages: list[dict], models: list[str],
@@ -646,6 +1175,784 @@ def _mechanical_pm(personas_out: list[dict], error: Exception) -> dict:
                     f"signals."),
         "disagreements": "not assessed (PM unavailable) — desk split: "
                          + spread,
+        "risk_flags": [f"pm synthesis unavailable: {error}"[:160]],
+    }
+
+
+# ====================================================== R2-3 DEBATE PERSONAS
+# The 5 kind-specific result-builders + abstain envelopes for the new
+# debate personas (manager / trader / debator). The 'researcher' kind
+# (bull/bear) reuses _persona_result + _abstain_result — it shares the
+# analyst signal contract (signal + confidence + thesis + key_evidence)
+# so the verified_snapshot conflict-flag (already wired into the Phase
+# 1 loop) works on its thesis without modification. The other 3 kinds
+# have their own wire formats the engine consumes downstream.
+# ====================================================== R2-3 DEBATE PERSONAS
+
+def _manager_result(persona: Persona, parsed: dict, model: str,
+                    elapsed: float) -> dict:
+    """Validate the research_manager's research_memo dict.
+
+    Wire format (from _RESEARCH_MANAGER system prompt):
+      {thesis: LONG|SHORT|NEUTRAL, conviction: LOW|MED|HIGH,
+       supporting_evidence: list[str], counter_evidence: list[str],
+       kill_criteria: list[str], summary: str}
+    """
+    thesis = str(parsed.get("thesis", "")).strip().upper()
+    if thesis not in VALID_THESES:
+        raise ValueError(f"invalid thesis {parsed.get('thesis')!r}")
+    conviction = str(parsed.get("conviction", "")).strip().upper()
+    if conviction not in VALID_CONVICTION_LABELS:
+        raise ValueError(f"invalid conviction {parsed.get('conviction')!r}")
+    summary = str(parsed.get("summary", "")).strip()[:400]
+    if not summary:
+        raise ValueError("empty summary")
+    sup = _coerce_str_list(parsed.get("supporting_evidence"), "supporting_evidence")
+    cntr = _coerce_str_list(parsed.get("counter_evidence"), "counter_evidence")
+    kc = _coerce_str_list(parsed.get("kill_criteria"), "kill_criteria")
+    return {
+        "name": persona.name,
+        "role": persona.role,
+        "kind": "manager",
+        "thesis": thesis,
+        "conviction": conviction,           # LOW/MED/HIGH label
+        "supporting_evidence": sup,
+        "counter_evidence": cntr,
+        "kill_criteria": kc,
+        "summary": summary,
+        "abstained": False,
+        "model": model,
+        "latency_ms": int(elapsed * 1000),
+    }
+
+
+def _trader_result(persona: Persona, parsed: dict, model: str,
+                   elapsed: float) -> dict:
+    """Validate the trader's plan dict.
+
+    Wire format (from _TRADER system prompt):
+      {action: BUY|SELL|HOLD, entry_price: float, stop_price: float,
+       target_price: float, position_size_pct: float,
+       time_horizon: intraday|swing|position, risk_reward_ratio: float,
+       reasoning: str}
+
+    The harness MECHANICALLY re-computes risk_reward_ratio in run_desk
+    (after this validator returns) and records it as
+    risk_reward_ratio_computed. This validator only checks the LLM's
+    claimed value is numeric and within the geometry for the action.
+    """
+    action = str(parsed.get("action", "")).strip().upper()
+    if action not in ("BUY", "SELL", "HOLD"):
+        raise ValueError(f"invalid action {parsed.get('action')!r}")
+    entry = _coerce_float(parsed.get("entry_price"), "entry_price",
+                          allow_none=(action == "HOLD"))
+    stop = _coerce_float(parsed.get("stop_price"), "stop_price",
+                         allow_none=(action == "HOLD"))
+    target = _coerce_float(parsed.get("target_price"), "target_price",
+                           allow_none=(action == "HOLD"))
+    size = _coerce_float(parsed.get("position_size_pct"),
+                         "position_size_pct", allow_none=True,
+                         min_v=0.0, max_v=1.0)
+    horizon = str(parsed.get("time_horizon", "")).strip().lower()
+    if horizon not in VALID_HORIZONS:
+        raise ValueError(f"invalid time_horizon {parsed.get('time_horizon')!r}")
+    claimed_rr = parsed.get("risk_reward_ratio")
+    rr = None
+    if claimed_rr is not None:
+        try:
+            rr = float(claimed_rr)
+        except (TypeError, ValueError):
+            raise ValueError(f"risk_reward_ratio not numeric: "
+                             f"{claimed_rr!r}") from None
+    reasoning = str(parsed.get("reasoning", "")).strip()[:400]
+    if not reasoning:
+        raise ValueError("empty reasoning")
+    # geometry check: BUY target > entry > stop; SELL stop > entry > target
+    if action == "BUY" and None not in (entry, stop, target):
+        if not (target > entry > stop):
+            raise ValueError(f"BUY geometry invalid: target {target} > "
+                             f"entry {entry} > stop {stop} failed")
+    elif action == "SELL" and None not in (entry, stop, target):
+        if not (stop > entry > target):
+            raise ValueError(f"SELL geometry invalid: stop {stop} > "
+                             f"entry {entry} > target {target} failed")
+    return {
+        "name": persona.name,
+        "role": persona.role,
+        "kind": "trader",
+        "action": action,
+        "entry_price": entry,
+        "stop_price": stop,
+        "target_price": target,
+        "position_size_pct": size,
+        "time_horizon": horizon,
+        "risk_reward_ratio": rr,           # LLM's claimed value
+        # risk_reward_ratio_computed is filled in by run_desk after
+        # this validator returns (mechanical re-compute over entry/
+        # stop/target for the action).
+        "reasoning": reasoning,
+        "abstained": False,
+        "model": model,
+        "latency_ms": int(elapsed * 1000),
+    }
+
+
+def _debator_result(persona: Persona, parsed: dict, model: str,
+                    elapsed: float) -> dict:
+    """Validate a risk debator's verdict dict.
+
+    Wire format (from _AGGRESSIVE_DEBATOR et al.):
+      {verdict: UPSIZE|HOLD|DOWNSIZE|REJECT, reasoning: str,
+       evidence_cited: list[str]}
+    """
+    verdict = str(parsed.get("verdict", "")).strip().upper()
+    if verdict not in VALID_VERDICTS:
+        raise ValueError(f"invalid verdict {parsed.get('verdict')!r}")
+    reasoning = str(parsed.get("reasoning", "")).strip()[:400]
+    if not reasoning:
+        raise ValueError("empty reasoning")
+    ev = _coerce_str_list(parsed.get("evidence_cited"), "evidence_cited")
+    return {
+        "name": persona.name,
+        "role": persona.role,
+        "kind": "debator",
+        "verdict": verdict,
+        "reasoning": reasoning,
+        "evidence_cited": ev,
+        "abstained": False,
+        "model": model,
+        "latency_ms": int(elapsed * 1000),
+    }
+
+
+def _abstain_manager_result(persona: Persona, model: str,
+                            error: Exception, elapsed: float) -> dict:
+    """The research_manager abstention envelope — thesis NEUTRAL,
+    conviction LOW, empty evidence + kill_criteria, abstained=True."""
+    return {
+        "name": persona.name,
+        "role": persona.role,
+        "kind": "manager",
+        "thesis": "NEUTRAL",
+        "conviction": "LOW",
+        "supporting_evidence": [],
+        "counter_evidence": [],
+        "kill_criteria": [],
+        "summary": f"abstained: {error}"[:400],
+        "abstained": True,
+        "model": model,
+        "latency_ms": int(elapsed * 1000),
+    }
+
+
+def _abstain_trader_result(persona: Persona, model: str,
+                           error: Exception, elapsed: float) -> dict:
+    """The trader abstention envelope — action HOLD, no entry/stop/
+    target, no size, abstained=True."""
+    return {
+        "name": persona.name,
+        "role": persona.role,
+        "kind": "trader",
+        "action": "HOLD",
+        "entry_price": None,
+        "stop_price": None,
+        "target_price": None,
+        "position_size_pct": None,
+        "time_horizon": "swing",
+        "risk_reward_ratio": None,
+        "risk_reward_ratio_computed": None,
+        "reasoning": f"abstained: {error}"[:400],
+        "abstained": True,
+        "model": model,
+        "latency_ms": int(elapsed * 1000),
+    }
+
+
+def _abstain_debator_result(persona: Persona, model: str,
+                            error: Exception, elapsed: float) -> dict:
+    """The risk debator abstention envelope — verdict HOLD (the
+    neutral-of-neutral stance), empty evidence_cited, abstained=True."""
+    return {
+        "name": persona.name,
+        "role": persona.role,
+        "kind": "debator",
+        "verdict": "HOLD",
+        "reasoning": f"abstained: {error}"[:400],
+        "evidence_cited": [],
+        "abstained": True,
+        "model": model,
+        "latency_ms": int(elapsed * 1000),
+    }
+
+
+def _coerce_str_list(value, field_name: str, max_items: int = 4,
+                     max_len: int = 200) -> list[str]:
+    """Coerce a JSON-decoded list-of-strings field into a clean list.
+    Missing → []; non-list → ValueError; each item coerced to str and
+    truncated; empty strings dropped."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{field_name} must be a list, got "
+                         f"{type(value).__name__}")
+    return [str(v).strip()[:max_len] for v in value
+            if str(v).strip()][:max_items]
+
+
+def _coerce_float(value, field_name: str, allow_none: bool = False,
+                   min_v: float | None = None,
+                   max_v: float | None = None) -> float | None:
+    """Coerce a JSON-decoded numeric field into a clean float.
+    None when allow_none and value is null/empty/placeholder string."""
+    if value is None or (isinstance(value, str)
+                         and value.strip().lower() in
+                         ("", "none", "n/a", "na", "null", "nil", "-",
+                          "tbd", "unknown")):
+        if allow_none:
+            return None
+        raise ValueError(f"{field_name} is required but got {value!r}")
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field_name} not numeric: {value!r}") from None
+    if min_v is not None and v < min_v:
+        raise ValueError(f"{field_name} {v} < min {min_v}")
+    if max_v is not None and v > max_v:
+        raise ValueError(f"{field_name} {v} > max {max_v}")
+    return v
+
+
+# ----------------------------------------------------- R2-3 MECHANICAL HELPERS
+
+def _compute_rr(action: str | None, entry: float | None,
+                stop: float | None,
+                target: float | None) -> float | None:
+    """Mechanically re-compute the risk/reward ratio from the geometry.
+
+    For BUY  (long):  r:r = (target - entry) / (entry - stop)
+    For SELL (short): r:r = (entry - target) / (stop  - entry)
+    For HOLD/ABSTAIN:  None (no trade geometry).
+    For invalid geometry (entry==stop, target on wrong side, any None
+    on the geometry side): None. The PM treats None as r:r < 1.0 → ABSTAIN.
+
+    The brief: "r:r is mechanical: (target-entry)/(entry-stop) for
+    longs, flip for shorts". This function is the canonical re-compute
+    the PM uses to validate the trader's claimed r:r and to drive
+    conviction calibration.
+    """
+    if action not in ("BUY", "SELL"):
+        return None
+    if not all(isinstance(v, (int, float))
+               and not isinstance(v, bool)
+               for v in (entry, stop, target)):
+        return None
+    if action == "BUY":
+        denom = entry - stop
+        if denom <= 0:
+            return None
+        num = target - entry
+        if num <= 0:
+            return None
+        return round(num / denom, 4)
+    # SELL
+    denom = stop - entry
+    if denom <= 0:
+        return None
+    num = entry - target
+    if num <= 0:
+        return None
+    return round(num / denom, 4)
+
+
+def _supporting_verdicts(debators_out: list[dict], action: str) -> int:
+    """Count how many debators support the trader's action.
+
+    For BUY:  supporting = UPSIZE or HOLD (the plan as proposed or more)
+    For SELL: supporting = UPSIZE or HOLD (more of the short or as-is)
+    For HOLD/ABSTAIN: 0 (no supporting debators needed)
+
+    The brief: "high conviction requires r:r ≥ 2.0 AND ≥2 supporting
+    debator verdicts". 'supporting' is the count of debators whose
+    verdict is UPSIZE (do more of the action) or HOLD (do the action as
+    proposed). DOWNSIZE and REJECT both count against.
+    """
+    if action not in ("BUY", "SELL"):
+        return 0
+    supporting = 0
+    for d in debators_out:
+        if d.get("abstained"):
+            continue
+        v = str(d.get("verdict", "")).upper()
+        if v in ("UPSIZE", "HOLD"):
+            supporting += 1
+    return supporting
+
+
+def _calibrate_conviction(label: str, rr: float | None,
+                           supporting: int) -> str:
+    """Mechanically validate / downgrade the PM's claimed conviction_label.
+
+    Calibration rules (the brief):
+      - HIGH requires r:r ≥ 2.0 AND supporting ≥ 2.
+      - MED  requires r:r ≥ 1.5.
+      - LOW  is always valid.
+    If the claimed label's threshold isn't met, DOWNGRADE one notch:
+      HIGH → MED (if MED threshold met) → LOW.
+    """
+    label = str(label).upper()
+    rr_v = float(rr) if isinstance(rr, (int, float)) else 0.0
+    if label == "HIGH":
+        if rr_v >= 2.0 and supporting >= 2:
+            return "HIGH"
+        if rr_v >= 1.5:
+            return "MED"
+        return "LOW"
+    if label == "MED":
+        if rr_v >= 1.5:
+            return "MED"
+        return "LOW"
+    return "LOW"
+
+
+def _should_abstain(researchers_out: list[dict],
+                    debators_out: list[dict],
+                    rr: float | None,
+                    action: str | None) -> tuple[bool, str]:
+    """Decide whether the PM should ABSTAIN based on the debate state.
+
+    The brief — ABSTAIN if ANY of:
+      (a) any debator REJECTs
+      (b) bull+bear can't agree on direction (both returned neutral)
+      (c) r:r < 1.0
+      (d) action is HOLD or ABSTAIN (no actionable trade)
+    Returns (abstain_bool, reason_str)."""
+    # (a) any debator REJECTs → ABSTAIN
+    for d in debators_out:
+        if d.get("abstained"):
+            continue
+        if str(d.get("verdict", "")).upper() == "REJECT":
+            return True, (f"debator {d['name']} returned REJECT")
+    # (d) HOLD / ABSTAIN / None action
+    if action in (None, "HOLD", "ABSTAIN"):
+        return True, f"action is {action} (no actionable trade)"
+    # (c) r:r < 1.0
+    if rr is None or (isinstance(rr, (int, float)) and rr < 1.0):
+        return True, (f"risk_reward_ratio {rr} < 1.0 "
+                      "(mechanical re-compute)")
+    # (b) bull+bear directional edge — the desk needs BOTH sides to
+    # have committed via LLM. If EITHER researcher.abstained is True
+    # (LLM failure → signal forced to "neutral"), there's no balanced
+    # cross-examination and the desk has no actionable edge — ABSTAIN.
+    # NOTE: a researcher that returned signal="neutral" with abstained=
+    # False (the LLM actively chose neutral = no edge on that side) is
+    # NOT a failure — the other side still has a directional view, so
+    # the desk has a lean and the PM should NOT abstain. The trigger
+    # is abstained=True (LLM failure), NOT signal=neutral (LLM choice).
+    bull_sig = None
+    bear_sig = None
+    bull_abstained = False
+    bear_abstained = False
+    for r in researchers_out:
+        if r.get("name") == "bull_researcher":
+            bull_sig = str(r.get("signal", "")).lower()
+            bull_abstained = bool(r.get("abstained"))
+        elif r.get("name") == "bear_researcher":
+            bear_sig = str(r.get("signal", "")).lower()
+            bear_abstained = bool(r.get("abstained"))
+    if bull_abstained or bear_abstained:
+        side = ("bull_researcher" if bull_abstained
+                else "bear_researcher")
+        return True, (f"{side} abstained (LLM failure) — "
+                      "one-sided debate, no balanced directional edge")
+    if bull_sig == "neutral" and bear_sig == "neutral":
+        return True, ("bull_researcher + bear_researcher both returned "
+                      "neutral — no directional edge")
+    return False, ""
+
+
+# ------------------------------------------------------- R2-3 REWIRED PM
+
+def _run_pm_debate(personas_out: list[dict],
+                   researchers_out: list[dict],
+                   research_memo: dict,
+                   trader_plan: dict,
+                   debators_out: list[dict],
+                   base_block: dict, detail: dict,
+                   models: list[str], budget: Budget,
+                   timeout: float) -> dict:
+    """The R2-3 rewired PM — synthesizes research_memo + trader_plan +
+    3 debator verdicts into the final trade-decision artifact.
+
+    Mechanical validation pipeline (the brief):
+      1. Call the LLM with PM_DEBATE_SYSTEM + the full debate context.
+      2. Validate the parsed JSON (_validate_pm_debate).
+      3. Re-compute risk_reward_ratio from entry/stop/target geometry.
+      4. Apply abstention discipline (_should_abstain) — if any rule
+         fires, downgrade action to ABSTAIN.
+      5. Apply conviction calibration (_calibrate_conviction) — downgrade
+         conviction_label if the threshold isn't met.
+      6. Carry over kill_criteria from the research_memo if the LLM
+         left them empty (graceful fallback for BUY/SELL decisions).
+      7. ABSTAIN if kill_criteria is empty for BUY/SELL after the
+         carry-over.
+
+    Mirrors TradingAgents' portfolio_manager.py:25-95 prompt structure
+    (rating scale + research plan + trader proposal + debate history +
+    decisive call) with the brief's mechanical-validation additions
+    (r:r re-compute, conviction calibration, abstention discipline —
+    TradingAgents has none of these; its PM is a single LLM call).
+
+    The PM dict keeps the legacy fields (consensus, conviction 0-100,
+    summary, disagreements, risk_flags, mechanical, model, latency_ms)
+    AND adds the new trade-decision artifact fields (action, entry_price,
+    stop_price, target_price, position_size_pct, risk_reward_ratio,
+    conviction_label, kill_criteria, reasoning, evidence_cited,
+    transcript_ref). The journal contract is EXTENDED, not broken.
+    """
+    t0 = time.monotonic()
+    signals = [
+        {"name": r["name"], "role": r["role"], "signal": r["signal"],
+         "confidence": r["confidence"], "thesis": r["thesis"],
+         "key_evidence": r["key_evidence"], "abstained": r["abstained"]}
+        for r in personas_out
+    ]
+    researchers = [
+        {"name": r["name"], "role": r["role"], "signal": r["signal"],
+         "confidence": r["confidence"], "thesis": r["thesis"],
+         "key_evidence": r["key_evidence"], "abstained": r["abstained"]}
+        for r in researchers_out
+    ]
+    memo = {
+        "thesis": research_memo.get("thesis"),
+        "conviction": research_memo.get("conviction"),
+        "supporting_evidence": research_memo.get("supporting_evidence"),
+        "counter_evidence": research_memo.get("counter_evidence"),
+        "kill_criteria": research_memo.get("kill_criteria"),
+        "summary": research_memo.get("summary"),
+        "abstained": research_memo.get("abstained"),
+    }
+    trader = {
+        "action": trader_plan.get("action"),
+        "entry_price": trader_plan.get("entry_price"),
+        "stop_price": trader_plan.get("stop_price"),
+        "target_price": trader_plan.get("target_price"),
+        "position_size_pct": trader_plan.get("position_size_pct"),
+        "time_horizon": trader_plan.get("time_horizon"),
+        "risk_reward_ratio": trader_plan.get("risk_reward_ratio"),
+        "risk_reward_ratio_computed":
+            trader_plan.get("risk_reward_ratio_computed"),
+        "reasoning": trader_plan.get("reasoning"),
+        "abstained": trader_plan.get("abstained"),
+    }
+    debators = [
+        {"name": r["name"], "role": r["role"], "verdict": r.get("verdict"),
+         "reasoning": r.get("reasoning"),
+         "evidence_cited": r.get("evidence_cited"),
+         "abstained": r.get("abstained")}
+        for r in debators_out
+    ]
+    user = (
+        f"Debate desk report for {detail.get('symbol')} "
+        f"({detail.get('name')}).\n\n"
+        f"MARKET CONTEXT (JSON):\n"
+        f"{json.dumps(base_block, default=str)}\n\n"
+        f"PHASE 1 — ANALYST SIGNALS (JSON):\n"
+        f"{json.dumps(signals, ensure_ascii=False, default=str)}\n\n"
+        f"PHASE 2 — BULL + BEAR RESEARCHERS (JSON):\n"
+        f"{json.dumps(researchers, ensure_ascii=False, default=str)}\n\n"
+        f"PHASE 3 — RESEARCH MEMO (JSON):\n"
+        f"{json.dumps(memo, ensure_ascii=False, default=str)}\n\n"
+        f"PHASE 4 — TRADER PLAN (JSON):\n"
+        f"{json.dumps(trader, ensure_ascii=False, default=str)}\n\n"
+        f"PHASE 5 — RISK DEBATOR VERDICTS (JSON):\n"
+        f"{json.dumps(debators, ensure_ascii=False, default=str)}\n\n"
+        "Produce the final trade decision now."
+    )
+    messages = [{"role": "system", "content": PM_DEBATE_SYSTEM},
+                {"role": "user", "content": user}]
+    try:
+        budget.check_step()
+        parsed, model_used = _complete_json_with_fallback(
+            messages, models, timeout, max_tokens=3600)
+        budget.record_step(time.monotonic() - t0)
+        pm = _validate_pm_debate(parsed)
+        pm["model"] = model_used
+        pm["mechanical"] = False
+        pm["latency_ms"] = int((time.monotonic() - t0) * 1000)
+    except BudgetExceeded:
+        raise
+    except Exception as e:  # noqa: BLE001 — mechanical fallback
+        try:
+            budget.record_step(time.monotonic() - t0)
+        except Exception:
+            pass
+        pm = _mechanical_pm_debate(research_memo, trader_plan,
+                                   debators_out, e)
+        pm["model"] = ""
+        pm["mechanical"] = True
+        pm["latency_ms"] = int((time.monotonic() - t0) * 1000)
+        return pm
+
+    # ---- mechanical validation pipeline (the brief) ----
+
+    # 3. Trader is the price-setter — the PM does NOT independently pick
+    # entry/stop/target; it inherits the trader's plan geometry. The PM
+    # only decides action + conviction_label (the brief: "trader turns
+    # the research memo into entry/stop/target/sizing"; the PM's role is
+    # to ratify or abstain, not to re-price). Overwrite the PM's LLM-
+    # proposed entry/stop/target with the trader's plan values so the
+    # mechanical r:r re-compute uses the trader's geometry, not the
+    # LLM's hardcoded fixture values.
+    trader_action = (trader_plan or {}).get("action")
+    trader_abstained = bool((trader_plan or {}).get("abstained"))
+    if trader_abstained or trader_action in (None, "HOLD", "ABSTAIN"):
+        # trader abstained — PM cannot inherit prices; force ABSTAIN.
+        pm["action"] = "ABSTAIN"
+        pm["entry_price"] = None
+        pm["stop_price"] = None
+        pm["target_price"] = None
+        pm["position_size_pct"] = None
+        pm["consensus"] = "neutral"
+        pm["conviction_label"] = "LOW"
+        pm["reasoning"] = ("ABSTAINED (mechanical): trader abstained "
+                           f"(action={trader_action}); the PM cannot "
+                           "ratify a trade without the trader's plan.")
+        pm["transcript_ref"] = (f"journal:run_id="
+                                f"{base_block.get('symbol', '?')}")
+        return pm
+    # inherit trader's geometry (the trader owns the price levels)
+    for fld in ("entry_price", "stop_price", "target_price",
+                "position_size_pct", "time_horizon"):
+        if fld in (trader_plan or {}):
+            pm[fld] = trader_plan[fld]
+
+    # 3b. Re-compute r:r from the (now trader-inherited) entry/stop/
+    # target geometry (override the LLM's claimed value — the brief:
+    # "r:r is mechanical"). The PM's risk_reward_ratio field is the
+    # mechanical value, NOT the LLM's claimed value. The LLM's claimed
+    # value is preserved in risk_reward_ratio_claimed for the audit trail.
+    action = pm.get("action")
+    pm["risk_reward_ratio_claimed"] = pm.get("risk_reward_ratio")
+    rr_mech = _compute_rr(action,
+                          pm.get("entry_price"),
+                          pm.get("stop_price"),
+                          pm.get("target_price"))
+    pm["risk_reward_ratio"] = rr_mech
+
+    # 4. Abstention discipline — apply AFTER the r:r re-compute so the
+    # rule "r:r < 1.0 → ABSTAIN" uses the mechanical value, not the
+    # LLM's claimed value (the brief is explicit: "r:r < 1.0" is the
+    # mechanical re-compute threshold).
+    abstain, abstain_reason = _should_abstain(researchers_out,
+                                              debators_out, rr_mech, action)
+    if abstain:
+        pm["action"] = "ABSTAIN"
+        pm["consensus"] = "neutral"
+        pm["conviction_label"] = "LOW"
+        pm["reasoning"] = (f"ABSTAINED (mechanical): {abstain_reason}. "
+                           f"LLM proposed {action}; overridden by the "
+                           f"PM's mechanical abstention discipline.")
+        # carry over entry/stop/target from the trader's plan (the LLM
+        # may have proposed them; we keep them visible for the audit
+        # trail even when the action is ABSTAIN)
+
+    # 5. Conviction calibration — downgrade the label if the threshold
+    # isn't met (only when not abstaining — abstention forces LOW).
+    if not abstain and action in ("BUY", "SELL"):
+        supporting = _supporting_verdicts(debators_out, action)
+        pm["conviction_label"] = _calibrate_conviction(
+            pm.get("conviction_label", "LOW"), rr_mech, supporting)
+        pm["supporting_debators"] = supporting
+
+    # 6. kill_criteria carry-over from the research_memo if the LLM left
+    # them empty for BUY/SELL (graceful fallback — the brief: "kill_
+    # criteria non-empty for BUY/SELL").
+    if action in ("BUY", "SELL") and not abstain:
+        kc = pm.get("kill_criteria") or []
+        if not kc:
+            memo_kc = (research_memo.get("kill_criteria") or [])
+            if memo_kc:
+                pm["kill_criteria"] = list(memo_kc)
+                pm["reasoning"] = (pm.get("reasoning", "") +
+                                   " kill_criteria carried over from "
+                                   "research_memo.")
+            else:
+                # 7. ABSTAIN if kill_criteria is empty for BUY/SELL
+                # even after the carry-over (the brief: "kill_criteria
+                # non-empty for BUY/SELL").
+                pm["action"] = "ABSTAIN"
+                pm["consensus"] = "neutral"
+                pm["conviction_label"] = "LOW"
+                pm["reasoning"] = ("ABSTAINED (mechanical): kill_criteria"
+                                   " empty for BUY/SELL — the desk has"
+                                   " no concrete invalidation level.")
+                pm["kill_criteria"] = []
+
+    # 8. consensus mapping — action → consensus (BUY→bullish,
+    # SELL→bearish, HOLD/ABSTAIN→neutral) overrides the LLM's claimed
+    # consensus so the wire contract stays consistent.
+    if pm.get("action") == "BUY":
+        pm["consensus"] = "bullish"
+    elif pm.get("action") == "SELL":
+        pm["consensus"] = "bearish"
+    elif pm.get("action") in ("HOLD", "ABSTAIN"):
+        # only force neutral if the LLM didn't pick 'mixed' for a
+        # split desk — preserve the LLM's 'mixed' call when the desk
+        # genuinely splits.
+        if pm.get("consensus") not in ("mixed",):
+            pm["consensus"] = "neutral"
+
+    # 9. transcript_ref — link back to the journal run_id (the brief:
+    # "transcript_ref: str — link to the full transcript"). The full
+    # transcript is the journal's event stream for this run_id; the
+    # PM dict carries the run_id so the downstream evidence-checker
+    # (R2-5) can pull the full transcript by run_id.
+    pm["transcript_ref"] = (f"journal:run_id="
+                            f"{base_block.get('symbol', '?')}")
+
+    return pm
+
+
+def _validate_pm_debate(parsed: dict) -> dict:
+    """Validate the rewired PM's parsed JSON. The shape mirrors the
+    PM_DEBATE_SYSTEM contract: action / entry / stop / target / size /
+    conviction_label / r:r / kill_criteria / reasoning / evidence_cited
+    + the legacy consensus / conviction / summary / disagreements /
+    risk_flags (kept for backward compat with the journal contract)."""
+    action = str(parsed.get("action", "")).strip().upper()
+    if action not in VALID_ACTIONS:
+        raise ValueError(f"invalid action {parsed.get('action')!r}")
+    entry = _coerce_float(parsed.get("entry_price"), "entry_price",
+                          allow_none=True)
+    stop = _coerce_float(parsed.get("stop_price"), "stop_price",
+                         allow_none=True)
+    target = _coerce_float(parsed.get("target_price"), "target_price",
+                           allow_none=True)
+    size = _coerce_float(parsed.get("position_size_pct"),
+                         "position_size_pct", allow_none=True,
+                         min_v=0.0, max_v=1.0)
+    conviction_label = str(parsed.get("conviction_label", "LOW")
+                           ).strip().upper()
+    if conviction_label not in VALID_CONVICTION_LABELS:
+        raise ValueError(f"invalid conviction_label "
+                         f"{parsed.get('conviction_label')!r}")
+    claimed_rr = parsed.get("risk_reward_ratio")
+    rr = None
+    if claimed_rr is not None:
+        try:
+            rr = float(claimed_rr)
+        except (TypeError, ValueError):
+            raise ValueError(f"risk_reward_ratio not numeric: "
+                             f"{claimed_rr!r}") from None
+    kc = _coerce_str_list(parsed.get("kill_criteria"),
+                           "kill_criteria", max_items=3)
+    reasoning = str(parsed.get("reasoning", "")).strip()[:400]
+    if not reasoning:
+        raise ValueError("empty reasoning")
+    ev_raw = parsed.get("evidence_cited")
+    if ev_raw is None:
+        ev = []
+    elif not isinstance(ev_raw, list):
+        raise ValueError("evidence_cited must be a list")
+    else:
+        ev = []
+        for item in ev_raw:
+            if isinstance(item, dict):
+                ev.append({
+                    "persona": str(item.get("persona", ""))[:60],
+                    "claim": str(item.get("claim", ""))[:200],
+                    "source": str(item.get("source", ""))[:60],
+                })
+            elif isinstance(item, str):
+                ev.append({"persona": "", "claim": item[:200],
+                           "source": ""})
+            if len(ev) >= 5:
+                break
+    # legacy fields
+    consensus = str(parsed.get("consensus", "")).strip().lower()
+    if consensus and consensus not in VALID_CONSENSUS:
+        raise ValueError(f"invalid consensus {parsed.get('consensus')!r}")
+    try:
+        conviction = float(parsed.get("conviction", 0))
+    except (TypeError, ValueError):
+        conviction = 0.0
+    if not 0 <= conviction <= 100:
+        conviction = max(0, min(100, conviction))
+    conviction = int(round(conviction))
+    summary = str(parsed.get("summary", "")).strip()[:800] or reasoning
+    flags = parsed.get("risk_flags")
+    if not isinstance(flags, list):
+        flags = []
+    rf = [str(f).strip()[:160] for f in flags if str(f).strip()][:5]
+    return {
+        # new artifact fields
+        "action": action,
+        "entry_price": entry,
+        "stop_price": stop,
+        "target_price": target,
+        "position_size_pct": size,
+        "conviction_label": conviction_label,
+        "risk_reward_ratio": rr,
+        "kill_criteria": kc,
+        "reasoning": reasoning,
+        "evidence_cited": ev,
+        # legacy fields (kept for journal contract)
+        "consensus": consensus or _action_to_consensus(action),
+        "conviction": conviction,
+        "summary": summary,
+        "disagreements": str(parsed.get("disagreements", "")).strip()[:400],
+        "risk_flags": rf,
+    }
+
+
+def _action_to_consensus(action: str) -> str:
+    """Map the PM's action to the legacy consensus field."""
+    a = str(action).upper()
+    if a == "BUY":
+        return "bullish"
+    if a == "SELL":
+        return "bearish"
+    return "neutral"
+
+
+def _mechanical_pm_debate(research_memo: dict, trader_plan: dict,
+                          debators_out: list[dict],
+                          error: Exception) -> dict:
+    """Mechanical fallback when the PM LLM is unreachable. Preserves
+    the trade-decision artifact shape but flags it as mechanical + the
+    action defaults to ABSTAIN (the conservative default — the brief
+    says the PM must abstain when the debate state is unclear; a dead
+    PM model is the maximum-unclear state)."""
+    action = trader_plan.get("action") if trader_plan else None
+    rr = trader_plan.get("risk_reward_ratio_computed") if trader_plan else None
+    abstain, abstain_reason = _should_abstain([], debators_out, rr, action)
+    final_action = "ABSTAIN" if abstain else (action or "HOLD")
+    return {
+        "action": final_action,
+        "entry_price": trader_plan.get("entry_price") if trader_plan else None,
+        "stop_price": trader_plan.get("stop_price") if trader_plan else None,
+        "target_price": trader_plan.get("target_price") if trader_plan else None,
+        "position_size_pct": (trader_plan.get("position_size_pct")
+                              if trader_plan else None),
+        "conviction_label": "LOW",
+        "risk_reward_ratio": rr,
+        "risk_reward_ratio_claimed": (trader_plan.get("risk_reward_ratio")
+                                       if trader_plan else None),
+        "kill_criteria": (research_memo.get("kill_criteria") or []
+                          if research_memo else []),
+        "reasoning": (f"PM synthesis unavailable ({error}); mechanical "
+                      f"fallback. {abstain_reason}." if abstain
+                      else f"PM synthesis unavailable ({error}); "
+                      f"mechanical fallback carried the trader's plan."),
+        "evidence_cited": [],
+        "transcript_ref": "",
+        # legacy fields
+        "consensus": _action_to_consensus(final_action),
+        "conviction": 0,
+        "summary": (f"PM synthesis unavailable ({error}); this is a "
+                    f"mechanical fallback that {final_action}s the "
+                    f"trader's plan."),
+        "disagreements": "not assessed (PM unavailable)",
         "risk_flags": [f"pm synthesis unavailable: {error}"[:160]],
     }
 

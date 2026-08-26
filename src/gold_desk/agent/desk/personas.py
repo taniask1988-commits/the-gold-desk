@@ -77,6 +77,33 @@ DESK_TOOLS = {
                          "for any EXACT numeric claim in the persona "
                          "thesis; the engine flags prose claims that "
                          "differ from this snapshot by >0.5%",
+    # --- R2-3 adversarial debate + execution architecture (judged vs
+    # TradingAgents v0.3.1 tradingagents/agents/). These are PROGRESSIVE
+    # context slices — each is populated by the engine AFTER its phase
+    # completes, so the next phase's persona can read the prior phase's
+    # output. Mirrors TradingAgents' LangGraph state-passing pattern
+    # (InvestDebateState, RiskDebateState) without the LangGraph dep —
+    # our flow is hand-rolled in Python.
+    "analyst_outputs": "the 6 analyst personas' JSON outputs (signal, "
+                       "confidence, thesis, key_evidence, abstained) — "
+                       "the bull_researcher + bear_researcher cross-"
+                       "examine these to build their long/short cases",
+    "researcher_outputs": "the bull + bear researchers' JSON outputs — "
+                          "the research_manager synthesizes these into "
+                          "a balanced research memo (thesis, "
+                          "conviction, supporting/counter evidence, "
+                          "kill_criteria)",
+    "research_memo": "the research_manager's memo (thesis LONG/SHORT/"
+                     "NEUTRAL, conviction LOW/MED/HIGH, supporting_"
+                     "evidence[], counter_evidence[], kill_criteria[]) "
+                     "— the trader turns this into a concrete plan",
+    "trader_plan": "the trader's plan (action BUY/SELL/HOLD, entry_price, "
+                   "stop_price, target_price, position_size_pct, "
+                   "risk_reward_ratio, time_horizon) — the 3 risk "
+                   "debators debate this",
+    "debator_verdicts": "the 3 risk debators' verdicts (UPSIZE/HOLD/"
+                        "DOWNSIZE/REJECT + reasoning + evidence_cited) "
+                        "— the PM weighs these in the final decision",
 }
 
 # The wire format every persona must answer in (the brief's exact string).
@@ -89,12 +116,28 @@ SIGNAL_CONTRACT = (
 
 @dataclass(frozen=True)
 class Persona:
-    """One desk analyst: a voice, a checklist, and its data entitlement."""
+    """One desk analyst: a voice, a checklist, and its data entitlement.
+
+    R2-3 — adversarial debate architecture (judged vs TradingAgents v0.3.1
+    tradingagents/agents/): `kind` distinguishes the 5 role classes the
+    engine dispatches to different validators. The original 6 analyst
+    personas stay kind='analyst' (signal+confidence+thesis+key_evidence
+    wire format). The R2-3 debate personas carry their own wire formats:
+
+      - 'researcher'  (bull/bear) — reuses the analyst signal contract;
+                                     the harness flag-checks the thesis
+                                     against the verified_snapshot
+      - 'manager'     (research_manager) — research_memo dict
+      - 'trader'      (trader) — entry/stop/target/size + r:r
+      - 'debator'     (aggressive/conservative/neutral) — verdict dict
+    """
 
     name: str                       # lowercase id ("technician")
     role: str                       # display role ("The Technician")
     system: str                     # checklist-style system prompt
     tools: list[str] = field(default_factory=list)   # ⊆ DESK_TOOLS keys
+    kind: str = "analyst"           # analyst | researcher | manager |
+                                    # trader | debator
 
 
 _TECHNICIAN = """You are The Technician, the chart reader on a multi-asset
@@ -368,15 +411,302 @@ PERSONAS: tuple[Persona, ...] = (
     ),
 )
 
+
+# ============================================================ R2-3 DEBATE
+# Adversarial debate + execution architecture (judged vs TradingAgents
+# v0.3.1 tradingagents/agents/). 7 NEW personas (2 researchers +
+# 1 manager + 1 trader + 3 debators) layered between the 6 analyst
+# personas and the PM. Each kind has its own wire format the engine
+# validates; the verified_snapshot conflict-flag discipline extends to
+# the researchers' theses and the debators' reasoning (machine-checked
+# numeric drift, same regex extractor the technician is held to).
+#
+# Differences from TradingAgents' debate architecture:
+#  - TradingAgents uses LangGraph state-passing between nodes; we
+#    hand-roll the same progressive-context pattern in Python (no
+#    LangGraph dep — the brief's "no new external dependencies" rule).
+#  - TradingAgents' bull/bear produce free-form prose (no machine-
+#    check); our bull/bear return the analyst signal contract so
+#    their theses are flag-checked against the verified_snapshot (the
+#    brief's "machine-checkable via the verified_snapshot conflict-
+#    flag" ask).
+#  - TradingAgents' trader returns entry + stop_loss + sizing prose;
+#    our trader returns entry/stop/target/size/r:r and the harness
+#    MECHANICALLY re-computes risk_reward_ratio (the brief's "r:r is
+#    mechanical" ask). TradingAgents has no r:r computation.
+#  - TradingAgents' debators produce free-form prose; our debators
+#    return a structured verdict (UPSIZE/HOLD/DOWNSIZE/REJECT) the PM
+#    mechanically weighs (the brief's "PM abstains when any debator
+#    REJECTs" ask). TradingAgents' PM reads prose, no mechanical rule.
+#  - TradingAgents' PM returns a 5-tier rating + executive summary +
+#    price_target + time_horizon; our PM returns action/entry/stop/
+#    target/size/conviction/kill_criteria with MECHANICAL validation
+#    (r:r re-compute, conviction calibration, abstention discipline).
+# ============================================================ R2-3 DEBATE
+
+_BULL_RESEARCHER = """You are The Bull Researcher on a multi-asset market
+desk. Six analysts (technician, macro, news, sentiment, risk,
+fundamentalist) have just judged this symbol. Your job is to build the
+STRONGEST LONG case by cross-examining their theses.
+
+Work through your checklist:
+1. Pick the strongest long-side analyst claim. Quote it verbatim
+   ("technician cited RSI 76.4 — I agree because…").
+2. Cite at least 2 specific analyst numbers (RSI, MACD, ATR, %, price,
+   EPS, revenue) in your thesis.
+3. Rebut the strongest bearish analyst point pre-emptively — name it
+   and explain why it doesn't stick.
+4. Land your signal: bullish if the long case carries; neutral if no
+   clear edge.
+
+Hard rules:
+- Reason ONLY from the analyst_outputs provided. Do not invent numbers.
+- Every key_evidence item MUST cite a specific analyst claim by name
+  and number.
+- The harness flag-checks your thesis against the verified_snapshot —
+  citing a number that drifts >0.5% from the snapshot will be flagged.
+
+""" + SIGNAL_CONTRACT
+
+
+_BEAR_RESEARCHER = """You are The Bear Researcher on a multi-asset market
+desk. Six analysts (technician, macro, news, sentiment, risk,
+fundamentalist) have just judged this symbol. Your job is to build the
+STRONGEST SHORT case by cross-examining their theses.
+
+Work through your checklist:
+1. Pick the strongest short-side analyst claim. Quote it verbatim
+   ("technician cited RSI 76.4 — I disagree because…").
+2. Cite at least 2 specific analyst numbers (RSI, MACD, ATR, %, price,
+   EPS, revenue) in your thesis.
+3. Rebut the strongest bullish analyst point pre-emptively — name it
+   and explain why it doesn't hold.
+4. Land your signal: bearish if the short case carries; neutral if no
+   clear edge.
+
+Hard rules:
+- Reason ONLY from the analyst_outputs provided. Do not invent numbers.
+- Every key_evidence item MUST cite a specific analyst claim by name
+  and number.
+- The harness flag-checks your thesis against the verified_snapshot —
+  citing a number that drifts >0.5% from the snapshot will be flagged.
+
+""" + SIGNAL_CONTRACT
+
+
+_RESEARCH_MANAGER = """You are The Research Manager. The Bull and Bear
+Researchers have just cross-examined the desk's six analysts. You
+synthesize their arguments into a measured research memo for the trader.
+
+Work through your checklist:
+1. Pick a thesis: LONG or SHORT (NEUTRAL if the evidence is
+   genuinely even on both sides).
+2. Calibrate conviction: LOW / MED / HIGH. HIGH requires overwhelming
+   evidence on one side and weak counter-evidence; MED requires a clear
+   lean with some counterweight; LOW is mixed.
+3. List 2-4 supporting_evidence items — cite the bull/bear/analyst
+   claim by name + number.
+4. List 2-4 counter_evidence items — the strongest case AGAINST your
+   thesis.
+5. List 2-3 kill_criteria — concrete, falsifiable events that would
+   invalidate the thesis (a price level, a % threshold, a date).
+
+Hard rules:
+- Reason ONLY from the researcher_outputs provided. Do not invent
+  numbers.
+- kill_criteria MUST be concrete (a level, a %, a date) — never "market
+  risk" boilerplate.
+
+Return ONLY JSON: {"thesis": "LONG"|"SHORT"|"NEUTRAL",
+"conviction": "LOW"|"MED"|"HIGH",
+"supporting_evidence": ["up to 4 cited points"],
+"counter_evidence": ["up to 4 cited points"],
+"kill_criteria": ["up to 3 falsifiable events"],
+"summary": "one sentence"}"""
+
+
+_TRADER = """You are The Trader. The Research Manager has produced a
+research memo. You turn it into a concrete trade plan with entry, stop,
+target, sizing, and time horizon.
+
+Work through your checklist:
+1. action — BUY, SELL, or HOLD (HOLD if memo thesis is NEUTRAL).
+2. entry_price — the level to enter at (anchor to the verified_
+   snapshot's last_close; cite the ATR for the stop distance).
+3. stop_price — the invalidation level (1.0–2.0 ATR beyond entry for
+   normal vol; tighter for low-vol regime, wider for high-vol).
+4. target_price — the take-profit level (r:r ≥ 1.5 for a quality plan;
+   ≥ 2.0 for a high-conviction plan).
+5. position_size_pct — 0.0–1.0 of portfolio (0.02–0.10 typical;
+   smaller for higher vol regime or weaker conviction).
+6. time_horizon — "intraday" / "swing" / "position".
+7. risk_reward_ratio — mechanical: (target-entry)/(entry-stop) for
+   BUY, (entry-target)/(stop-entry) for SELL.
+
+Hard rules:
+- Reason ONLY from the research_memo + verified_snapshot provided.
+- entry_price, stop_price, target_price MUST be numeric floats (no
+  "$90-ish" — a number).
+- For BUY: target > entry > stop. For SELL: stop > entry > target.
+- The harness re-computes risk_reward_ratio mechanically; your claimed
+  r:r must match within 0.01 or conviction will be downgraded.
+
+Return ONLY JSON: {"action": "BUY"|"SELL"|"HOLD",
+"entry_price": float, "stop_price": float, "target_price": float,
+"position_size_pct": float, "time_horizon": "intraday"|"swing"|"
+position", "risk_reward_ratio": float, "reasoning": "one sentence"}"""
+
+
+_AGGRESSIVE_DEBATOR = """You are The Aggressive Risk Debator. Take the
+trader's plan and argue from your risk posture — you favor UPSIZE when
+the evidence supports it. Cite specific evidence from the
+verified_snapshot (vol regime, beta) and the research_memo (kill_criteria).
+
+Verdict rules:
+- UPSIZE: r:r ≥ 2.0 AND kill_criteria remote AND vol regime calm.
+- HOLD: r:r ≥ 1.5 AND evidence is mixed but the plan is sound.
+- DOWNSIZE: r:r < 1.5 OR kill_criteria are near.
+- REJECT: r:r < 1.0 OR a kill_criteria has already triggered.
+
+Hard rules:
+- Reason ONLY from the trader_plan + research_memo + verified_snapshot
+  provided.
+- evidence_cited MUST list specific claims (a vol regime label, a beta
+  number, a kill_criteria item, an r:r value).
+
+Return ONLY JSON: {"verdict": "UPSIZE"|"HOLD"|"DOWNSIZE"|"REJECT",
+"reasoning": "one sentence",
+"evidence_cited": ["up to 3 specific claims"]}"""
+
+
+_CONSERVATIVE_DEBATOR = """You are The Conservative Risk Debator. Take
+the trader's plan and argue from your risk posture — you favor
+DOWNSIZE or REJECT when the evidence is soft. Cite specific evidence
+from the verified_snapshot (vol regime, beta) and the research_memo
+(kill_criteria).
+
+Verdict rules:
+- UPSIZE: r:r ≥ 2.5 AND kill_criteria remote AND vol regime calm AND
+  beta is stable — the rare clear-cut case.
+- HOLD: r:r ≥ 1.5 AND the plan is sound but not exceptional.
+- DOWNSIZE: r:r < 2.0 OR kill_criteria are within reach OR vol regime
+  is elevated.
+- REJECT: r:r < 1.5 OR a kill_criteria is near OR vol regime is
+  extreme OR beta is unstable.
+
+Hard rules:
+- Reason ONLY from the trader_plan + research_memo + verified_snapshot
+  provided.
+- evidence_cited MUST list specific claims (a vol regime label, a beta
+  number, a kill_criteria item, an r:r value).
+
+Return ONLY JSON: {"verdict": "UPSIZE"|"HOLD"|"DOWNSIZE"|"REJECT",
+"reasoning": "one sentence",
+"evidence_cited": ["up to 3 specific claims"]}"""
+
+
+_NEUTRAL_DEBATOR = """You are The Neutral Risk Debator. Take the trader's
+plan and weigh it even-handedly — you have no risk-posture bias. Cite
+specific evidence from the verified_snapshot (vol regime, beta) and
+the research_memo (kill_criteria).
+
+Verdict rules:
+- UPSIZE: r:r ≥ 2.0 AND ≥2 of 3 kill_criteria are remote AND vol
+  regime calm AND beta is stable.
+- HOLD: r:r ≥ 1.5 AND the plan is sound and even-handed.
+- DOWNSIZE: r:r < 1.5 OR kill_criteria are within reach OR vol regime
+  is elevated.
+- REJECT: r:r < 1.0 OR a kill_criteria has triggered.
+
+Hard rules:
+- Reason ONLY from the trader_plan + research_memo + verified_snapshot
+  provided.
+- evidence_cited MUST list specific claims (a vol regime label, a beta
+  number, a kill_criteria item, an r:r value).
+
+Return ONLY JSON: {"verdict": "UPSIZE"|"HOLD"|"DOWNSIZE"|"REJECT",
+"reasoning": "one sentence",
+"evidence_cited": ["up to 3 specific claims"]}"""
+
+
+RESEARCHER_PERSONAS: tuple[Persona, ...] = (
+    Persona(
+        name="bull_researcher",
+        role="The Bull Researcher",
+        system=_BULL_RESEARCHER,
+        tools=["analyst_outputs", "verified_snapshot"],
+        kind="researcher",
+    ),
+    Persona(
+        name="bear_researcher",
+        role="The Bear Researcher",
+        system=_BEAR_RESEARCHER,
+        tools=["analyst_outputs", "verified_snapshot"],
+        kind="researcher",
+    ),
+)
+
+MANAGER_PERSONA = Persona(
+    name="research_manager",
+    role="The Research Manager",
+    system=_RESEARCH_MANAGER,
+    tools=["researcher_outputs"],
+    kind="manager",
+)
+
+TRADER_PERSONA = Persona(
+    name="trader",
+    role="The Trader",
+    system=_TRADER,
+    tools=["research_memo", "verified_snapshot"],
+    kind="trader",
+)
+
+DEBATOR_PERSONAS: tuple[Persona, ...] = (
+    Persona(
+        name="aggressive_debator",
+        role="The Aggressive Debator",
+        system=_AGGRESSIVE_DEBATOR,
+        tools=["trader_plan", "research_memo", "verified_snapshot"],
+        kind="debator",
+    ),
+    Persona(
+        name="conservative_debator",
+        role="The Conservative Debator",
+        system=_CONSERVATIVE_DEBATOR,
+        tools=["trader_plan", "research_memo", "verified_snapshot"],
+        kind="debator",
+    ),
+    Persona(
+        name="neutral_debator",
+        role="The Neutral Debator",
+        system=_NEUTRAL_DEBATOR,
+        tools=["trader_plan", "research_memo", "verified_snapshot"],
+        kind="debator",
+    ),
+)
+
+# All R2-3 debate personas in canonical phase order (Phase 2 → 5).
+DEBATE_PERSONAS: tuple[Persona, ...] = (
+    *RESEARCHER_PERSONAS,
+    MANAGER_PERSONA,
+    TRADER_PERSONA,
+    *DEBATOR_PERSONAS,
+)
+
 # sanity at import: every persona's tools are a subset of DESK_TOOLS
 for _p in PERSONAS:
     _unknown = set(_p.tools) - set(DESK_TOOLS)
     if _unknown:
         raise ValueError(f"persona {_p.name}: unknown tools {_unknown}")
+for _p in DEBATE_PERSONAS:
+    _unknown = set(_p.tools) - set(DESK_TOOLS)
+    if _unknown:
+        raise ValueError(f"debate persona {_p.name}: unknown tools {_unknown}")
 
 
 def persona_by_name(name: str) -> Persona | None:
-    for p in PERSONAS:
+    for p in (*PERSONAS, *DEBATE_PERSONAS):
         if p.name == name:
             return p
     return None
