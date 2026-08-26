@@ -1077,9 +1077,28 @@ def cmd_markets_multi_corr(args) -> int:
     for s in syms:
         row = matrix.get(s) or {}
         cells = "  ".join(
-            f"{(row.get(s2) if row.get(s2) is not None else 0):>9.4f}"
+            (f"{row[s2]:>9.4f}"
+             if isinstance(row.get(s2), (int, float))
+             else f"{'n/a':>9s}")
             for s2 in syms)
         print(f"{s:>8s} {cells}")
+    # D3: surface dropped symbols / insufficient-overlap pairs — null
+    # cells are rendered "n/a" above, never as a fake 0.0000.
+    errs = out.get("errors") or []
+    if errs:
+        parts = []
+        for e in errs:
+            if not isinstance(e, dict) or not e.get("symbol"):
+                continue
+            if e.get("reason") == "daily_closes_fetch_failed":
+                parts.append(e["symbol"])
+            else:
+                parts.append(f"{e['symbol']}<->{e.get('pair', '?')}"
+                             f" ({e.get('reason', '?')})")
+        if parts:
+            print()
+            print("WARNING: degraded correlation matrix — "
+                  + ", ".join(parts))
     return 0
 
 

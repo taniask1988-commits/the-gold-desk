@@ -13,9 +13,18 @@ Capabilities:
   `markets.board`).
 * `compute_correlation(window_days, method)` — symmetric Pearson or
   Spearman correlation matrix over rolling 30/60/90-day daily
-  log-returns. Pearson is hand-rolled (cov / σ_x σ_y, bias-corrected);
-  Spearman ranks then calls the same Pearson kernel. Validated against
-  numpy.corrcoef + scipy.stats.spearmanr in the test suite.
+  log-returns. Returns are DATE-ALIGNED: daily closes are fetched
+  with their timestamps and paired on the INTERSECTION of trading
+  dates, so a 24/7 asset (BTC-USD, ~365 closes/yr) never misaligns
+  against a ~5-day/week asset (GC=F, ~260 closes/yr) — position-
+  based tail pairing sign-flipped every BTC pair (critic defect D2).
+  Pearson is hand-rolled (cov / σ_x σ_y, bias-corrected); Spearman
+  ranks then calls the same Pearson kernel (full float precision —
+  no kernel rounding; rendering rounds at display time). Validated
+  against numpy.corrcoef + scipy.stats.spearmanr in the test suite.
+  Per-symbol fetch failures and insufficient-overlap pairs are
+  surfaced in `errors[]` with a `degraded: True` flag (D3) — never
+  silently dropped.
 
 Session calendars (per the R3 charter):
 
@@ -272,17 +281,24 @@ def session_of(dt: datetime) -> str:
 def _session_vwap_and_open(bars: list[dict],
                            mode: str = "fixed") -> tuple[float | None,
                                                           float | None,
-                                                          str]:
+                                                          str, str]:
     """Compute VWAP + open for the asset's current session.
 
     For 24/7 assets (BTC) the session is the last 24h of bars (`mode=
     "rolling24"`); for everything else we slice by UTC session window.
-    Returns (vwap, session_open_price, session_name). Any of those can
-    be None when bars are absent — the snapshot then reports a None
-    session_relative_pct.
+    Returns (vwap, session_open_price, session_name, vwap_method).
+    `vwap_method` documents how the VWAP was computed (D5 — the
+    zero-volume fallback is no longer silent):
+      "vwap"                — volume-weighted (normal path)
+      "single_bar"          — session had exactly 1 bar
+      "typical_unweighted"  — all-zero volumes → unweighted typical
+                               mean (documented fallback)
+      "none"                — no bars at all
+    Any of the numeric fields can be None when bars are absent — the
+    snapshot then reports a None session_relative_pct.
     """
     if not bars:
-        return None, None, "off"
+        return None, None, "off", "none"
     last_ts = bars[-1]["ts"]
     now = datetime.fromtimestamp(last_ts / 1000.0, tz=timezone.utc)
     if mode == "rolling24":
@@ -308,9 +324,9 @@ def _session_vwap_and_open(bars: list[dict],
         cutoff = now.timestamp() * 1000 - 24 * 3600 * 1000
         session_bars = [b for b in bars if b["ts"] >= cutoff]
         session_name = session_name + "/24h"
-    vwap = _vwap(session_bars)
+    vwap, vwap_method = _vwap(session_bars)
     open_price = session_bars[0]["o"] if session_bars else None
-    return vwap, open_price, session_name
+    return vwap, open_price, session_name, vwap_method
 
 
 def _hours(n: int):
@@ -318,18 +334,27 @@ def _hours(n: int):
     return timedelta(hours=n)
 
 
-def _vwap(bars: list[dict]) -> float | None:
-    """Volume-weighted average price from OHLCV bars.
+def _vwap(bars: list[dict]) -> tuple[float | None, str]:
+    """Volume-weighted average price from OHLCV bars + method label.
 
-    Typical price (h+l+c)/3 weighted by volume. When volumes are zero
-    or absent for every bar (some Yahoo chart calls strip volume), we
-    fall back to the unweighted mean of typical prices so the snapshot
-    still reports a number — labeled as `vwap_method: "typical"` by the
-    caller; the rolling 24h VWAP for BTC and the session VWAP for
-    fixed-calendar assets use the same kernel.
+    Typical price (h+l+c)/3 weighted by volume. Returns (vwap, method)
+    where method documents exactly how the number was derived (D5 —
+    fallbacks are labeled, never silent):
+      * "vwap" — volume-weighted (normal path)
+      * "single_bar" — exactly 1 bar in the session (VWAP = that
+        bar's typical price; volume weighting is a no-op)
+      * "typical_unweighted" — every bar had zero volume (some Yahoo
+        chart calls strip volume), so we fell back to the unweighted
+        mean of typical prices
+      * "none" — no bars
+    The rolling 24h VWAP for BTC and the session VWAP for fixed-
+    calendar assets use the same kernel.
     """
     if not bars:
-        return None
+        return None, "none"
+    if len(bars) == 1:
+        b = bars[0]
+        return (b["h"] + b["l"] + b["c"]) / 3.0, "single_bar"
     pv = 0.0
     vol = 0.0
     for b in bars:
@@ -338,10 +363,10 @@ def _vwap(bars: list[dict]) -> float | None:
         pv += tp * v
         vol += v
     if vol > 0:
-        return pv / vol
-    # fallback: unweighted typical-price mean
+        return pv / vol, "vwap"
+    # fallback: unweighted typical-price mean (labeled, not silent)
     tps = [(b["h"] + b["l"] + b["c"]) / 3.0 for b in bars]
-    return sum(tps) / len(tps) if tps else None
+    return (sum(tps) / len(tps) if tps else None), "typical_unweighted"
 
 
 # ------------------------------------------------------------------ snapshot
@@ -368,6 +393,10 @@ class AssetSnapshot:
     fetched_at: int = 0
     cache_hit: bool = False
     error: str | None = None
+    # D5: how the session_vwap was derived — "vwap" (volume-weighted),
+    # "single_bar", "typical_unweighted" (zero-volume fallback),
+    # "none" (no bars).
+    vwap_method: str = "none"
 
 
 class MultiAssetMonitor:
@@ -419,8 +448,9 @@ class MultiAssetMonitor:
                     )
                     assets[sym] = asdict(snap)
                     continue
-                vwap, session_open, session_name = _session_vwap_and_open(
-                    q.get("bars") or [], meta["session_mode"])
+                vwap, session_open, session_name, vwap_method = \
+                    _session_vwap_and_open(
+                        q.get("bars") or [], meta["session_mode"])
                 price = q.get("price")
                 rel_pct: float | None = None
                 if vwap and price:
@@ -448,6 +478,7 @@ class MultiAssetMonitor:
                     fetched_at=int(q.get("market_time") or 0),
                     cache_hit=False,
                     error=None,
+                    vwap_method=vwap_method,
                 )
                 assets[sym] = asdict(snap)
             return {
@@ -468,10 +499,26 @@ class MultiAssetMonitor:
                            method: str = "pearson") -> dict:
         """Symmetric correlation matrix across the 8 instruments.
 
-        Returns {ok, window, method, symbols, matrix, n_points} where
-        `matrix[sym_i][sym_j]` is a float in [-1, 1] or None when there
-        isn't enough overlap. Cached 15 minutes per (window, method)
-        under <data_root>/cache/markets_corr_{w}_{m}.json.
+        Returns {ok, degraded, window, method, symbols, matrix,
+        n_points, errors} where `matrix[sym_i][sym_j]` is a float in
+        [-1, 1] (full precision — rendering rounds at display time)
+        or None when there isn't enough overlap.
+
+        D2 fix — DATE ALIGNMENT: per-symbol daily closes are keyed by
+        date (YYYY-MM-DD) and paired on the INTERSECTION of dates, so
+        mixed calendars (BTC 24/7 vs GC=F ~5d/week) correlate same-day
+        returns instead of misaligned tail positions.
+
+        D3 — ERROR SURFACING (documented choice: `ok` stays True while
+        the matrix could be computed; `degraded` is True when ANY
+        symbol or pair failed):
+          * errors[] carries {"symbol", "reason":
+            "daily_closes_fetch_failed"} per dropped symbol, and
+            {"symbol", "pair", "reason": "insufficient_common_dates",
+            "common_dates"} per pair with < window+2 common dates
+            (those cells are None, rendered "n/a" by the CLI).
+        Cached 15 minutes per (window, method) under
+        <data_root>/cache/markets_corr_{w}_{m}.json.
         """
         method = (method or "pearson").lower()
         if method not in ("pearson", "spearman"):
@@ -480,8 +527,12 @@ class MultiAssetMonitor:
 
         def _build() -> dict:
             closes_map = self._fetch_daily_closes_for_all()
-            rets_map = _log_returns(closes_map)
-            syms = [s for s in INSTRUMENT_ORDER if s in rets_map]
+            errors: list[dict] = []
+            for sym in INSTRUMENT_ORDER:
+                if not closes_map.get(sym):
+                    errors.append({"symbol": sym,
+                                   "reason": "daily_closes_fetch_failed"})
+            syms = [s for s in INSTRUMENT_ORDER if closes_map.get(s)]
             matrix: dict[str, dict[str, float | None]] = \
                 {s: {} for s in syms}
             n_points: dict[str, int] = {}
@@ -491,25 +542,34 @@ class MultiAssetMonitor:
                         matrix[si][sj] = 1.0
                         matrix[sj][si] = 1.0
                         continue
-                    sr = rets_map[si][-window:]
-                    br = rets_map[sj][-window:]
-                    n = min(len(sr), len(br))
-                    sr, br = sr[-n:], br[-n:]
-                    if n < 2:
+                    # D2: pair on the INTERSECTION of trading dates
+                    ra, rb = _aligned_log_returns(closes_map[si],
+                                                  closes_map[sj])
+                    common_n = len(set(closes_map[si])
+                                   & set(closes_map[sj]))
+                    if common_n < window + 2 or min(len(ra), len(rb)) < 2:
                         matrix[si][sj] = None
                         matrix[sj][si] = None
+                        errors.append(
+                            {"symbol": si, "pair": sj,
+                             "reason": "insufficient_common_dates",
+                             "common_dates": common_n})
                         continue
+                    sr = ra[-window:]
+                    br = rb[-window:]
                     r = _correlation(sr, br, method=method)
                     matrix[si][sj] = r
                     matrix[sj][si] = r
-                    n_points[f"{si}|{sj}"] = n
+                    n_points[f"{si}|{sj}"] = len(sr)
             return {
                 "ok": True,
+                "degraded": bool(errors),
                 "window": window,
                 "method": method,
                 "symbols": syms,
                 "matrix": matrix,
                 "n_points": n_points,
+                "errors": errors,
                 "as_of": datetime.now(timezone.utc).isoformat(
                     timespec="seconds").replace("+00:00", "Z"),
             }
@@ -518,20 +578,23 @@ class MultiAssetMonitor:
         return out
 
     # ------------------------------------------------- daily closes fetch
-    def _fetch_daily_closes_for_all(self) -> dict[str, list[float]]:
-        """Daily close history per instrument (fail-soft per symbol).
+    def _fetch_daily_closes_for_all(self) -> dict[str, dict[str, float]]:
+        """Daily close history per instrument, DATE-KEYED (D2 fix).
 
         One Yahoo v8/chart call per symbol at range=1y&interval=1d,
-        threaded to 8 workers. Symbols whose fetch fails are simply
-        absent from the returned dict — `compute_correlation` skips
-        them and assembles the matrix from whatever landed.
+        threaded to 8 workers. Each value maps "YYYY-MM-DD" → close so
+        `compute_correlation` can pair returns on the intersection of
+        trading dates (a 24/7 calendar never misaligns against a
+        5-day/week one). Symbols whose fetch fails are simply absent
+        from the returned dict — `compute_correlation` records them in
+        `errors[]` (D3) and assembles the matrix from whatever landed.
         """
         canned = _TEST_DAILY_CLOSES
         if canned is not None:
-            return {sym: list(canned.get(sym, []))
+            return {sym: dict(canned.get(sym, {}))
                     for sym in INSTRUMENTS}
 
-        out: dict[str, list[float]] = {}
+        out: dict[str, dict[str, float]] = {}
         with ThreadPoolExecutor(max_workers=WORKERS) as ex:
             futures = {ex.submit(self._fetch_daily_one, sym): sym
                        for sym in INSTRUMENTS}
@@ -543,7 +606,13 @@ class MultiAssetMonitor:
                     pass
         return out
 
-    def _fetch_daily_one(self, symbol: str) -> list[float]:
+    def _fetch_daily_one(self, symbol: str) -> dict[str, float]:
+        """One Yahoo v8/chart daily call → {"YYYY-MM-DD": close}.
+
+        The chart response carries a `timestamp` array (epoch seconds
+        per daily bar) parallel to the closes — we key each close by
+        its UTC calendar date so correlation pairing is date-aligned.
+        """
         url = (f"{YAHOO_CHART_URL}{urllib.parse.quote(symbol, safe='')}"
                f"?range=1y&interval=1d")
         data = json.loads(_http_get(url))
@@ -553,17 +622,51 @@ class MultiAssetMonitor:
         r = results[0]
         quote = ((r.get("indicators") or {}).get("quote") or [{}])
         quote = quote[0] if quote else {}
-        closes = [c for c in (quote.get("close") or []) if c is not None]
-        if not closes:
+        ts_arr = r.get("timestamp") or []
+        closes = quote.get("close") or []
+        out: dict[str, float] = {}
+        for t, c in zip(ts_arr, closes):
+            if t is None or c is None:
+                continue
+            d = datetime.fromtimestamp(int(t), tz=timezone.utc).strftime(
+                "%Y-%m-%d")
+            out[d] = float(c)
+        if not out:
             raise RuntimeError(f"no closes in daily chart for {symbol}")
-        return closes
+        return out
 
 
-# Test seam for `_fetch_daily_closes_for_all` (dict[symbol -> list[float]]).
+# Test seam for `_fetch_daily_closes_for_all`
+# (dict[symbol -> {"YYYY-MM-DD": close}]).
 _TEST_DAILY_CLOSES: dict | None = None
 
 
 # ------------------------------------------------------------------ math
+def _aligned_log_returns(closes_a: dict[str, float],
+                         closes_b: dict[str, float]
+                         ) -> tuple[list[float], list[float]]:
+    """DATE-ALIGNED paired log-returns for two symbols (D2 fix).
+
+    Pairs by the INTERSECTION of trading dates: returns are computed
+    on consecutive COMMON dates only, so a 24/7 calendar (BTC-USD,
+    ~365 closes/yr) never misaligns against a ~5-day/week calendar
+    (GC=F, ~260 closes/yr). Position-based tail pairing sign-flipped
+    every BTC pair — this kernel is the fix. Returns (rets_a, rets_b),
+    index-aligned.
+    """
+    common = sorted(set(closes_a) & set(closes_b))
+    ra: list[float] = []
+    rb: list[float] = []
+    for k in range(1, len(common)):
+        d0, d1 = common[k - 1], common[k]
+        a0, a1 = closes_a[d0], closes_a[d1]
+        b0, b1 = closes_b[d0], closes_b[d1]
+        if a0 > 0 and a1 > 0 and b0 > 0 and b1 > 0:
+            ra.append(math.log(a1 / a0))
+            rb.append(math.log(b1 / b0))
+    return ra, rb
+
+
 def _log_returns(closes_map: dict[str, list[float]]) -> dict[str, list[float]]:
     """Daily log-returns per symbol: ln(c[i]/c[i-1]) skipping ≤0 closes."""
     out: dict[str, list[float]] = {}
@@ -602,8 +705,9 @@ def _correlation(x: list[float], y: list[float],
     if sdx == 0 or sdy == 0:
         return None
     r = cov / (sdx * sdy)
-    # clamp fp drift
-    return round(max(-1.0, min(1.0, r)), 6)
+    # clamp fp drift; keep FULL float precision — callers round at
+    # display time (D6 fix: no 6dp kernel rounding).
+    return max(-1.0, min(1.0, r))
 
 
 def _rank_avg(values: list[float]) -> list[float]:

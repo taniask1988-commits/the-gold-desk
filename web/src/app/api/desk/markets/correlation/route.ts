@@ -39,9 +39,13 @@ function resolvePython(harness: string): { py: string; err: string | null } {
 /**
  * R3-1 Build 1 — cross-asset correlation matrix:
  *   GET /api/desk/markets/correlation?window=30d&method=pearson
- *       → {ok, window, method, symbols, matrix, n_points}
+ *       → {ok, degraded, window, method, symbols, matrix, n_points, errors}
  * Python CLI is the single source of truth (cli markets-multi-corr
  * --json --window N --method {pearson|spearman}).
+ * D3: `errors` lists per-symbol failures ({"symbol", "reason":
+ * "daily_closes_fetch_failed"}) and insufficient-overlap pairs
+ * ({"symbol", "pair", "reason": "insufficient_common_dates"}) — those
+ * cells are null; `degraded` is true whenever any symbol/pair failed.
  */
 function parseWindow(s: string | null): number | null {
   if (!s) return null;

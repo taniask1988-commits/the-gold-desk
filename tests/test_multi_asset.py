@@ -326,19 +326,28 @@ def test_correlation_clamp_to_pm1():
 
 # ----------------------------------------------------- correlation matrix
 def _mock_daily_closes(n_days: int = 60) -> dict:
-    """Deterministic synthetic closes per instrument for matrix tests."""
+    """Deterministic synthetic closes per instrument for matrix tests.
+
+    Date-keyed (D2): each symbol maps {"YYYY-MM-DD": close} over
+    n_days consecutive calendar days (all 8 share the same calendar
+    here — mixed-calendar coverage lives in the D2 regression tests
+    below)."""
     import random
+    from datetime import timedelta
     rng = random.Random(42)
-    out = {}
-    base = 100.0
+    out: dict[str, dict[str, float]] = {}
+    start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    dates = [(start + timedelta(days=i)).strftime("%Y-%m-%d")
+             for i in range(n_days)]
     for sym in INSTRUMENT_ORDER:
+        base = 100.0
         prices = [base]
         for _ in range(n_days - 1):
             # Gold-like drift; BTC more volatile
             vol = 0.02 if sym == "BTC-USD" else 0.01
             drift = 0.0005 if sym in ("GC=F", "ES=F") else 0
             prices.append(prices[-1] * (1 + drift + rng.gauss(0, vol)))
-        out[sym] = prices
+        out[sym] = dict(zip(dates, prices))
     return out
 
 
@@ -352,6 +361,9 @@ def test_correlation_matrix_returns_dict():
         assert out["ok"] is True
         assert out["window"] == 30
         assert out["method"] == "pearson"
+        # D3: clean fetch → not degraded, empty errors
+        assert out["degraded"] is False
+        assert out["errors"] == []
         syms = out["symbols"]
         assert "GC=F" in syms
         matrix = out["matrix"]
@@ -404,31 +416,47 @@ def test_log_returns_basic():
 
 
 def test_vwap_volume_weighted():
-    """VWAP weights by volume when volumes present."""
+    """VWAP weights by volume when volumes present (label: vwap)."""
     bars = [
         {"h": 11.0, "l": 9.0, "c": 10.0, "v": 10},
         {"h": 21.0, "l": 19.0, "c": 20.0, "v": 30},
     ]
     # tp1=(11+9+10)/3=10; tp2=(21+19+20)/3=20
     # vwap = (10*10 + 20*30)/40 = (100 + 600)/40 = 17.5
-    v = _vwap(bars)
+    v, method = _vwap(bars)
     assert abs(v - 17.5) < 1e-6
+    assert method == "vwap"
 
 
 def test_vwap_no_volume_falls_back_to_typical_mean():
-    """When every volume is 0, fall back to unweighted typical-price mean."""
+    """When every volume is 0, fall back to the unweighted
+    typical-price mean — LABELED typical_unweighted (D5, no longer
+    silent)."""
     bars = [
         {"h": 11.0, "l": 9.0, "c": 10.0, "v": 0},
         {"h": 21.0, "l": 19.0, "c": 20.0, "v": 0},
     ]
     # tp1=10, tp2=20; unweighted mean = 15
-    v = _vwap(bars)
+    v, method = _vwap(bars)
     assert abs(v - 15.0) < 1e-6
+    assert method == "typical_unweighted"
+
+
+def test_vwap_single_bar_label():
+    """Exactly 1 bar in the session → vwap_method single_bar (D5)."""
+    bars = [{"h": 12.0, "l": 6.0, "c": 9.0, "v": 0}]
+    v, method = _vwap(bars)
+    assert abs(v - 9.0) < 1e-9   # (12+6+9)/3
+    assert method == "single_bar"
+    # a single bar WITH volume still labels single_bar
+    v2, m2 = _vwap([{"h": 12.0, "l": 6.0, "c": 9.0, "v": 100}])
+    assert m2 == "single_bar"
+    assert abs(v2 - 9.0) < 1e-9
 
 
 def test_vwap_empty():
-    """Empty bars → None."""
-    assert _vwap([]) is None
+    """Empty bars → (None, "none")."""
+    assert _vwap([]) == (None, "none")
 
 
 def test_session_vwap_24h_mode():
@@ -439,10 +467,11 @@ def test_session_vwap_24h_mode():
         ts = (now.timestamp() + h * 3600) * 1000
         bars.append({"ts": ts, "o": 100.0, "h": 101.0,
                       "l": 99.0, "c": 100.5, "v": 1})
-    v, op, sess = _session_vwap_and_open(bars, mode="rolling24")
+    v, op, sess, method = _session_vwap_and_open(bars, mode="rolling24")
     assert v is not None
     assert sess == "24h"
     assert op == 100.0   # first bar of the 24h window
+    assert method == "vwap"   # volumes present → volume-weighted
 
 
 def test_session_vwap_fixed_mode_slices_session():
@@ -454,9 +483,10 @@ def test_session_vwap_fixed_mode_slices_session():
         ts = (base.timestamp() + m * 60) * 1000
         bars.append({"ts": ts, "o": 100.0, "h": 101.0,
                       "l": 99.0, "c": 100.5, "v": 2})
-    v, op, sess = _session_vwap_and_open(bars, mode="fixed")
+    v, op, sess, method = _session_vwap_and_open(bars, mode="fixed")
     assert sess == "ny"
     assert v is not None
+    assert method == "vwap"
 
 
 # --------------------------------------------------------------- helpers
@@ -517,9 +547,294 @@ def test_asset_snapshot_dataclass_json():
         sparkline=[2040.0, 2050.0], live=True,
         source="yahoo:GC=F", fetched_at=1700000000,
         cache_hit=False, error=None,
+        vwap_method="vwap",
     )
     d = json.dumps(snap.__dict__, default=str)
     back = json.loads(d)
     assert back["symbol"] == "GC=F"
     assert back["price"] == 2050.0
     assert back["calendar"] == "COMEX"
+    assert back["vwap_method"] == "vwap"
+    # default label when not provided (D5)
+    default_snap = AssetSnapshot(
+        symbol="X", name="X", calendar="X", price=None,
+        prev_close=None, change_pct=None, session="off",
+        session_vwap=None, session_relative_pct=None,
+        session_open_pct=None)
+    assert default_snap.vwap_method == "none"
+
+
+# =========================================================================
+# D1-D6 FIX REGRESSION TESTS (GAUNTLET3-R1-FIX)
+# =========================================================================
+# ------------------------------------------------------ D2: date alignment
+def _mixed_calendar_closes(sign: float = 1.0, n_days: int = 120,
+                           seed: int = 11) -> dict:
+    """Two synthetic assets on DIFFERENT calendars driven by one signal.
+
+    BTC-USD trades every day (7-day calendar); GC=F trades weekdays
+    only (5-day calendar). Both assets' same-date returns are driven
+    by the SAME gaussian shock (GC's scaled by `sign`), so the TRUE
+    same-day correlation is strongly signed. The old position-based
+    tail pairing misaligned the tails and destroyed the sign."""
+    import random
+    from datetime import timedelta
+    rng = random.Random(seed)
+    start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    days = [start + timedelta(days=i) for i in range(n_days)]
+    shock = {d.strftime("%Y-%m-%d"): rng.gauss(0, 0.02) for d in days}
+    btc: dict[str, float] = {}
+    p = 50000.0
+    for d in days:
+        ds = d.strftime("%Y-%m-%d")
+        p *= math.exp(shock[ds])
+        btc[ds] = p
+    gc: dict[str, float] = {}
+    p = 2000.0
+    for d in days:
+        if d.weekday() >= 5:      # GC=F: weekdays only
+            continue
+        ds = d.strftime("%Y-%m-%d")
+        p *= math.exp(sign * shock[ds])
+        gc[ds] = p
+    return {"BTC-USD": btc, "GC=F": gc}
+
+
+def test_d2_mixed_calendar_positive_sign_preserved():
+    """7-day vs 5-day calendar, same-day signal → correlation is
+    strongly POSITIVE (D2: position pairing sign-flipped it)."""
+    ma._TEST_DAILY_CLOSES = _mixed_calendar_closes(sign=1.0)
+    try:
+        mon = MultiAssetMonitor(data_root=_tmp_data_root(),
+                                fetcher=_mock_fetch_factory())
+        out = mon.compute_correlation(window=30, method="pearson")
+        r = out["matrix"]["BTC-USD"]["GC=F"]
+        assert r is not None, "cell must compute (both symbols landed)"
+        assert r > 0.3, f"sign flipped / destroyed: r={r}"
+        # symmetric cell agrees
+        assert out["matrix"]["GC=F"]["BTC-USD"] == r
+    finally:
+        ma._TEST_DAILY_CLOSES = None
+
+
+def test_d2_mixed_calendar_negative_sign_preserved():
+    """7-day vs 5-day calendar, OPPOSITE same-day signal → correlation
+    is strongly NEGATIVE (D2 regression)."""
+    ma._TEST_DAILY_CLOSES = _mixed_calendar_closes(sign=-1.0)
+    try:
+        mon = MultiAssetMonitor(data_root=_tmp_data_root(),
+                                fetcher=_mock_fetch_factory())
+        out = mon.compute_correlation(window=30, method="pearson")
+        r = out["matrix"]["BTC-USD"]["GC=F"]
+        assert r is not None
+        assert r < -0.3, f"sign flipped / destroyed: r={r}"
+    finally:
+        ma._TEST_DAILY_CLOSES = None
+
+
+def test_d2_live_shape_btc365_gc260_no_sign_flip():
+    """Reproduces the live-case shape: 365 closes for BTC vs ~260 for
+    GC=F (COMEX ~5/week), same underlying signal → the matrix must NOT
+    sign-flip the flagship gold↔bitcoin cell (critic live-quantified
+    true +0.55 vs reported −0.04)."""
+    import random
+    from datetime import timedelta
+    rng = random.Random(7)
+    start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    days = [start + timedelta(days=i) for i in range(365)]
+    shock = {d.strftime("%Y-%m-%d"): rng.gauss(0, 0.01) for d in days}
+    btc: dict[str, float] = {}
+    p = 50000.0
+    for d in days:
+        ds = d.strftime("%Y-%m-%d")
+        p *= math.exp(shock[ds])
+        btc[ds] = p
+    gc: dict[str, float] = {}
+    p = 2000.0
+    for d in days:
+        if d.weekday() >= 5:
+            continue
+        ds = d.strftime("%Y-%m-%d")
+        p *= math.exp(shock[ds])
+        gc[ds] = p
+    # live shape: 365 vs ~261 weekday closes
+    assert len(btc) == 365
+    assert 240 <= len(gc) <= 270
+    ma._TEST_DAILY_CLOSES = {"BTC-USD": btc, "GC=F": gc}
+    try:
+        mon = MultiAssetMonitor(data_root=_tmp_data_root(),
+                                fetcher=_mock_fetch_factory())
+        out = mon.compute_correlation(window=30, method="pearson")
+        r = out["matrix"]["BTC-USD"]["GC=F"]
+        assert r is not None
+        assert r > 0.3, f"sign flipped: r={r} (was +0.55 live)"
+    finally:
+        ma._TEST_DAILY_CLOSES = None
+
+
+def test_d2_aligned_log_returns_kernel():
+    """_aligned_log_returns pairs by date INTERSECTION: an extra
+    weekend close for one asset never shifts the pairing."""
+    a = {"2025-01-01": 100.0, "2025-01-02": 110.0,
+         "2025-01-03": 120.0, "2025-01-04": 130.0}
+    b = {"2025-01-02": 200.0, "2025-01-03": 220.0, "2025-01-04": 240.0}
+    ra, rb = ma._aligned_log_returns(a, b)
+    # common dates: 01-02, 01-03, 01-04 → 2 paired returns
+    assert len(ra) == 2 and len(rb) == 2
+    assert abs(ra[0] - math.log(120 / 110)) < 1e-12
+    assert abs(rb[0] - math.log(220 / 200)) < 1e-12
+
+
+# ------------------------------------------------------ D3: error surfacing
+def test_d3_fetch_failure_surfaces_errors_and_degraded(monkeypatch):
+    """One symbol's daily fetch failing lands in errors[] with reason
+    daily_closes_fetch_failed + degraded=True (never silently
+    dropped), via a monkeypatched _fetch_daily_one raise (the other
+    7 symbols are served from canned data — no network)."""
+    canned = _mock_daily_closes(60)
+    ma._TEST_DAILY_CLOSES = None
+    mon = MultiAssetMonitor(data_root=_tmp_data_root(),
+                            fetcher=_mock_fetch_factory())
+
+    def _fetch_one(symbol):
+        if symbol == "ES=F":
+            raise RuntimeError("HTTPError: 404 Not Found")
+        return dict(canned[symbol])
+    monkeypatch.setattr(mon, "_fetch_daily_one", _fetch_one)
+    out = mon.compute_correlation(window=30, method="pearson")
+    assert out["ok"] is True               # documented choice: matrix served
+    assert out["degraded"] is True
+    err = [e for e in out["errors"]
+           if e.get("symbol") == "ES=F"]
+    assert err and err[0]["reason"] == "daily_closes_fetch_failed"
+    assert "ES=F" not in out["symbols"]   # dropped from the matrix
+    assert "GC=F" in out["symbols"]        # the other 7 survive
+
+
+def test_d3_seam_dropped_symbol_degraded(monkeypatch):
+    """Same via the test seam (symbol absent from canned closes)."""
+    canned = _mock_daily_closes(60)
+    canned.pop("ES=F")
+    ma._TEST_DAILY_CLOSES = canned
+    try:
+        mon = MultiAssetMonitor(data_root=_tmp_data_root(),
+                                fetcher=_mock_fetch_factory())
+        out = mon.compute_correlation(window=30, method="pearson")
+        assert out["degraded"] is True
+        assert {"symbol": "ES=F",
+                "reason": "daily_closes_fetch_failed"} in out["errors"]
+    finally:
+        ma._TEST_DAILY_CLOSES = None
+
+
+def test_d3_insufficient_common_dates_returns_none_cell():
+    """< window+2 common dates → None cell + insufficient_common_dates
+    error entry (D2 rule 3 / D3 surfacing)."""
+    canned = _mock_daily_closes(60)
+    # CL=F only has 20 dates → 20 < 30+2 → all its cells None
+    canned["CL=F"] = dict(list(canned["CL=F"].items())[:20])
+    ma._TEST_DAILY_CLOSES = canned
+    try:
+        mon = MultiAssetMonitor(data_root=_tmp_data_root(),
+                                fetcher=_mock_fetch_factory())
+        out = mon.compute_correlation(window=30, method="pearson")
+        assert out["matrix"]["CL=F"]["GC=F"] is None
+        assert out["matrix"]["GC=F"]["CL=F"] is None
+        insuff = [e for e in out["errors"]
+                  if e.get("reason") == "insufficient_common_dates"]
+        assert insuff, "insufficient overlap must be surfaced"
+        assert out["degraded"] is True
+        # the healthy pairs still compute
+        assert out["matrix"]["GC=F"]["ES=F"] is not None
+    finally:
+        ma._TEST_DAILY_CLOSES = None
+
+
+def test_d3_cli_renders_na_and_warning(capsys):
+    """CLI renders null cells as 'n/a' (never 0.0000) and prints a
+    warning line listing dropped symbols (D3)."""
+    from gold_desk.cli import cmd_markets_multi_corr
+    canned = _mock_daily_closes(60)
+    canned.pop("ES=F")                       # fetch-failed symbol
+    canned["CL=F"] = dict(list(canned["CL=F"].items())[:20])  # n/a cells
+    ma._TEST_DAILY_CLOSES = canned
+    try:
+        class _Args:
+            window = 30
+            method = "pearson"
+            json = False
+            data_root = str(_tmp_data_root())
+        rc = cmd_markets_multi_corr(_Args())
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "n/a" in out                 # null cell rendered, not 0.0000
+        assert "0.0000" not in out           # no fake zeros anywhere
+        assert "WARNING" in out
+        assert "ES=F" in out                 # dropped symbol listed
+        assert "CL=F" in out                 # insufficient overlap listed
+    finally:
+        ma._TEST_DAILY_CLOSES = None
+
+
+# ------------------------------------------------------ D5: vwap labels
+def test_d5_snapshot_vwap_method_labels():
+    """Snapshot surfaces vwap_method per asset: normal bars → vwap,
+    zero-volume bars → typical_unweighted, 1 bar → single_bar (D5)."""
+    def _bars(v: float, n: int = 2) -> list[dict]:
+        return [{"ts": 1699900800000 + i * 3600000,
+                 "o": 100.0 + i, "h": 101.0 + i,
+                 "l": 99.0 + i, "c": 100.5 + i, "v": v}
+                for i in range(n)]
+
+    def _fetch(symbols: list[str]) -> dict:
+        out = {}
+        for s in symbols:
+            if s == "GC=F":
+                bars = _bars(10)             # normal volume-weighted
+            elif s == "ES=F":
+                bars = _bars(0)          # zero volume → fallback label
+            elif s == "^VIX":
+                bars = _bars(5, n=1)     # single bar
+            else:
+                bars = _bars(10)
+            out[s] = {"ok": True, "symbol": s, "price": 101.5,
+                      "prev_close": 100.0, "change": 1.5,
+                      "change_pct": 1.5, "currency": "USD",
+                      "market_time": 1700000000, "bars": bars,
+                      "source": f"mock:{s}"}
+        return out
+
+    mon = MultiAssetMonitor(data_root=_tmp_data_root(), fetcher=_fetch)
+    out = mon.snapshot()
+    assert out["assets"]["GC=F"]["vwap_method"] == "vwap"
+    assert out["assets"]["ES=F"]["vwap_method"] == "typical_unweighted"
+    assert out["assets"]["^VIX"]["vwap_method"] == "single_bar"
+    # the 24/7 asset's rolling-24h bucket also labels volume-weighted
+    assert out["assets"]["BTC-USD"]["vwap_method"] == "vwap"
+
+
+def test_d5_snapshot_dead_symbol_vwap_method_none():
+    """A failed asset snapshot carries vwap_method "none"."""
+    alive = set(INSTRUMENTS.keys()) - {"^VIX"}
+    mon = MultiAssetMonitor(data_root=_tmp_data_root(),
+                            fetcher=_mock_fetch_factory(alive))
+    out = mon.snapshot()
+    assert out["assets"]["^VIX"]["vwap_method"] == "none"
+
+
+# ------------------------------------------------------ D6: kernel precision
+def test_d6_correlation_kernel_full_precision():
+    """D6: the kernel keeps FULL float precision — no 6dp rounding.
+
+    For a=[1..6], b=[2,1,4,3,6,5] the exact Pearson r is 29/35 =
+    0.828571428571… (repeating — not representable at 6dp); a 6dp
+    round would leave a ~4.3e-7 residue."""
+    a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    b = [2.0, 1.0, 4.0, 3.0, 6.0, 5.0]
+    r = _correlation(a, b, method="pearson")
+    expected = 29.0 / 35.0
+    assert r is not None
+    assert abs(r - expected) < 1e-12, \
+        f"kernel rounded: r={r} vs {expected}"
+    # clamp still holds
+    assert -1.0 <= r <= 1.0

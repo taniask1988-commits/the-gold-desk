@@ -7,16 +7,21 @@ Covers:
 * Fail-closed: missing creds → CONSTITUTION_BLOCKED + ALPACA_CREDS_MISSING
 * Reconciliation: paper fill matches our ticket (price + qty + symbol)
 * WebSocket fill (mocked): single fill vs polling fallback
+* D1: REAL WS auth protocol shapes (bare dict authorized/unauthorized)
+  + quiet-stream degradation to polling
+* D6: poll_fills replay safety (cursor + no duplicates across sweeps)
 * resolve_paper_account() dispatch (creds present → Alpaca, else synthetic)
 * OrderRequest.to_body shape (stringified numerics per Alpaca spec)
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import threading
+import types
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -25,7 +30,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from gold_desk.account_alpaca import (
-    AlpacaPaperAccount, OrderRequest, _normalize_fill,
+    AlpacaPaperAccount, OrderRequest, _auth_success, _normalize_fill,
     _normalize_fill_from_order, _ticket_matches, _mismatch_reason,
 )
 from gold_desk.account import resolve_paper_account, PaperAccountStore
@@ -552,7 +557,8 @@ def test_stream_fills_falls_back_to_polling_when_no_websocket(monkeypatch):
 
 def test_poll_fills_sweeps_closed_orders(monkeypatch):
     """poll_fills() with mocked closed-orders GET invokes on_fill once
-    per filled order. The stop event breaks the read loop."""
+    per filled order (replay_history=True — the documented seam for
+    sweeping existing history once). The stop event breaks the loop."""
     _set_creds(monkeypatch)
     fills: list[dict] = []
     def _on_fill(f): fills.append(f)
@@ -586,9 +592,288 @@ def test_poll_fills_sweeps_closed_orders(monkeypatch):
             return True
         return real_wait(timeout)
     stop.wait = fast_wait  # type: ignore[assignment]
-    acct.poll_fills(_on_fill, stop)
+    acct.poll_fills(_on_fill, stop, replay_history=True)
     assert len(fills) == 2
     assert {f["order_id"] for f in fills} == {"order-1", "order-2"}
+
+
+# =========================================================== D1: WS auth
+# The REAL Alpaca WS protocol (live-probed + official docs) replies to
+# the auth message with a BARE DICT, e.g.
+#   success: {"stream": "authorization",
+#             "data": {"action": "authenticate",
+#                      "status": "authorized"}}
+#   failure: {"stream": "authorization",
+#             "data": {"action": "auth",
+#                      "message": "code=401 ...",
+#                      "status": "unauthorized"}}
+class _FakeWS:
+    """Fake websocket-client connection (D1 tests)."""
+
+    def __init__(self, responses: list, stop=None, then: str = "empty"):
+        self._responses = list(responses)
+        self._stop = stop
+        self._then = then      # behavior once responses are exhausted
+        self.sent: list[dict] = []
+        self.closed = False
+
+    def send(self, payload):
+        self.sent.append(json.loads(payload))
+
+    def recv(self):
+        if self._responses:
+            return json.dumps(self._responses.pop(0))
+        if self._then == "raise":
+            # 8s recv silence — websocket-client raises a timeout
+            raise TimeoutError("recv timed out after 8s of quiet tape")
+        # clean shutdown: signal stop, then hand back an empty frame
+        if self._stop is not None:
+            self._stop.set()
+        return ""
+
+    def close(self):
+        self.closed = True
+
+
+def _install_fake_websocket(monkeypatch, ws) -> None:
+    """Inject a fake `websocket` module into sys.modules (stream_fills
+    does `import websocket` at call time — the fake wins)."""
+    mod = types.ModuleType("websocket")
+    mod.create_connection = lambda url, timeout=None: ws
+    monkeypatch.setitem(sys.modules, "websocket", mod)
+
+
+_TRADE_UPDATE_FILL = {
+    "stream": "trade_updates",
+    "data": {
+        "event": "fill",
+        "timestamp": "2026-01-05T17:00:00Z",
+        "order": {
+            "id": "order-ws-1",
+            "client_order_id": "ticket-1",
+            "symbol": "AAPL",
+            "filled_qty": "10",
+            "filled_avg_price": "195.50",
+            "side": "buy",
+            "status": "filled",
+            "updated_at": "2026-01-05T17:00:00Z",
+        },
+    },
+}
+
+_AUTH_OK_DICT = {
+    "stream": "authorization",
+    "data": {"action": "authenticate", "status": "authorized"},
+}
+_AUTH_REJECT_DICT = {
+    "stream": "authorization",
+    "data": {"action": "auth",
+             "message": "code=401 authentication failed",
+             "status": "unauthorized"},
+}
+
+
+def test_d1_auth_success_predicate_shapes():
+    """D1: the auth predicate accepts the REAL dict shapes as primary
+    (status=authorized / action=authenticate) and keeps the legacy
+    list shape for backward compatibility."""
+    assert _auth_success(_AUTH_OK_DICT) is True
+    assert _auth_success(_AUTH_REJECT_DICT) is False
+    # belt-and-braces: action-only dict
+    assert _auth_success({"data": {"action": "authenticate"}}) is True
+    # legacy list shape (some gateways wrap the reply in a list)
+    assert _auth_success(
+        [{"data": {"action": "authenticated"}}]) is True
+    assert _auth_success(
+        [{"data": {"action": "authenticate",
+                   "status": "authorized"}}]) is True
+    assert _auth_success(
+        [{"data": {"status": "unauthorized"}}]) is False
+    # junk / empty
+    assert _auth_success(None) is False
+    assert _auth_success([]) is False
+    assert _auth_success("") is False
+    assert _auth_success({"data": {}}) is False
+
+
+def test_d1_stream_fills_real_dict_auth_success_proceeds(monkeypatch):
+    """D1: REAL dict auth-success shape → stream_fills PROCEEDS past
+    auth (listen-subscribes + delivers the fill over the WS) and does
+    NOT fall back to polling."""
+    _set_creds(monkeypatch)
+    fills: list[dict] = []
+    polled: list[bool] = []
+    stop = threading.Event()
+    ws = _FakeWS([_AUTH_OK_DICT, _TRADE_UPDATE_FILL], stop=stop)
+    _install_fake_websocket(monkeypatch, ws)
+    acct = AlpacaPaperAccount(
+        http_get=_make_mock_get(200, []),
+        http_post=_make_mock_post(200, {}),
+        http_delete=_make_mock_delete(204, {}))
+
+    def _spy_poll(on_fill, stop_event, **kwargs):
+        polled.append(True)
+    monkeypatch.setattr(acct, "poll_fills", _spy_poll)
+    acct.stream_fills(fills.append, stop_event=stop)
+    # the fill was delivered over the WS path
+    assert len(fills) == 1
+    assert fills[0]["order_id"] == "order-ws-1"
+    assert fills[0]["source"] == "alpaca:ws"
+    # auth + listen were both sent (i.e. we got PAST auth)
+    actions = [m.get("action") for m in ws.sent]
+    assert actions == ["auth", "listen"]
+    assert ws.sent[1]["data"]["streams"] == ["trade_updates"]
+    # no polling fallback
+    assert polled == []
+    assert ws.closed is True
+
+
+def test_d1_stream_fills_real_dict_auth_unauthorized_falls_back(monkeypatch):
+    """D1: REAL dict auth-UNAUTHORIZED shape (code=401) → fall back to
+    polling IMMEDIATELY; no listen subscribe, no WS fills."""
+    _set_creds(monkeypatch)
+    fills: list[dict] = []
+    polled: list[bool] = []
+    stop = threading.Event()
+    ws = _FakeWS([_AUTH_REJECT_DICT])
+    _install_fake_websocket(monkeypatch, ws)
+    acct = AlpacaPaperAccount(
+        http_get=_make_mock_get(200, []),
+        http_post=_make_mock_post(200, {}),
+        http_delete=_make_mock_delete(204, {}))
+
+    def _spy_poll(on_fill, stop_event, **kwargs):
+        polled.append(True)
+    monkeypatch.setattr(acct, "poll_fills", _spy_poll)
+    acct.stream_fills(fills.append, stop_event=stop)
+    assert polled == [True]         # immediate polling fallback
+    assert fills == []              # nothing delivered over the dead WS
+    assert ws.closed is True
+    # no listen subscription was attempted after the rejection
+    assert all(m.get("action") != "listen" for m in ws.sent)
+
+
+def test_d1_stream_fills_quiet_stream_falls_back_to_polling(monkeypatch, capsys):
+    """D1: 8s recv silence (recv raises) must NOT silently kill the
+    stream — a warning is logged and polling takes over."""
+    _set_creds(monkeypatch)
+    fills: list[dict] = []
+    polled: list[bool] = []
+    stop = threading.Event()
+    # auth ok, one fill delivered, then the tape goes quiet
+    ws = _FakeWS([_AUTH_OK_DICT, _TRADE_UPDATE_FILL], then="raise")
+    _install_fake_websocket(monkeypatch, ws)
+    acct = AlpacaPaperAccount(
+        http_get=_make_mock_get(200, []),
+        http_post=_make_mock_post(200, {}),
+        http_delete=_make_mock_delete(204, {}))
+
+    def _spy_poll(on_fill, stop_event, **kwargs):
+        polled.append(True)
+    monkeypatch.setattr(acct, "poll_fills", _spy_poll)
+    acct.stream_fills(fills.append, stop_event=stop)
+    assert len(fills) == 1          # the fill before the silence landed
+    assert polled == [True]         # quiet stream → polling fallback
+    assert ws.closed is True
+    err = capsys.readouterr().err
+    assert "WARNING" in err
+    assert "quiet" in err
+
+
+# ================================================== D6: poll_fills replay
+def _run_poll_once(acct, on_fill, **kwargs) -> None:
+    """Run poll_fills for exactly ONE sweep (stop event fires right
+    after the first sweep) with the given kwargs (since=…,
+    replay_history=True, …)."""
+    stop = threading.Event()
+    real_wait = stop.wait
+    state = {"n": 0}
+
+    def fast_wait(timeout=None):
+        state["n"] += 1
+        if state["n"] >= 1:
+            stop.set()
+            return True
+        return real_wait(timeout)
+    stop.wait = fast_wait  # type: ignore[assignment]
+    acct.poll_fills(on_fill, stop, **kwargs)
+
+
+def _closed_order(oid: str, hours_ago: float) -> dict:
+    now = datetime.now(timezone.utc)
+    ts = (now - timedelta(hours=hours_ago)).isoformat(
+        timespec="seconds").replace("+00:00", "Z")
+    return {"id": oid, "symbol": "AAPL",
+            "filled_qty": "10", "filled_avg_price": "195.00",
+            "side": "buy", "status": "filled",
+            "client_order_id": f"ticket-{oid}", "updated_at": ts}
+
+
+def test_d6_poll_fills_first_call_does_not_replay_history(monkeypatch):
+    """D6: first poll_fills call with NO cursor does not replay
+    history — the cursor initializes to 'now', so pre-existing closed
+    orders are never re-emitted."""
+    _set_creds(monkeypatch)
+    orders = [_closed_order("order-old", 2.0)]
+    per_url = {"status=closed": (200, orders)}
+    acct = AlpacaPaperAccount(
+        http_get=_make_mock_get(200, {}, per_url=per_url),
+        http_post=_make_mock_post(200, {}),
+        http_delete=_make_mock_delete(204, {}))
+    fills: list[dict] = []
+    _run_poll_once(acct, fills.append)
+    assert fills == []                     # history NOT replayed
+    assert acct._fill_cursor is not None   # cursor initialized to "now"
+
+
+def test_d6_poll_fills_no_duplicates_across_two_sweeps(monkeypatch):
+    """D6 regression: two consecutive poll_fills sweeps never emit a
+    duplicate on_fill — sweep 1 (replay_history=True) emits the 2
+    existing fills; sweep 2 sees the same 2 + 1 NEW fill and emits
+    ONLY the new one."""
+    _set_creds(monkeypatch)
+    orders = [_closed_order("order-1", 24.0),
+              _closed_order("order-2", 20.0)]
+    per_url = {"status=closed": (200, orders)}
+    acct = AlpacaPaperAccount(
+        http_get=_make_mock_get(200, {}, per_url=per_url),
+        http_post=_make_mock_post(200, {}),
+        http_delete=_make_mock_delete(204, {}))
+    fills: list[dict] = []
+    # sweep 1: explicitly replay the existing history once
+    _run_poll_once(acct, fills.append, replay_history=True)
+    assert [f["order_id"] for f in fills] == ["order-1", "order-2"]
+    # a NEW fill lands on the broker
+    orders.append(_closed_order("order-3", 1.0))
+    # sweep 2: same 2 old orders + the new one — only order-3 is new
+    _run_poll_once(acct, fills.append)
+    assert [f["order_id"] for f in fills] == \
+        ["order-1", "order-2", "order-3"]
+    # and a third sweep changes nothing
+    _run_poll_once(acct, fills.append)
+    assert [f["order_id"] for f in fills] == \
+        ["order-1", "order-2", "order-3"]
+
+
+def test_d6_poll_fills_since_cursor_filters_old_fills(monkeypatch):
+    """D6: `since` (ISO timestamp cursor) — only fills strictly NEWER
+    than the cursor invoke on_fill."""
+    _set_creds(monkeypatch)
+    orders = [_closed_order("order-old", 24.0),
+              _closed_order("order-new", 1.0)]
+    per_url = {"status=closed": (200, orders)}
+    acct = AlpacaPaperAccount(
+        http_get=_make_mock_get(200, {}, per_url=per_url),
+        http_post=_make_mock_post(200, {}),
+        http_delete=_make_mock_delete(204, {}))
+    fills: list[dict] = []
+    now = datetime.now(timezone.utc)
+    since = (now - timedelta(hours=2)).isoformat(
+        timespec="seconds").replace("+00:00", "Z")
+    _run_poll_once(acct, fills.append, since=since)
+    assert [f["order_id"] for f in fills] == ["order-new"]
+    # cursor stored on the account so the next sweep stays consistent
+    assert acct._fill_cursor is not None
 
 
 # ------------------------------------------------------ dispatch

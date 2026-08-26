@@ -32,9 +32,15 @@ Capabilities:
 * `stream_fills(on_fill)` — optional WebSocket subscription to
   wss://paper-api.alpaca.markets/stream (trade updates). Uses
   `threading` + `websocket-client` (already installed in the repo).
-  Falls back to `poll_fills()` if `websocket` import fails or the
-  WS handshake errors — the polling path is a 3-second GET /v2/orders
-  sweep that surfaces any status transition since the last call.
+  Auth-success is the REAL protocol shape (live-probed + official
+  docs): a BARE DICT
+  `{"stream": "authorization",
+    "data": {"action": "authenticate", "status": "authorized"}}`
+  (a failure replies `data.status == "unauthorized"`). Falls back to
+  `poll_fills()` if `websocket` import fails, the handshake errors,
+  auth is rejected, OR the stream goes quiet (recv silence) — the
+  polling path is a 3-second GET /v2/orders sweep that surfaces any
+  status transition since the last call.
 
 * `reconcile_fill(fill, ticket_store)` — match a broker fill against
   our `Ticket` by id+symbol+qty+price, journal `Fill` event with
@@ -53,12 +59,14 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 PAPER_API_BASE = "https://paper-api.alpaca.markets"
@@ -156,6 +164,10 @@ class AlpacaPaperAccount:
         self._http_delete = http_delete or self._default_http_delete
         self._ws_thread: threading.Thread | None = None
         self._ws_stop = threading.Event()
+        # D6: fill cursor + emitted-order set live on the account so
+        # consecutive poll_fills() sweeps never replay old fills.
+        self._fill_cursor: str | None = None
+        self._poll_seen_ids: set[str] = set()
 
     # -------------------------------------------------------- available
     @staticmethod
@@ -334,8 +346,26 @@ class AlpacaPaperAccount:
                      ) -> None:
         """Stream trade updates via WebSocket (wss://paper-api.alpaca.
         markets/stream). Calls `on_fill(fill_dict)` for every trade
-        update received. Falls back to `poll_fills()` when the
-        `websocket` import is missing or the handshake fails.
+        update received.
+
+        Auth handshake (REAL protocol, live-probed): the server replies
+        to our auth message with a BARE DICT —
+            {"stream": "authorization",
+             "data": {"action": "authenticate",
+                      "status": "authorized"}}
+        (failure: `data.status == "unauthorized"` with a
+        `message: "code=401 ..."` payload). `_auth_success()` accepts
+        that dict shape as the PRIMARY predicate (belt-and-braces: the
+        legacy list shape + `action == "authenticated"` are kept for
+        backward compatibility with proxy/gateway variants).
+
+        Degradations — all fall back to `poll_fills(on_fill, stop)`:
+          * `websocket` import missing
+          * WS handshake (create_connection) failure
+          * auth rejected (`status == "unauthorized"`) — IMMEDIATELY,
+            never hangs
+          * quiet stream (recv silence raises) — logs a warning and
+            polls instead of dying silently
 
         The stream runs in this thread; for non-blocking use, see
         `start_fill_stream(...)`. The optional `stop_event` lets the
@@ -350,15 +380,22 @@ class AlpacaPaperAccount:
         try:
             ws = websocket.create_connection(self.ws_url,
                                               timeout=self.timeout)
-            # Alpaca v2 WS auth: listen + subscribe message
+        except Exception:  # noqa: BLE001 — WS handshake errors degrade
+            self.poll_fills(on_fill, stop)
+            return
+        try:
+            # Alpaca v2 WS auth: bare-dict reply (see docstring)
             ws.send(json.dumps({"action": "auth",
                                   "key": self._key,
                                   "secret": self._secret}))
             auth_resp = ws.recv()
-            auth = json.loads(auth_resp) if auth_resp else []
-            if not (isinstance(auth, list) and auth
-                    and auth[0].get("data", {}).get("action") == "authenticated"):
-                # auth failed — fall back to polling
+            auth = json.loads(auth_resp) if auth_resp else None
+            if not _auth_success(auth):
+                # auth rejected — fall back to polling IMMEDIATELY
+                # (never hang waiting for trade updates)
+                _ws_warn("alpaca WS auth failed (%r) — falling back to "
+                         "polling" % (auth,))
+                _close_quietly(ws)
                 self.poll_fills(on_fill, stop)
                 return
             ws.send(json.dumps({"action": "listen",
@@ -366,8 +403,14 @@ class AlpacaPaperAccount:
             while not stop.is_set():
                 try:
                     raw = ws.recv()
-                except Exception:  # noqa: BLE001 — WS read failures degrade
-                    break
+                except Exception:  # noqa: BLE001 — quiet stream degrades
+                    # 8s recv silence (timeout) or a read failure: do NOT
+                    # die silently — warn and fall back to polling.
+                    _ws_warn("alpaca WS stream went quiet — falling back "
+                             "to polling")
+                    _close_quietly(ws)
+                    self.poll_fills(on_fill, stop)
+                    return
                 if not raw:
                     continue
                 try:
@@ -378,11 +421,8 @@ class AlpacaPaperAccount:
                     data = ev.get("data") or {}
                     if data.get("event") in ("fill", "partial_fill"):
                         on_fill(_normalize_fill(data))
-            try:
-                ws.close()
-            except Exception:  # noqa: BLE001 — close never breaks us
-                pass
-        except Exception:  # noqa: BLE001 — WS handshake errors degrade
+            _close_quietly(ws)
+        except Exception:  # noqa: BLE001 — WS protocol errors degrade
             self.poll_fills(on_fill, stop)
 
     def start_fill_stream(self, on_fill: Callable[[dict], None]
@@ -402,25 +442,70 @@ class AlpacaPaperAccount:
             self._ws_thread = None
 
     def poll_fills(self, on_fill: Callable[[dict], None],
-                   stop_event: threading.Event) -> None:
-        """Polling fallback for fill streaming — sweep open orders
+                   stop_event: threading.Event,
+                   since: str | None = None,
+                   replay_history: bool = False) -> None:
+        """Polling fallback for fill streaming — sweep closed orders
         every 3 seconds for status transitions to fill/partial_fill,
-        call `on_fill` for each. Stop when `stop_event` is set."""
-        seen: set[str] = set()
+        call `on_fill` for each. Stop when `stop_event` is set.
+
+        Replay safety (D6 fix): `on_fill` fires only for fills NEWER
+        than the cursor. The cursor (ISO timestamp of the newest fill
+        we emitted) is stored on the account (`self._fill_cursor`), so
+        consecutive sweeps never re-emit a fill they already delivered.
+
+        * `since` — optional cursor (ISO timestamp preferred; a
+          non-parseable value is treated as an order-id cursor and
+          simply marks that order as seen). Resets the stored cursor
+          before sweeping.
+        * First call with NO cursor: history is NOT replayed — the
+          cursor initializes to "now" so only fills that land after
+          the first sweep are emitted. Pass `replay_history=True` to
+          sweep the existing closed-order history exactly once (test
+          / recovery seam).
+        """
+        if since is not None:
+            if _parse_ts(since) is None:
+                # order-id cursor: never re-emit this order
+                self._poll_seen_ids.add(since)
+            else:
+                self._fill_cursor = since
+        cursor_ts = _parse_ts(self._fill_cursor)
+        if self._fill_cursor is None and not replay_history:
+            # first call: do NOT replay history — start from "now"
+            self._fill_cursor = _now_iso()
+            cursor_ts = _parse_ts(self._fill_cursor)
         while not stop_event.is_set():
             try:
                 url = (f"{self.base_url}/v2/orders?status=closed"
                        "&limit=50&direction=desc")
                 status, payload = self._http_get(url)
                 if status == 200 and isinstance(payload, list):
+                    # cursor advances only at END of sweep so same-
+                    # second batch fills within one sweep all emit
+                    sweep_max: tuple | None = None   # (dt, iso_str)
                     for o in payload:
                         oid = o.get("id") or ""
-                        if oid in seen:
+                        if not oid or oid in self._poll_seen_ids:
                             continue
-                        seen.add(oid)
+                        fill = _normalize_fill_from_order(o)
+                        fts = _parse_ts(fill.get("ts"))
+                        if cursor_ts is not None and fts is not None \
+                                and fts <= cursor_ts:
+                            # not newer than the cursor — mark seen, skip
+                            self._poll_seen_ids.add(oid)
+                            continue
+                        self._poll_seen_ids.add(oid)
                         if o.get("status") in ("filled", "partially_filled",
                                                 "partial_fill"):
-                            on_fill(_normalize_fill_from_order(o))
+                            on_fill(fill)
+                            if fts is not None and \
+                                    (sweep_max is None
+                                     or fts > sweep_max[0]):
+                                sweep_max = (fts, fill.get("ts"))
+                    if sweep_max is not None:
+                        cursor_ts = sweep_max[0]
+                        self._fill_cursor = sweep_max[1]
             except Exception:  # noqa: BLE001 — poll sweep fails soft
                 pass
             stop_event.wait(3.0)
@@ -476,6 +561,60 @@ class AlpacaPaperAccount:
 
 
 # ------------------------------------------------------------------ helpers
+def _auth_success(auth) -> bool:
+    """True when the Alpaca WS auth handshake succeeded.
+
+    PRIMARY (real protocol, live-probed + official docs): the reply to
+    our auth message is a BARE DICT —
+        {"stream": "authorization",
+         "data": {"action": "authenticate", "status": "authorized"}}
+    Failure shape: same dict with `data.status == "unauthorized"`
+    (message carries "code=401 ..."). Belt-and-braces we also accept
+    `data.action == "authenticate"` alone, and the legacy LIST shape
+    (`[{"data": {"action": "authenticated"}}]`) some gateways emit.
+    """
+    if isinstance(auth, dict):
+        data = auth.get("data") or {}
+        if data.get("status") == "authorized":
+            return True
+        if data.get("action") == "authenticate":
+            return True
+        return False
+    if isinstance(auth, list) and auth:
+        first = auth[0] if isinstance(auth[0], dict) else {}
+        data = first.get("data") or {}
+        return (data.get("action") in ("authenticate", "authenticated")
+                or data.get("status") == "authorized")
+    return False
+
+
+def _close_quietly(ws) -> None:
+    """Close a WS connection; never raises."""
+    try:
+        ws.close()
+    except Exception:  # noqa: BLE001 — close never breaks us
+        pass
+
+
+def _ws_warn(message: str) -> None:
+    """Emit a WS-degradation warning (stderr — the journal is owned by
+    the orchestrator; this path runs in a background thread)."""
+    print(f"gold-desk WARNING: {message}", file=sys.stderr)
+
+
+def _parse_ts(value) -> datetime | None:
+    """Tolerant ISO-8601 parser (handles trailing 'Z'); None on miss."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def _normalize_fill(data: dict) -> dict:
     """Alpaca WS trade_update event → flat fill dict the journal
     understands. Alpaca nests the order under data.order."""
