@@ -1005,6 +1005,146 @@ def cmd_markets_corr(args) -> int:
     return 0
 
 
+def cmd_markets_multi(args) -> int:
+    """markets-multi — R3-1 Build 1: 8-instrument live multi-asset monitor
+    (gold, S&P e-mini, US 10y yield, DXY, BTC, VIX, WTI, EUR/USD) with
+    per-asset session VWAP + session-relative % move. Fail-soft per asset.
+    """
+    from .markets.multi_asset import MultiAssetMonitor, INSTRUMENT_ORDER
+    mon = MultiAssetMonitor(data_root=args.data_root)
+    out = mon.snapshot()
+    if args.json:
+        print(json.dumps(out, sort_keys=True, default=str))
+        return 0 if out.get("ok") else 1
+    if not out.get("ok"):
+        print("multi-asset monitor failed:", out.get("error"))
+        return 1
+    print("MULTI-ASSET MONITOR — 8 instruments (keyless Yahoo)")
+    print("=" * 72)
+    print(f"as of : {out.get('as_of', '?')}"
+          + ("   (cached)" if out.get("cache_hit") else ""))
+    print()
+    assets = out.get("assets") or {}
+    print(f"{'symbol':<10s}{'name':<18s}{'price':>12s}"
+          f"{'1d %':>9s}{'sess':>10s}{'vwap':>12s}{'rel %':>9s}")
+    print("-" * 72)
+    for sym in INSTRUMENT_ORDER:
+        a = assets.get(sym) or {}
+        if not a.get("live"):
+            err = a.get("error", "fetch failed")
+            print(f"{sym:<10s}{a.get('name',''):<18s}"
+                  f"{'-':>12s}{'-':>9s}{'ERROR':>10s}{'-':>12s}"
+                  f"{'-':>9s}   ({err})")
+            continue
+        price = a.get("price")
+        price_s = f"{price:.5f}" if isinstance(price, (int, float)) else "n/a"
+        chg = a.get("change_pct")
+        chg_s = f"{chg:+.2f}%" if isinstance(chg, (int, float)) else "n/a"
+        sess = a.get("session", "?")
+        vwap = a.get("session_vwap")
+        vwap_s = f"{vwap:.5f}" if isinstance(vwap, (int, float)) else "n/a"
+        rel = a.get("session_relative_pct")
+        rel_s = f"{rel:+.3f}%" if isinstance(rel, (int, float)) else "n/a"
+        print(f"{sym:<10s}{a.get('name',''):<18s}"
+              f"{price_s:>12s}{chg_s:>9s}{sess:>10s}"
+              f"{vwap_s:>12s}{rel_s:>9s}")
+    errs = out.get("errors") or []
+    if errs:
+        print()
+        print(f"errors (fail-soft, not fatal): {', '.join(errs)}")
+    return 0
+
+
+def cmd_markets_multi_corr(args) -> int:
+    """markets-multi-corr — R3-1 Build 1: cross-asset correlation matrix
+    (Pearson or Spearman) over rolling 30/60/90-day daily log-returns."""
+    from .markets.multi_asset import MultiAssetMonitor, INSTRUMENT_ORDER
+    mon = MultiAssetMonitor(data_root=args.data_root)
+    out = mon.compute_correlation(window=args.window,
+                                  method=args.method)
+    if args.json:
+        print(json.dumps(out, sort_keys=True, default=str))
+        return 0 if out.get("ok") else 1
+    if not out.get("ok"):
+        print("correlation matrix failed:", out.get("error"))
+        return 1
+    print(f"CORRELATION MATRIX — {out.get('method','?').upper()} "
+          f"window={out.get('window','?')}d")
+    print("=" * 72)
+    syms = out.get("symbols") or []
+    matrix = out.get("matrix") or {}
+    print("        " + "  ".join(f"{s:>9s}" for s in syms))
+    for s in syms:
+        row = matrix.get(s) or {}
+        cells = "  ".join(
+            f"{(row.get(s2) if row.get(s2) is not None else 0):>9.4f}"
+            for s2 in syms)
+        print(f"{s:>8s} {cells}")
+    return 0
+
+
+def cmd_account_alpaca(args) -> int:
+    """account-alpaca — R3-1 Build 2: Alpaca paper account summary
+    (balance, buying power, positions, open orders, today P&L).
+    Fail-closed when ALPACA_PAPER_KEY/SECRET are missing — the user
+    must paste paper creds (free) into the constitution or env.
+    """
+    from .account_alpaca import AlpacaPaperAccount
+    if not AlpacaPaperAccount.available():
+        if args.json:
+            print(json.dumps({"ok": False,
+                              "reason_code": "ALPACA_CREDS_MISSING",
+                              "blocked": "CONSTITUTION_BLOCKED",
+                              "message": "Set ALPACA_PAPER_KEY + "
+                                         "ALPACA_PAPER_SECRET env vars "
+                                         "(paper keys are free at "
+                                         "alpaca.markets)"}))
+        else:
+            print("ALPACA PAPER ACCOUNT — CONSTITUTION_BLOCKED")
+            print("missing ALPACA_PAPER_KEY / ALPACA_PAPER_SECRET env vars.")
+            print("paper keys are free at alpaca.markets — set both env "
+                  "vars or paste them into the constitution.")
+        return 1
+    acct = AlpacaPaperAccount()
+    out = acct.summary(timeout=args.timeout)
+    if args.json:
+        print(json.dumps(out, sort_keys=True, default=str))
+        return 0 if out.get("ok") else 1
+    if not out.get("ok"):
+        print("alpaca account unreachable:", out.get("error"))
+        return 1
+    print("ALPACA PAPER ACCOUNT")
+    print("=" * 60)
+    acc = out.get("account") or {}
+    print(f"status        : {acc.get('status','?')}")
+    print(f"equity        : ${acc.get('equity','?')}")
+    print(f"cash          : ${acc.get('cash','?')}")
+    print(f"buying power  : ${acc.get('buying_power','?')}")
+    print(f"last equity   : ${acc.get('last_equity','?')}")
+    pnl = acc.get("unrealized_pl_today")
+    if isinstance(pnl, (int, float)):
+        print(f"today P&L     : ${pnl:.2f} ({acc.get('unrealized_plpc_today',0)*100:+.2f}%)")
+    pos = out.get("positions") or []
+    print()
+    print(f"OPEN POSITIONS ({len(pos)})")
+    print("-" * 60)
+    for p in pos:
+        print(f"  {p.get('symbol',''):<8s} {p.get('qty',''):>6s} @ "
+              f"${p.get('avg_entry_price','?')}  "
+              f"current=${p.get('current_price','?')}  "
+              f"P&L=${p.get('unrealized_pl','?')}")
+    orders = out.get("orders") or []
+    print()
+    print(f"OPEN ORDERS ({len(orders)})")
+    print("-" * 60)
+    for o in orders[:10]:
+        print(f"  {o.get('id','')[:10]} {o.get('side',''):<5s} "
+              f"{o.get('symbol',''):<8s} {o.get('qty','')} "
+              f"{o.get('type','')} @ {o.get('limit_price') or o.get('stop_price') or 'mkt'}  "
+              f"[{o.get('status','')}]")
+    return 0
+
+
 def _agent_registry():
     """Full research registry: desk tools + crypto tools + web tools +
     the multi-analyst desk bridge (piece 6)."""
@@ -1432,6 +1572,39 @@ def main(argv=None) -> int:
     p_corr.add_argument("--json", action="store_true")
     p_corr.add_argument("--data-root", default=str(REPO_ROOT / "data"))
     p_corr.set_defaults(func=cmd_markets_corr)
+
+    # --- R3-1 multi-asset monitor + Alpaca paper execution ---
+    p_mam = sub.add_parser("markets-multi",
+                            help="R3-1: 8-instrument multi-asset monitor "
+                                 "(gold, ES, ^TNX, DXY, BTC, VIX, WTI, "
+                                 "EUR/USD) — live session VWAP + relative %")
+    p_mam.add_argument("--json", action="store_true")
+    p_mam.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_mam.set_defaults(func=cmd_markets_multi)
+
+    p_mcorr = sub.add_parser("markets-multi-corr",
+                              help="R3-1: cross-asset correlation matrix "
+                                   "across the 8 instruments (Pearson or "
+                                   "Spearman, 30/60/90-day windows)")
+    p_mcorr.add_argument("--window", type=int, default=30,
+                          help="rolling window in days (default 30; "
+                               "charter mandates 30/60/90)")
+    p_mcorr.add_argument("--method", default="pearson",
+                          choices=["pearson", "spearman"],
+                          help="correlation method (default pearson)")
+    p_mcorr.add_argument("--json", action="store_true")
+    p_mcorr.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_mcorr.set_defaults(func=cmd_markets_multi_corr)
+
+    p_alp = sub.add_parser("account-alpaca",
+                            help="R3-1: Alpaca paper account summary "
+                                 "(balance, positions, open orders, today P&L) "
+                                 "— fail-closed when creds missing")
+    p_alp.add_argument("--json", action="store_true")
+    p_alp.add_argument("--timeout", type=float, default=8.0,
+                        help="REST timeout seconds (default 8)")
+    p_alp.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_alp.set_defaults(func=cmd_account_alpaca)
 
     args = parser.parse_args(argv)
     return args.func(args)

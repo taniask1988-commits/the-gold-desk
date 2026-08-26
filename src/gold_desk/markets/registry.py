@@ -230,6 +230,31 @@ ALIASES: dict[str, str] = {
 }
 
 
+# R3-1 BUILD 1 — session calendars for the 8-instrument multi-asset
+# monitor (per the charter). Each entry pins a market calendar label +
+# the session_mode the monitor uses to slice VWAP:
+#   "fixed"     UTC hour windows (asia / london / overlap / ny / off)
+#   "rolling24" last-24h bucket (BTC's 24/7 continuous tape)
+SESSION_CALENDARS: dict[str, dict] = {
+    "GC=F":      {"calendar": "COMEX",   "session_mode": "fixed",
+                  "trading_hours": "Mon-Fri, 18:00-17:00 US ET (nearly 23h)"},
+    "ES=F":      {"calendar": "CME",     "session_mode": "fixed",
+                  "trading_hours": "Mon-Fri, 18:00-17:00 US ET (nearly 23h)"},
+    "^TNX":      {"calendar": "US BOND", "session_mode": "fixed",
+                  "trading_hours": "Mon-Fri, NY session"},
+    "DX-Y.NYB":  {"calendar": "ICE",     "session_mode": "fixed",
+                  "trading_hours": "Mon-Fri, NY session"},
+    "BTC-USD":   {"calendar": "24/7",    "session_mode": "rolling24",
+                  "trading_hours": "continuous (24/7)"},
+    "^VIX":      {"calendar": "CBOE",    "session_mode": "fixed",
+                  "trading_hours": "Mon-Fri, NY session"},
+    "CL=F":      {"calendar": "NYMEX",    "session_mode": "fixed",
+                  "trading_hours": "Mon-Fri, NY session"},
+    "EURUSD=X":  {"calendar": "24/5",    "session_mode": "fixed",
+                  "trading_hours": "Sun 17:00 - Fri 17:00 US ET (24/5)"},
+}
+
+
 def all_symbols() -> list[dict]:
     """Flat registry: [{symbol, name, sector}, ...] in display order."""
     out = []
@@ -238,6 +263,14 @@ def all_symbols() -> list[dict]:
             out.append({"symbol": s["symbol"], "name": s["name"],
                         "sector": key})
     return out
+
+
+def session_calendar(symbol: str) -> dict | None:
+    """R3-1: session-calendar metadata for the 8 multi-asset
+    instruments. Returns None for any other symbol — the monitor's
+    per-asset session slice + UI badge comes from here.
+    """
+    return SESSION_CALENDARS.get(str(symbol or "").upper())
 
 
 def find(symbol: str) -> dict | None:

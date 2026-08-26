@@ -199,3 +199,35 @@ class PaperAccountStore:
         data = asdict(self.account)
         data["point_value_per_lot"] = self.point_value_per_lot
         self.path.write_text(json.dumps(data, sort_keys=True, indent=2))
+
+
+# ------------------------------------------------------------------ dispatch
+def resolve_paper_account(root: str | Path, starting_balance: float,
+                            journal: "Journal",
+                            point_value_per_lot: float = 100.0):
+    """R3-1 Build 2 dispatch: return an AlpacaPaperAccount when paper
+    creds are present in env (ALPACA_PAPER_KEY + ALPACA_PAPER_SECRET),
+    else fall back to the existing synthetic `PaperAccountStore`.
+
+    Law boundary (L12): creds live in env (or future: under broker.
+    alpaca_paper_creds in the YAML). Runtime code may read them; never
+    mutates the constitution. The orchestrator's existing code path
+    that calls `PaperAccountStore(...)` directly is UNTOUCHED — this
+    helper is the new opt-in dispatch for CLI/web/agent surfaces that
+    want live paper execution when creds are available, synthetic
+    otherwise. Both code paths journal through the same Journal.
+
+    Returns the AlpacaPaperAccount instance OR the PaperAccountStore
+    instance — caller should isinstance-check the return type before
+    calling paper-specific methods (AlpacaPaperAccount has summary(),
+    submit_order(), stream_fills(); PaperAccountStore has
+    open_position/resolve_on_bar/force_close_all).
+    """
+    try:
+        from .account_alpaca import AlpacaPaperAccount
+        if AlpacaPaperAccount.available():
+            return AlpacaPaperAccount()
+    except Exception:  # noqa: BLE001 — alpaca module missing/broken
+        pass
+    return PaperAccountStore(root, starting_balance, journal,
+                              point_value_per_lot=point_value_per_lot)
