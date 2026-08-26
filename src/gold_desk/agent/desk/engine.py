@@ -54,6 +54,9 @@ from ...llm.prompt_cache import (
     default_cache_dir as _default_cache_dir,
     prompt_key as _prompt_key,
 )
+# R2-5 — institutional memo + mechanical evidence-checker
+from ..memo import generate_memo
+from ..evidence_checker import verify_memo
 from ...markets.board import (
     fetch_board,
     fetch_daily_bars,
@@ -802,6 +805,47 @@ def run_desk(
                 pass  # memory is fail-soft
 
         elapsed_ms = int((time.monotonic() - started) * 1000)
+        # R2-5 — generate the institutional memo + run the mechanical
+        # evidence-checker. The memo is the audit-grade output (thesis
+        # + per-claim citations + bull/base/bear scenarios w/
+        # probabilities + risk factors + vol-based sizing + kill
+        # criteria + conviction). The evidence-checker re-verifies
+        # EVERY cited number in the memo against the raw artifacts
+        # (zero-fabrication guarantee). Both are pure-function.
+        try:
+            memo = generate_memo(
+                pm_decision=pm,
+                run_id=run_id,
+                symbol=str(detail.get("symbol") or symbol),
+                as_of=_now_iso(),
+                verified_snapshot=verified_snapshot,
+                trader_plan=trader_plan,
+                research_memo=research_memo,
+                personas_out=personas_out,
+                researchers_out=researchers_out,
+                debators_out=debators_out,
+            )
+            memo_dict = memo.to_dict()
+        except Exception as e:  # noqa: BLE001 — fail-soft memo
+            memo_dict = {"ok": False, "error": str(e),
+                         "run_id": run_id,
+                         "symbol": str(detail.get("symbol") or symbol)}
+        try:
+            evidence_report = verify_memo(
+                memo=memo_dict,
+                verified_snapshot=verified_snapshot,
+                personas_out=personas_out,
+                researchers_out=researchers_out,
+                research_memo=research_memo,
+                debators_out=debators_out,
+                trader_plan=trader_plan,
+            )
+        except Exception as e:  # noqa: BLE001 — fail-soft checker
+            evidence_report = {"ok": False, "error": str(e),
+                               "claims_checked": 0,
+                               "claims_verified": 0,
+                               "claims_failed": [],
+                               "zero_fabrication_guarantee": False}
         report = {
             "ok": True,
             "symbol": detail.get("symbol") or str(symbol),
@@ -823,6 +867,8 @@ def run_desk(
             "trader_plan": trader_plan,
             "debators": debators_out,
             "pm": pm,
+            "memo": memo_dict,
+            "evidence_report": evidence_report,
             "abstained": sum(1 for r in (*personas_out, *researchers_out,
                                           trader_plan, *debators_out)
                              if r.get("abstained")),
@@ -901,6 +947,47 @@ def run_desk(
                  "conviction": pm["conviction"]})
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
+    # R2-5 — generate the institutional memo + run the mechanical
+    # evidence-checker. The memo is the audit-grade output (thesis +
+    # per-claim citations + bull/base/bear scenarios w/ probabilities +
+    # risk factors + vol-based sizing + kill criteria + conviction).
+    # The evidence-checker re-verifies EVERY cited number in the memo
+    # against the raw artifacts (zero-fabrication guarantee). Both are
+    # pure-function (no LLM call, no I/O) — they're deterministic
+    # projections of the PM decision + the raw artifacts.
+    try:
+        memo = generate_memo(
+            pm_decision=pm,
+            run_id=run_id,
+            symbol=str(detail.get("symbol") or symbol),
+            as_of=_now_iso(),
+            verified_snapshot=verified_snapshot,
+            trader_plan=trader_plan,
+            research_memo=research_memo,
+            personas_out=personas_out,
+            researchers_out=researchers_out,
+            debators_out=debators_out,
+        )
+        memo_dict = memo.to_dict()
+    except Exception as e:  # noqa: BLE001 — fail-soft memo
+        memo_dict = {"ok": False, "error": str(e),
+                     "run_id": run_id,
+                     "symbol": str(detail.get("symbol") or symbol)}
+    try:
+        evidence_report = verify_memo(
+            memo=memo_dict,
+            verified_snapshot=verified_snapshot,
+            personas_out=personas_out,
+            researchers_out=researchers_out,
+            research_memo=research_memo,
+            debators_out=debators_out,
+            trader_plan=trader_plan,
+        )
+    except Exception as e:  # noqa: BLE001 — fail-soft evidence-checker
+        evidence_report = {"ok": False, "error": str(e),
+                           "claims_checked": 0, "claims_verified": 0,
+                           "claims_failed": [],
+                           "zero_fabrication_guarantee": False}
     report = {
         "ok": True,
         "symbol": detail.get("symbol") or str(symbol),
@@ -918,6 +1005,8 @@ def run_desk(
             for r in personas_out),
         "personas": personas_out,
         "pm": pm,
+        "memo": memo_dict,
+        "evidence_report": evidence_report,
         "abstained": sum(1 for r in personas_out if r["abstained"]),
         "model": primary,
         "run_id": run_id,
