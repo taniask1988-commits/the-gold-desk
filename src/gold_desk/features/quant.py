@@ -418,19 +418,39 @@ def compute_beta(symbol_bars: list[dict], benchmark_bars: list[dict],
                  window: int = 63) -> dict:
     """OLS regression symbol ~ benchmark over daily log-returns.
 
-    Returns {beta, alpha, r_squared, correlation, n}. r_squared in [0,1].
-    <2 returns → all None. Pure-python OLS (numpy-free) so the test
-    fixture is reproducible."""
+    Returns {beta, alpha, r_squared, correlation, n,
+             low_confidence, low_confidence_reason}. r_squared in [0,1].
+
+    R2-2-FIX D6: low_confidence flag fires when the OLS math is
+    technically defined but the beta is not interpretable as a risk
+    number — specifically when (a) the benchmark variance is below
+    1e-6 (flat-line benchmark → any cov/var_b ratio explodes), (b)
+    r_squared < 0.05 (the linear fit is real but explains <5% of the
+    variance — beta is statistically near-meaningless), or (c) the
+    aligned window n < 20 (too few points to trust the regression).
+    When the guard fires the function still returns the computed beta
+    (NOT None) so callers that want the raw number still get it, but
+    ALSO returns low_confidence=True + a reason string so the snapshot
+    / consumers can present the value with a warning instead of as a
+    confident risk number. When the OLS math is UNDEFINED (var_b == 0
+    or insufficient points), beta stays None — those are pre-existing
+    guards, unchanged from R2-2.
+
+    Pure-python OLS (numpy-free) so the test fixture is reproducible."""
     sym_c = _closes(symbol_bars)
     bench_c = _closes(benchmark_bars)
     if len(sym_c) < 2 or len(bench_c) < 2:
         return {"beta": None, "alpha": None, "r_squared": None,
-                "correlation": None, "n": 0}
+                "correlation": None, "n": 0,
+                "low_confidence": True,
+                "low_confidence_reason": "insufficient bars (n<2)"}
     sr, br = _daily_log_returns(sym_c, bench_c, window)
     n = len(sr)
     if n < 2:
         return {"beta": None, "alpha": None, "r_squared": None,
-                "correlation": None, "n": 0}
+                "correlation": None, "n": n,
+                "low_confidence": True,
+                "low_confidence_reason": "insufficient aligned returns"}
     mean_s = sum(sr) / n
     mean_b = sum(br) / n
     cov = sum((sr[i] - mean_s) * (br[i] - mean_b) for i in range(n)) / n
@@ -438,19 +458,38 @@ def compute_beta(symbol_bars: list[dict], benchmark_bars: list[dict],
     var_b = sum((br[i] - mean_b) ** 2 for i in range(n)) / n
     sd_s = math.sqrt(var_s) if var_s > 0 else 0.0
     sd_b = math.sqrt(var_b) if var_b > 0 else 0.0
+    # R2-2-FIX D6: low_confidence pre-checks (don't return None for
+    # these — the math is defined, but the beta is not interpretable).
+    low_conf_reason: str | None = None
+    if var_b < 1e-6:
+        low_conf_reason = (f"benchmark variance too low ({var_b:.2e}"
+                           f" < 1e-6) — beta explodes on a near-flat"
+                           f" benchmark")
+    # variance-zero case stays None (OLS undefined)
     if var_b == 0 or sd_s == 0 or sd_b == 0:
         return {"beta": None, "alpha": None, "r_squared": None,
-                "correlation": None, "n": n}
+                "correlation": None, "n": n,
+                "low_confidence": True,
+                "low_confidence_reason": "OLS undefined (var=0)"}
     beta = cov / var_b
     alpha = mean_s - beta * mean_b
     corr = cov / (sd_s * sd_b)
     r2 = corr * corr
+    # R2-2-FIX D6: low_confidence post-checks on the computed beta
+    if r2 < 0.05 and low_conf_reason is None:
+        low_conf_reason = (f"r_squared too low ({r2:.4f} < 0.05) — "
+                           f"linear fit explains <5% of variance")
+    if n < 20 and low_conf_reason is None:
+        low_conf_reason = (f"aligned window too short (n={n} < 20) — "
+                           f"regression underpowered")
     return {
         "beta": round(beta, 6),
         "alpha": round(alpha, 6),
         "r_squared": round(r2, 6),
         "correlation": round(corr, 6),
         "n": n,
+        "low_confidence": low_conf_reason is not None,
+        "low_confidence_reason": low_conf_reason,
     }
 
 

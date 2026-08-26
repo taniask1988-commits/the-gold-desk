@@ -919,12 +919,20 @@ def _slice_social(soc: dict | None) -> dict:
 
 
 def _slice_ohlc(detail: dict) -> dict:
-    bars = detail.get("bars") or []
+    """R2-2-FIX D4: cap to last 60 bars so the technician's prompt
+    stays under the per-persona 60s wall clock on 24/7 markets
+    (BTC-USD/EURUSD=X/ETH-USD ship ~240 30m bars over 5d; capping
+    to last 60 keeps the chart-reading checklist intact — last 30h
+    of structure, swing high/low, day-range — without blowing the
+    LLM's response budget)."""
+    bars_all = detail.get("bars") or []
+    bars = bars_all[-60:] if len(bars_all) > 60 else bars_all
     rows = [[_r4(b.get("o")), _r4(b.get("h")), _r4(b.get("l")), _r4(b.get("c"))]
             for b in bars]
     return {
-        "note": "5d of 30m bars, rows are [open, high, low, close]",
+        "note": "5d of 30m bars (capped to last 60 for technician prompt size; R2-2-FIX D4), rows are [open, high, low, close]",
         "bar_count": len(bars),
+        "bar_count_full": len(bars_all),
         "first_bar_ts": bars[0]["ts"] if bars else None,
         "last_bar_ts": bars[-1]["ts"] if bars else None,
         "price": detail.get("price"),
@@ -936,11 +944,20 @@ def _slice_ohlc(detail: dict) -> dict:
 
 def _slice_indicators(detail: dict) -> dict:
     """Bar-derived technicals, computed the same way as the desk tools
-    (Wilder ATR(14), ranges, swings, last-8 momentum stats)."""
-    bars = detail.get("bars") or []
+    (Wilder ATR(14), ranges, swings, last-8 momentum stats).
+
+    R2-2-FIX D4: bars are capped to last 60 for the technician's
+    prompt size on 24/7 markets (mirrors _slice_ohlc); ATR/range/
+    swing/momentum all work on the capped tail which is still enough
+    for the chart-reading checklist (the technician doesn't need the
+    full 5d of 30m bars to read structure — last 30h is plenty)."""
+    bars_all = detail.get("bars") or []
+    bars = bars_all[-60:] if len(bars_all) > 60 else bars_all
     price = detail.get("price")
-    out: dict = {"note": "derived from the 5d 30m bars by the harness",
-                 "bar_count": len(bars)}
+    out: dict = {"note": "derived from the 5d 30m bars (capped to last 60 "
+                 "for technician prompt size; R2-2-FIX D4) by the harness",
+                 "bar_count": len(bars),
+                 "bar_count_full": len(bars_all)}
     if len(bars) < 2:
         out["error"] = "insufficient bars for indicators"
         return out
