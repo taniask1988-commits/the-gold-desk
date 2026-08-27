@@ -84,6 +84,22 @@
                                                     # a deterministic
                                                     # synthetic ledger when
                                                     # no file is given)
+    python -m gold_desk.cli watch-loop [--dry-run] [--daemon]
+                                       [--interval 300] [--status] [--json]
+                                                    # R4-1: autonomous alert
+                                                    # sweep — one pass or a
+                                                    # daemon; fires price/%/
+                                                    # ATR/volume/corr rules,
+                                                    # journals ALERT_FIRED,
+                                                    # pushes via Telegram
+    python -m gold_desk.cli alerts [--ack EVENT_ID] [--json]
+    python -m gold_desk.cli alerts-add --symbol GC=F --kind pct_move
+                                       [--threshold 1.5] [--window 24]
+                                       [--level L] [--k 2.5] [--other SYM]
+                                       [--cooldown 60] [--json]
+    python -m gold_desk.cli alerts-rm --id RULE_ID [--json]
+                                                    # R4-1: alert rule CRUD +
+                                                    # fired log + ack
 """
 from __future__ import annotations
 
@@ -1892,6 +1908,202 @@ def cmd_desk(args) -> int:
     return 0
 
 
+def _watch_loop(args):
+    """Shared sweep runner for the watch-loop subcommand. Telegram push
+    is wired through the existing TelegramIO (env GOLD_DESK_TG_TOKEN /
+    GOLD_DESK_TG_CHAT_ID); unconfigured env → delivery silently
+    skipped, fired log + journal still record everything."""
+    from pathlib import Path as _P
+    from .watch.loop import WatchLoop, _watch_journal
+    from .telegram_io import TelegramIO
+
+    telegram = TelegramIO(_watch_journal(_P(args.data_root)))
+    loop = WatchLoop(data_root=args.data_root, telegram=telegram,
+                     correlation_provider=_corr_provider(args.data_root))
+    if getattr(args, "interval", None):
+        loop.interval_seconds = int(args.interval)
+    return loop
+
+
+def _corr_provider(data_root):
+    """30d Pearson correlation for corr_flip rules (fail-soft)."""
+    from .markets.multi_asset import MultiAssetMonitor
+    mon = MultiAssetMonitor(data_root=data_root)
+
+    def _provide() -> dict:
+        return mon.compute_correlation(window=30, method="pearson")
+    return _provide
+
+
+def cmd_watch_loop(args) -> int:
+    """watch-loop — R4-1: autonomous alert sweep over the 8 instruments.
+
+    --dry-run (default when neither --daemon nor --status): one sweep,
+    print fired alerts. --daemon: sweep every --interval seconds until
+    Ctrl-C (clean exit). --status: loop state (last/next sweep, rules
+    count, per-instrument session open/closed).
+    """
+    from .watch.loop import watch_status
+    if args.status:
+        out = watch_status(args.data_root)
+        if args.json:
+            print(json.dumps(out, sort_keys=True, default=str))
+            return 0
+        print("WATCH LOOP STATUS (R4-1)")
+        print("=" * 64)
+        print(f"running       : {'yes' if out.get('running') else 'no recorded sweep'}")
+        print(f"last sweep    : {out.get('last_sweep') or '—'}")
+        print(f"next sweep    : {out.get('next_sweep') or '—'}"
+              + (f"  (every {out['interval_seconds']}s)"
+                 if out.get("interval_seconds") else ""))
+        print(f"ticks         : {out.get('ticks', 0)}")
+        print(f"rules         : {out.get('rules_count', 0)}"
+              f"   fired logged: {out.get('fired_logged', 0)}")
+        if out.get("last_error"):
+            print(f"last error    : {out['last_error']}")
+        print()
+        print(f"{'instrument':<12s}{'session':>10s}")
+        print("-" * 24)
+        for sym, open_ in (out.get("sessions") or {}).items():
+            print(f"{sym:<12s}{'OPEN' if open_ else 'closed':>10s}")
+        return 0
+
+    loop = _watch_loop(args)
+    if args.daemon:
+        print(f"watch loop daemon — sweeping every "
+              f"{args.interval}s (Ctrl-C to stop)")
+        fired = loop.run_daemon(interval_seconds=args.interval)
+        if args.json:
+            print(json.dumps({"ok": True, "daemon": True,
+                              "fired": [e.to_dict() for e in fired]},
+                             sort_keys=True, default=str))
+        return 0
+    # one sweep (--dry-run or bare)
+    fired = loop.run_once()
+    out = {
+        "ok": True,
+        "dry_run": True,
+        "as_of": loop.last_sweep_at,
+        "rules": len(loop.rules()),
+        "fired": [e.to_dict() for e in fired],
+        "last_error": loop.last_error,
+    }
+    if args.json:
+        print(json.dumps(out, sort_keys=True, default=str))
+        return 0
+    print("WATCH LOOP SWEEP — R4-1 (dry run)")
+    print("=" * 64)
+    print(f"as of   : {out['as_of'] or '?'}   rules: {out['rules']}")
+    if out["last_error"]:
+        print(f"error   : {out['last_error']} (fail-soft — sweep skipped)")
+    if not fired:
+        print("fired   : (nothing — no rule threshold met on live data)")
+        return 0
+    print(f"fired   : {len(fired)}")
+    for e in fired:
+        print(f"  [{e.kind}] {e.symbol} — {e.message}"
+              f"  (rule {e.rule_id}, data {e.fired_at})")
+    return 0
+
+
+def cmd_alerts(args) -> int:
+    """alerts — R4-1: list alert rules + recent fired alerts, or ack a
+    fired alert (--ack EVENT_ID)."""
+    from .watch.store import AlertStore
+    from .watch.loop import default_rules
+    store = AlertStore(args.data_root)
+    if args.ack:
+        ok = store.ack_alert(args.ack)
+        out = {"ok": ok, "acked": args.ack if ok else None}
+        if args.json:
+            print(json.dumps(out, sort_keys=True))
+        else:
+            print(f"ack {'set' if ok else 'NOT FOUND (unknown event id)'}: "
+                  f"{args.ack}")
+        return 0 if ok else 1
+    rules = store.load_rules() or default_rules()
+    fired = store.list_fired(limit=args.limit)
+    out = {
+        "ok": True,
+        "rules": [r.to_dict() for r in rules],
+        "fired": fired,
+        "fired_count": len(fired),
+        "rules_count": len(rules),
+    }
+    if args.json:
+        print(json.dumps(out, sort_keys=True, default=str))
+        return 0
+    print("ALERT RULES (R4-1)")
+    print("=" * 78)
+    print(f"{'id':<26s}{'symbol':<11s}{'kind':<14s}{'params':<22s}"
+          f"{'cd/min':>7s}{'on':>4s}")
+    print("-" * 78)
+    for r in rules:
+        p = json.dumps(r.params, sort_keys=True, default=str)
+        print(f"{r.id[:25]:<26s}{r.symbol:<11s}{r.kind:<14s}"
+              f"{p[:21]:<22s}{r.cooldown_minutes:>7d}"
+              f"{'✓' if r.enabled else '·':>4s}")
+    print()
+    print(f"FIRED LOG (last {len(fired)})")
+    print("-" * 78)
+    if not fired:
+        print("(no alerts fired yet)")
+    for f in fired:
+        ack = " [ack]" if f.get("ack") else ""
+        print(f"  {f.get('wall_fired_at') or f.get('fired_at') or '?'}"
+              f"  [{f.get('kind')}] {f.get('symbol')}"
+              f"  {f.get('message')}{ack}")
+    return 0
+
+
+def cmd_alerts_add(args) -> int:
+    """alerts-add — R4-1: add an alert rule (persisted to
+    <data_root>/watch/alerts.json)."""
+    from .watch.alerts import AlertRule
+    from .watch.store import AlertStore
+    params: dict = {}
+    if args.level is not None:
+        params["level"] = args.level
+    if args.threshold is not None:
+        params["threshold"] = args.threshold
+    if args.window is not None:
+        params["window_bars"] = args.window
+    if args.k is not None:
+        params["k"] = args.k
+    if args.other:
+        params["other"] = args.other
+    if not args.symbol:
+        print("alerts-add: --symbol is required", file=sys.stderr)
+        return 1
+    rule = AlertRule(
+        id=args.id or "",
+        symbol=args.symbol, kind=args.kind, params=params,
+        cooldown_minutes=args.cooldown,
+        note=args.note or "")
+    store = AlertStore(args.data_root)
+    added = store.add_rule(rule)
+    out = {"ok": True, "rule": added.to_dict()}
+    if args.json:
+        print(json.dumps(out, sort_keys=True, default=str))
+        return 0
+    print(f"added rule {added.id}: {added.symbol} {added.kind} "
+          f"{added.params}")
+    return 0
+
+
+def cmd_alerts_rm(args) -> int:
+    """alerts-rm — R4-1: remove an alert rule by id."""
+    from .watch.store import AlertStore
+    store = AlertStore(args.data_root)
+    ok = store.remove_rule(args.id)
+    out = {"ok": ok, "removed": args.id if ok else None}
+    if args.json:
+        print(json.dumps(out, sort_keys=True))
+    else:
+        print(f"{'removed' if ok else 'NOT FOUND'}: {args.id}")
+    return 0 if ok else 1
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="gold-desk",
                                      description="Gold Decision Harness v1")
@@ -2303,6 +2515,77 @@ def main(argv=None) -> int:
     p_pnl.add_argument("--json", action="store_true")
     p_pnl.add_argument("--data-root", default=str(REPO_ROOT / "data"))
     p_pnl.set_defaults(func=cmd_pnl)
+
+    # --- R4-1 autonomous watch loop + alert engine ---
+    p_wl = sub.add_parser("watch-loop",
+                          help="R4-1: autonomous alert sweep — price "
+                               "levels, % moves, ATR/volume spikes, "
+                               "correlation flips over the 8 keyless "
+                               "instruments (session-gated polling, "
+                               "cooldown dedup, journal + Telegram)")
+    p_wl.add_argument("--dry-run", action="store_true", dest="dry_run",
+                      help="one sweep, print fired alerts (default "
+                           "when --daemon/--status are absent)")
+    p_wl.add_argument("--daemon", action="store_true",
+                      help="sweep forever every --interval seconds "
+                           "(Ctrl-C exits cleanly)")
+    p_wl.add_argument("--interval", type=int, default=300,
+                      help="daemon sweep interval seconds (default 300)")
+    p_wl.add_argument("--status", action="store_true",
+                      help="print loop state (last/next sweep, rules "
+                           "count, per-instrument session open/closed)")
+    p_wl.add_argument("--json", action="store_true")
+    p_wl.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_wl.set_defaults(func=cmd_watch_loop)
+
+    p_al = sub.add_parser("alerts",
+                          help="R4-1: list alert rules + recent fired "
+                               "alerts, or ack a fired alert")
+    p_al.add_argument("--ack", default=None, metavar="EVENT_ID",
+                      help="mark a fired alert acknowledged")
+    p_al.add_argument("--limit", type=int, default=25,
+                      help="max fired alerts to list (default 25)")
+    p_al.add_argument("--json", action="store_true")
+    p_al.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_al.set_defaults(func=cmd_alerts)
+
+    p_ala = sub.add_parser("alerts-add",
+                           help="R4-1: add an alert rule "
+                                "(price_above/price_below/pct_move/"
+                                "atr_spike/volume_spike/corr_flip)")
+    p_ala.add_argument("--symbol", default=None,
+                       help="instrument symbol (e.g. GC=F, BTC-USD)")
+    p_ala.add_argument("--kind", default="pct_move",
+                       choices=["price_above", "price_below", "pct_move",
+                                "atr_spike", "volume_spike", "corr_flip"],
+                       help="rule kind (default pct_move)")
+    p_ala.add_argument("--threshold", type=float, default=None,
+                       help="pct_move: threshold %% (abs move)")
+    p_ala.add_argument("--window", type=int, default=None, dest="window",
+                       help="pct_move: window in 15m bars (1 = vs prior "
+                            "close, the daily move)")
+    p_ala.add_argument("--level", type=float, default=None,
+                       help="price_above/price_below: price level")
+    p_ala.add_argument("--k", type=float, default=None,
+                       help="atr_spike/volume_spike: multiple of the "
+                            "20-bar mean")
+    p_ala.add_argument("--other", default=None,
+                       help="corr_flip: the other symbol")
+    p_ala.add_argument("--cooldown", type=int, default=60,
+                       help="cooldown minutes before re-firing (default 60)")
+    p_ala.add_argument("--note", default="", help="free-text note")
+    p_ala.add_argument("--id", default="", help="explicit rule id "
+                        "(default: auto <symbol>:<kind>:<n>)")
+    p_ala.add_argument("--json", action="store_true")
+    p_ala.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_ala.set_defaults(func=cmd_alerts_add)
+
+    p_alr = sub.add_parser("alerts-rm",
+                           help="R4-1: remove an alert rule by id")
+    p_alr.add_argument("--id", required=True, help="rule id to remove")
+    p_alr.add_argument("--json", action="store_true")
+    p_alr.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_alr.set_defaults(func=cmd_alerts_rm)
 
     args = parser.parse_args(argv)
     return args.func(args)

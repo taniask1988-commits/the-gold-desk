@@ -31,6 +31,10 @@ REASON_CODES = [
     "SOURCE_MISMATCH", "IGNORED_LATE_RESPONSE", "SPREAD_BLOWOUT",
     "ACCOUNT_CORRUPT_RECOVERED",
     "TICKET_SENT",
+    # R4-1 (additive): fired watch-loop alert — an AlertFired event's
+    # reason code. Never a BAR terminal code (alerts are untethered to
+    # bars), so the one-terminal-code-per-bar invariant is untouched.
+    "ALERT_FIRED",
 ]
 
 # LLM_INVALID_JSON is declared for completeness but is folded into LLM_VETO

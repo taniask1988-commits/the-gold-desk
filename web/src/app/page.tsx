@@ -9,6 +9,8 @@ import { BacktestPanel } from "@/components/desk/BacktestPanel";
 // R3-3 panels (portfolio construction + P&L attribution)
 import { PortfolioPanel } from "@/components/desk/PortfolioPanel";
 import { AttributionPanel } from "@/components/desk/AttributionPanel";
+// R4-1 panels (autonomous watch loop + alert engine)
+import { AlertsPanel } from "@/components/desk/AlertsPanel";
 
 export default function Home() {
   return (
@@ -29,6 +31,8 @@ export default function Home() {
         <PortfolioPanel />
         {/* R3-3 Row 7: P&L attribution (by asset / by setup / by hour + sessions) */}
         <AttributionPanel />
+        {/* R4-1 Row 8: autonomous watch loop (alert rules + fired feed + ack) */}
+        <AlertsPanel />
       </div>
     </>
   );
