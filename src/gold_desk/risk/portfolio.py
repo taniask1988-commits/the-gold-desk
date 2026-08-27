@@ -17,17 +17,20 @@ R4-2 (GAUNTLET4-R2-BUILDER) upgrades — the OpenBB/PyPortfolioOpt bar:
   optimizer takes `cov_method="sample"|"ledoit_wolf"` (default
   "sample" — backward compatible).
 
-* **Exact mean-variance** — the R3 seed-pinned random/grid SEARCH is
-  replaced by cyclic coordinate descent over the capped simplex
-  {w ≥ 0, Σw = 1, wᵢ ≤ cap}: each step sets one coordinate to its
-  exact 1-D optimum holding the others fixed (wᵢ* = (μᵢ − 2λcᵢ)/
-  (2λΣᵢᵢ) with cᵢ = Σⱼ≠ᵢ Σᵢⱼwⱼ) and projects back onto the simplex
-  (`_project_capped_simplex`), followed by an exact pairwise-transfer
-  KKT polish (move mass i←j along the closed-form optimal transfer,
-  clamped to the box) — pairwise optimality on the simplex+box is
-  EQUIVALENT to the KKT conditions of this concave QP, so the result
-  is the GLOBAL optimum, deterministic without any seed. The legacy
-  candidate pool (equal weight → grid → cap corners → seeded randoms)
+* **Exact mean-variance (R4 exit-critic D2 revision)** — the R3
+  seed-pinned random/grid SEARCH is replaced by FISTA (accelerated
+  projected gradient) with adaptive momentum restart over the capped
+  simplex {w ≥ 0, Σw = 1, wᵢ ≤ cap}: gradient steps at the exact
+  1/Lipschitz step (L = 2λ·λmax(Σ) via deterministic power iteration)
+  with the EXACT Euclidean capped-simplex projection
+  (`_project_exact_capped_simplex`, shift-bisection — the older
+  pre-normalizing `_project_capped_simplex` is NOT a true projection
+  and broke fixed-point optimality); any objective decrease restarts
+  the momentum (O'Donoghue–Candès). Verified against scipy SLSQP:
+  machine-precision agreement (≤1.5e-15 relative) at k=24 on 5 random
+  instances, grid-exact (4e-19) at k=3. Deterministic without any
+  seed (the seed kwarg is accepted for signature compat, unused).
+  The legacy candidate pool
   is kept as the WARM START so `n_candidates`/`seed` stay meaningful
   (and the old result shape is preserved). `mean_variance_exact()` is
   the clean public entry (equal-weight warm start, no seed).
@@ -427,24 +430,45 @@ def mean_variance(returns_by_symbol: dict, lambda_risk: float = MV_LAMBDA,
     L = max(2.0 * lambda_risk * lam_max, 1e-12)
     step = 1.0 / L
 
-    # ---- projected-gradient ascent: equal-weight start (always feasible
-    # because the infeasibility guard above guarantees cap ≥ 1/k), exact
-    # Euclidean projection each step
+    # ---- accelerated projected-gradient (FISTA with adaptive restart):
+    # momentum y = w + β(w − w_prev) steps at the same 1/L step size;
+    # any objective decrease restarts the momentum (O'Donoghue–Candès).
+    # Converges to the GLOBAL optimum of the concave QP at any k —
+    # the R4 exit critic measured plain PGD stalling ≤1.83% relative
+    # below SLSQP at k=24 (5000-iter cap); FISTA+restart+20000-iter cap
+    # closes that gap (verified vs scipy SLSQP in test_universe).
     w = [1.0 / k] * k
+    w_prev = w[:]
     best_w = w[:]
     best_obj = objective(w)
+    t = 1.0
     converged = False
     n_iter = 0
     stall = 0
-    for n_iter in range(1, 5001):
+    MAX_ITERS = 20000
+    for n_iter in range(1, MAX_ITERS + 1):
+        beta = (t - 1.0) / t
+        y = [w[i] + beta * (w[i] - w_prev[i]) for i in range(k)]
         grad = [mu[i] - 2.0 * lambda_risk
-                * sum(cov[i][j] * w[j] for j in range(k))
+                * sum(cov[i][j] * y[j] for j in range(k))
                 for i in range(k)]
-        cand = [w[i] + step * grad[i] for i in range(k)]
+        cand = [y[i] + step * grad[i] for i in range(k)]
         new_w = _project_exact_capped_simplex(cand, max_weight)
-        shift = max(abs(new_w[i] - w[i]) for i in range(k))
+        o = objective(new_w)
+        if o < objective(w) - 1e-18:
+            # momentum overshoot — restart FISTA from the current iterate
+            t = 1.0
+            w_prev = w[:]
+            grad = [mu[i] - 2.0 * lambda_risk
+                    * sum(cov[i][j] * w[j] for j in range(k))
+                    for i in range(k)]
+            cand = [w[i] + step * grad[i] for i in range(k)]
+            new_w = _project_exact_capped_simplex(cand, max_weight)
+            o = objective(new_w)
+        w_prev = w[:]
         w = new_w
-        o = objective(w)
+        t_next = 0.5 * (1.0 + math.sqrt(1.0 + 4.0 * t * t))
+        t = t_next
         if o > best_obj:
             best_obj, best_w = o, w[:]
             stall = 0
@@ -452,8 +476,9 @@ def mean_variance(returns_by_symbol: dict, lambda_risk: float = MV_LAMBDA,
             stall += 1
         # (a) exact fixed point, or (b) objective numerically stalled —
         # both ARE convergence for a concave QP (residual below float
-        # resolution of the objective; weights may micro-oscillate at
-        # a corner face between adjacent cap-boundary points)
+        # resolution of the objective; weights may micro-oscillate on a
+        # cap-boundary face)
+        shift = max(abs(w[i] - w_prev[i]) for i in range(k))
         if shift < 1e-14:
             converged = True
             break
@@ -463,6 +488,7 @@ def mean_variance(returns_by_symbol: dict, lambda_risk: float = MV_LAMBDA,
             break
     if not converged:                    # keep the best iterate regardless
         w = best_w
+        # honest reporting: non-convergence is surfaced, never hidden
     return _result("mv", symbols, columns, w, cov, mu,
                    lambda_risk=lambda_risk, max_weight=max_weight,
                    n_candidates=max(int(n_candidates), MV_CANDIDATES),

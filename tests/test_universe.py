@@ -368,14 +368,88 @@ def test_optimize_passes_cov_method_through():
 
 
 def test_lw_vs_sample_changes_solution():
-    """Shrinkage actually changes the covariance the optimizer sees —
-    on noisy short samples the LW weights differ from sample weights."""
-    rng = random.Random(2)
+    """Shrinkage actually changes the covariance the optimizer sees — on
+    this pinned instance (seed 10, heterogeneous vols, n=35: the sample
+    Σ is noisy enough that full LW shrinkage re-ranks assets) the LW
+    optimum sits at a different point than the sample optimum."""
+    rng = random.Random(10)
     ret = {}
     for i in range(6):
-        ret[f"A{i}"] = [rng.gauss(0.001 * (i + 1), 0.01)
-                        for _ in range(40)]     # only 40 obs: noisy Σ
+        ret[f"A{i}"] = [rng.gauss(0.001 * (i + 1), 0.005 + 0.004 * ((i * 7) % 6))
+                        for _ in range(35)]
     s = pf.mean_variance(ret, max_weight=0.4)
     lw = pf.mean_variance(ret, max_weight=0.4, cov_method="ledoit_wolf")
-    assert s["weights"] != lw["weights"]        # estimator matters
-    assert lw["shrink_intensity"] > 0.05        # ...and it actually shrinks
+    assert lw["shrink_intensity"] > 0.3        # it actually shrinks
+    l1 = sum(abs(a - b) for a, b in
+             zip(s["weights"].values(), lw["weights"].values()))
+    assert l1 > 0.01                           # ...and the optimum moves
+
+
+# ------------------------- R4 EXIT-critic D1/D2 regressions ----------------
+def test_stress_replay_cash_sleeve_is_flat_never_fetched():
+    """D1: 'CASH' must never resolve to the NASDAQ ticker CASH — it is a
+    flat sleeve: 0%/day, listed in `flat`, absent from fetch calls."""
+    from gold_desk.risk import metrics as rm
+    fetched = []
+
+    def fetch(sym, start, end, **kw):
+        fetched.append(sym)
+        return {"2020-02-19": 100.0, "2020-02-20": 90.0}   # −10% if used
+
+    positions = [{"symbol": "SPY", "weight": 0.5},
+                 {"symbol": "CASH", "weight": 0.5}]
+    out = rm.stress_replay(positions, "covid_2020", fetch=fetch)
+    assert out["ok"] is True
+    assert "CASH" not in fetched                     # never hit Yahoo
+    assert out["flat"] == ["CASH"]                   # surfaced as flat
+    # SPY −10% on half the book → −5% cumulative; CASH contributes 0
+    assert out["cumulative"] == pytest.approx(-0.05, abs=1e-12)
+
+
+def test_stress_replay_flat_assets_listed_not_unshocked():
+    from gold_desk.risk import metrics as rm
+    out = rm.stress_replay(
+        [{"symbol": "SPY", "weight": 0.4},
+         {"symbol": "USDT", "weight": 0.3},
+         {"symbol": "MISSING-1", "weight": 0.3}],
+        "covid_2020",
+        bars_by_symbol={"SPY": {"2020-02-19": 100.0, "2020-02-20": 80.0},
+                        "MISSING-1": {}})
+    assert "USDT" in out["flat"]                     # modeled flat
+    assert "USDT" not in out["unshocked"]            # NOT "unmodeled"
+    assert "MISSING-1" in out["unshocked"]           # genuinely unmodeled
+
+
+def test_mv_fista_exact_vs_slsqp_at_k24():
+    """D2: the exit critic measured plain PGD stalling ≤1.83% relative
+    below SLSQP at k=24. FISTA + adaptive restart + 20000-iter cap must
+    match SLSQP to ~machine precision on the same kind of instance.
+    Skipped when scipy is absent (stdlib-only deploys)."""
+    scipy_minimize = pytest.importorskip(
+        "scipy.optimize", reason="scipy SLSQP reference").minimize
+    rng = random.Random(7)
+    ret = {}
+    for i in range(24):
+        ret[f"S{i:02d}"] = [rng.gauss(0.0004 * (24 - i), 0.012)
+                            for _ in range(250)]
+    out = pf.mean_variance(ret, max_weight=0.4, lambda_risk=2.0)
+    assert out["converged"] is True
+    syms = out["symbols"]
+    mu = [out["expected_returns"][s] for s in syms]
+    _, cols = pf._prepare(ret)
+    cov = pf._cov_matrix(cols)
+    k = 24
+    lam = 2.0
+
+    def negobj(w):
+        return -(sum(w[i] * mu[i] for i in range(k))
+                 - lam * sum(w[i] * cov[i][j] * w[j]
+                             for i in range(k) for j in range(k)))
+
+    res = scipy_minimize(negobj, [1.0 / k] * k, method="SLSQP",
+                         bounds=[(0.0, 0.4)] * k,
+                         constraints=[{"type": "eq",
+                                       "fun": lambda w: sum(w) - 1.0}],
+                         options={"maxiter": 500, "ftol": 1e-14})
+    rel = (res.fun * -1 - out["objective"]) / max(abs(res.fun), 1e-18)
+    assert rel < 1e-6                                # SLSQP-level exact

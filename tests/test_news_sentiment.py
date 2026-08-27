@@ -636,9 +636,16 @@ def test_r43_taxonomy_multi_keyword_confidence_rises():
 
 
 def test_r43_taxonomy_ties_resolve_in_charter_order():
-    """macro and geopolitical each fire once → macro wins (listed first)."""
-    out = classify_event("War shocks markets as inflation spikes")
-    assert out["event"] == "macro"
+    """D6 revision: arbitration is hit-count × specificity — an explicit
+    geopolitical marker (war) now beats a single generic macro keyword
+    (inflation); a same-category tie still resolves in charter order
+    (deterministic)."""
+    # explicit marker wins over generic (was: macro won the 1-1 tie)
+    assert classify_event("War shocks markets as inflation spikes")[
+        "event"] == "geopolitical"
+    # same-specificity tie → charter order (macro before demand)
+    assert classify_event("Recession fears hit demand outlook")[
+        "event"] == "macro"
 
 
 def test_r43_taxonomy_deterministic():
@@ -865,3 +872,25 @@ def test_cli_news_sentiment_r43_json(capsys, tmp_path):
     assert out["event_confidence"] > 0.3
     assert out["per_asset"][0]["symbol"] == "CL=F"
     assert "semantic_novelty" in out
+
+
+# --- R4 exit-critic D5: synonym-heavy paraphrases must be recognized -----
+def test_semantic_novelty_synonym_heavy_paraphrase():
+    from gold_desk.markets.news_sentiment import semantic_novelty
+    prior = "Gold surges as Fed signals dovish pivot"
+    para = "Bullion climbs after the Federal Reserve hints at easier policy"
+    assert semantic_novelty(para, [prior]) < 0.3
+
+
+def test_semantic_novelty_oil_synonym_paraphrase():
+    from gold_desk.markets.news_sentiment import semantic_novelty
+    prior = "Oil spikes after OPEC cut"
+    para = "Crude surges following OPEC output reduction"
+    assert semantic_novelty(para, [prior]) < 0.3
+
+
+def test_semantic_novelty_distinct_still_high_after_synonyms():
+    from gold_desk.markets.news_sentiment import semantic_novelty
+    prior = "Gold surges as Fed signals dovish pivot"
+    assert semantic_novelty("Wheat harvest exceeds expectations",
+                            [prior]) > 0.7

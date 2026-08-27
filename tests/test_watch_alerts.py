@@ -831,3 +831,41 @@ def test_price_above_no_params_never_fires():
             "assets": {"GC=F": {"price": 4690.5}}}
     rule = AlertRule(id="r4", symbol="GC=F", kind="price_above", params={})
     assert evaluate_rules([rule], snap) == []
+
+
+# --- R4 exit-critic D4: rules on universe symbols outside the default 8 --
+def test_rule_on_universe_symbol_outside_watchlist_gets_polled(tmp_path):
+    """A rule on SI=F (universe #9) must extend the monitor's sweep —
+    before D4 it was accepted but never evaluated."""
+    import datetime as _dt
+    from gold_desk.watch.loop import WatchLoop
+    from gold_desk.watch.alerts import AlertRule
+
+    def fetch(symbols):
+        return {s: {"ok": True, "price": 31.0,
+                    "regularMarketPreviousClose": 30.0,
+                    "shortName": s, "name": s}
+                for s in symbols}
+
+    wed = _dt.datetime(2026, 8, 26, 14, 0, tzinfo=_dt.timezone.utc)
+    loop = WatchLoop(data_root=tmp_path,
+                     rules=[AlertRule("si-up", "SI=F", "price_above",
+                                      {"level": 30.5})],
+                     fetcher=fetch)
+    assert "SI=F" not in loop.monitor.symbols          # starts uncovered
+    fired = loop.run_once(now=wed)
+    assert "SI=F" in loop.monitor.symbols              # D4: now covered
+    assert len(fired) == 1 and fired[0].symbol == "SI=F"
+
+
+def test_cover_rule_symbols_idempotent(tmp_path):
+    from gold_desk.watch.loop import WatchLoop
+    from gold_desk.watch.alerts import AlertRule
+
+    loop = WatchLoop(data_root=tmp_path, rules=[])
+    base = loop.monitor.symbols
+    loop._cover_rule_symbols([])                       # nothing to add
+    assert loop.monitor.symbols == base
+    loop._cover_rule_symbols([AlertRule("gc", "GC=F", "price_above",
+                                        {"level": 1.0})])
+    assert loop.monitor.symbols == base                # GC=F already there

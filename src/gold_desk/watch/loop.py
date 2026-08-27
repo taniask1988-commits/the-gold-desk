@@ -292,6 +292,28 @@ class WatchLoop:
         return snap
 
     # ----------------------------------------------------------- sweep
+    def _cover_rule_symbols(self, rules: list[AlertRule]) -> None:
+        """R4 exit-critic D4 — rules may reference ANY universe symbol;
+        the monitor must sweep the union of its own watchlist + every
+        rule symbol. Before this, a rule on (say) SI=F was accepted by
+        the CLI/web but silently never evaluated (the 8-symbol snapshot
+        had no SI=F row). Idempotent; preserves UNIVERSE ordering."""
+        try:
+            have = set(self.monitor.symbols)
+        except Exception:                     # pragma: no cover — safety
+            return
+        missing = {r.symbol for r in rules
+                   if r.symbol and r.symbol not in have}
+        if not missing:
+            return
+        try:
+            from ..markets.registry import UNIVERSE
+            order = {e["symbol"]: i for i, e in enumerate(UNIVERSE)}
+            missing = sorted(missing, key=lambda s: order.get(s, 10_000))
+        except Exception:                     # pragma: no cover
+            missing = sorted(missing)
+        self.monitor._symbols = self.monitor.symbols + list(missing)
+
     def run_once(self, now: datetime | None = None) -> list[AlertEvent]:
         """One sweep. Returns the events that FIRED (survived cooldown).
         Never raises — a fetch failure is logged, state-stamped and
@@ -299,6 +321,7 @@ class WatchLoop:
         now = now or utc_now()
         self.ticks += 1
         rules = self._effective_rules()
+        self._cover_rule_symbols(rules)      # R4 exit-critic D4
         self.engine.set_cooldowns(rules)
 
         # session gate at evaluation time (authoritative — a cached

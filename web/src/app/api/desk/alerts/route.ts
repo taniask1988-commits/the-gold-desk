@@ -92,13 +92,19 @@ export async function POST(req: Request) {
   const kind = String(body.kind || "pct_move");
   if (!symbol) return NextResponse.json({ ok: false, error: "symbol required" }, { status: 400 });
   const args = ["alerts-add", "--symbol", symbol, "--kind", kind];
+  // R4 exit-critic D8: callers may pass either FLAT fields (threshold,
+  // level, ...) or a nested params{} object (the store/CLI shape) — the
+  // nested object is flattened onto the same flags; flat wins on conflict.
+  const nested = (body.params && typeof body.params === "object") ? body.params as Record<string, unknown> : {};
   const num = (v: unknown) => (v === null || v === undefined || v === "" ? null : String(v));
   for (const [flag, key] of [
     ["--threshold", "threshold"], ["--window", "window"], ["--level", "level"],
     ["--k", "k"], ["--other", "other"], ["--cooldown", "cooldown"],
     ["--note", "note"],
   ] as const) {
-    const v = num(body[key]);
+    const flat = num(body[key]);
+    const fromNested = num(nested[key]);
+    const v = flat !== null ? flat : fromNested;
     if (v !== null) args.push(flag, v);
   }
   return NextResponse.json(await runCli(HARNESS, PYTHON, args));

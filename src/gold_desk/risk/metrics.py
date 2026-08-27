@@ -257,6 +257,17 @@ def _replay_from_bars(positions: list[dict], scenario: str,
     }
 
 
+# R4-3 EXIT-critic D1: symbols that are NOT market instruments. These
+# sleeves hold flat in every scenario — fetching them from Yahoo would
+# silently resolve to unrelated equities ("CASH" IS a NASDAQ ticker —
+# Pathward Financial — whose −49.8% COVID path is NOT what a cash sleeve
+# does). Fail-closed: never fetch, model as a flat 0%/day path, surface
+# in `flat` (modeled-flat) rather than `unshocked` (not modeled).
+FLAT_ASSETS: frozenset = frozenset({
+    "CASH", "USD", "USDT", "USDC", "MONEY_MARKET", "MMF", "T-BILL",
+})
+
+
 def stress_replay(positions: list[dict], scenario: str,
                   bars_by_symbol: dict[str, dict[str, float]] | None = None,
                   fetch=None, fast: bool = False,
@@ -291,8 +302,15 @@ def stress_replay(positions: list[dict], scenario: str,
         return out
 
     syms: list[str] = []
+    flat_syms: list[str] = []
     for pos in positions or []:
         sym = str(pos.get("symbol", "")).upper().strip()
+        if not sym:
+            continue
+        if sym in FLAT_ASSETS:
+            if sym not in flat_syms:
+                flat_syms.append(sym)   # modeled flat — never fetched
+            continue
         if sym and sym not in syms:
             syms.append(sym)
     if bars_by_symbol is None:
@@ -329,6 +347,7 @@ def stress_replay(positions: list[dict], scenario: str,
     out["static"] = static_entry
     out["unshocked"] = sorted(s for s in syms
                               if s not in out["shocked"])
+    out["flat"] = flat_syms          # D1: cash-like sleeves, modeled 0%/day
     return out
 
 

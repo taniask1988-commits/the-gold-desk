@@ -492,12 +492,16 @@ def test_r43_replay_window_boundaries():
 
 def test_r43_replay_missing_symbol_zero_and_unshocked():
     """A symbol with no bars contributes 0 and lands in unshocked —
-    never a crash, never a silent re-weight."""
+    never a crash, never a silent re-weight. R4-exit D1 revision:
+    cash-like sleeves (CASH) are MODELED FLAT (0%/day, listed in
+    `flat`), not 'unshocked' — only genuinely unmodeled symbols
+    (ZZZZ) land in unshocked."""
     pos = REPLAY_POS + [{"symbol": "CASH", "weight": 0.3},
                         {"symbol": "ZZZZ", "weight": 0.2}]
     out = rm.stress_replay(pos, "covid_2020", bars_by_symbol=REPLAY_BARS)
     assert out["ok"] is True
-    assert out["unshocked"] == ["CASH", "ZZZZ"]
+    assert out["unshocked"] == ["ZZZZ"]
+    assert out["flat"] == ["CASH"]
     assert out["shocked"] == ["GOLD", "SPY"]
     # identical numbers to the 2-symbol book (the dead legs added 0)
     base = rm.stress_replay(REPLAY_POS, "covid_2020",

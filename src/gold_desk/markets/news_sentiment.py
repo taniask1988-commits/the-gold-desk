@@ -535,6 +535,14 @@ _EVENT_KEYWORDS: dict[str, dict[str, tuple[str, ...]]] = {
         "booster": tuple(),
     },
 }
+# R4 exit-critic D6 — category specificity weights for arbitration.
+# Explicit markers (bitcoin/OPEC/Fed/war) define what a story IS;
+# generic words (inflows, demand) describe incidental context.
+_EVENT_SPECIFICITY: dict[str, float] = {
+    "crypto": 2.0, "fed": 2.0, "geopolitical": 2.0, "supply_shock": 2.0,
+    "earnings": 1.5, "macro": 1.0, "demand": 1.0, "flows": 1.0,
+}
+
 _EVENT_CONF_BASE = 0.35
 _EVENT_CONF_STEP = 0.20
 _EVENT_CONF_MAX = 0.95
@@ -570,15 +578,24 @@ def classify_event(headline: str) -> dict:
     geopolitical, supply_shock, demand, crypto, earnings, flows;
     "other" (confidence 0.0) when nothing fires. Multi-keyword matches
     raise the confidence: 1 hit → 0.35, 2 → 0.55, 3 → 0.75, ≥4 → 0.95.
-    """
+
+    R4 exit-critic D6 — arbitration is hit-count × specificity: an
+    EXPLICIT category marker (bitcoin/OPEC/Fed/war) outweighs the same
+    number of generic-flow keywords ("Bitcoin ETF inflows hit record
+    as crypto demand surges" is a CRYPTO story that mentions flows,
+    not a flows story that mentions crypto)."""
     norm = (headline or "").lower()
     if not norm.strip():
         return {"event": EVENT_OTHER, "confidence": 0.0, "matched": []}
     best_cat, best_hits = None, []
+    best_score = 0.0
     for cat in EVENT_CATEGORIES:
         hits = _event_category_hits(norm, cat)
-        if len(hits) > len(best_hits):
-            best_cat, best_hits = cat, hits
+        if not hits:
+            continue
+        score = len(hits) * _EVENT_SPECIFICITY.get(cat, 1.0)
+        if score > best_score + 1e-12:
+            best_cat, best_hits, best_score = cat, hits, score
     if best_cat is None:
         return {"event": EVENT_OTHER, "confidence": 0.0, "matched": []}
     n = len(best_hits)
@@ -846,13 +863,73 @@ def _stem_light(tok: str) -> str:
     return tok
 
 
+# R4 exit-critic D5 — domain synonym normalization. Move-verb clusters
+# alone leave synonym-heavy paraphrases unrecognized ("Bullion climbs
+# after the Federal Reserve hints at easier policy" scored novelty 0.85
+# against "Gold surges as Fed signals dovish pivot"). Multi-word phrases
+# are replaced BEFORE tokenization; single-token synonyms map at the
+# stem level. All clusters are market-domain, deterministic, additive.
+_PHRASE_SYNONYMS: tuple[tuple[str, str], ...] = (
+    ("federal reserve", "fed"),
+    ("central bank", "fed"),
+    ("the fed", "fed"),
+    ("monetary policy", "policy"),
+    ("interest rate", "rate"),
+    ("interest rates", "rate"),
+    ("rate cut", "ratecut"),
+    ("rate hike", "ratehike"),
+    ("policy easing", "easing"),
+    ("policy tightening", "tightening"),
+)
+_DOMAIN_SYNONYMS: dict[str, str] = {
+    # gold
+    "bullion": "gold", "xau": "gold", "yellow": "gold",
+    # the Fed / policy stance
+    "fomc": "fed", "powell": "fed", "fed": "fed",
+    "dovish": "dovish", "easier": "dovish", "softer": "dovish",
+    "looser": "dovish", "accommodative": "dovish", "gentler": "dovish",
+    "hawkish": "hawkish", "tighter": "hawkish", "firmer": "hawkish",
+    "restrictive": "hawkish",
+    # communication verbs
+    "hint": "signal", "suggest": "signal", "indicate": "signal",
+    "flag": "signal", "tease": "signal", "signal": "signal",
+    "point": "signal", "pave": "signal",
+    # policy actions
+    "cut": "cut", "trim": "cut", "reduce": "cut", "slash": "cut",
+    "reduction": "cut", "curtail": "cut", "lower": "cut",
+    "hike": "hike", "raise": "hike", "lift": "hike",
+    "easing": "easing", "stimulus": "easing", "pivot": "easing",
+    # oil
+    "crude": "oil", "wti": "oil", "brent": "oil",
+    # stocks
+    "stock": "equities", "stocks": "equities", "share": "equities",
+    "shares": "equities", "equity": "equities", "wall": "equities",
+    # dollar
+    "greenback": "dollar", "buck": "dollar",
+    # records
+    "peak": "record", "summit": "record", "high": "record",
+    "trough": "recordlow", "bottom": "recordlow",
+}
+
+
+def _apply_phrase_synonyms(text: str) -> str:
+    """Replace multi-word domain phrases with canonical tokens (case-
+    insensitive) so 'Federal Reserve' and 'Fed' tokenize identically."""
+    out = (text or "").lower()
+    for phrase, canon in _PHRASE_SYNONYMS:
+        if phrase in out:
+            out = out.replace(phrase, canon)
+    return out
+
+
 def _semantic_tokens(text: str) -> set[str]:
     """Content-word set with semantic normalization: stopwords dropped,
-    light stemming, move verbs mapped to __up__/__down__ cluster tokens.
-    "Gold surges as Fed signals dovish pivot" →
-    {gold, __up__, fed, signal, dovish, pivot}."""
+    light stemming, move verbs mapped to __up__/__down__ cluster tokens,
+    domain synonyms canonicalized (D5: bullion→gold, federal reserve→fed,
+    hints→signal, easier→dovish ...). "Gold surges as Fed signals dovish
+    pivot" → {gold, __up__, fed, signal, dovish, easing}."""
     out: set[str] = set()
-    for tok in _tokenize(text):
+    for tok in _tokenize(_apply_phrase_synonyms(text)):
         if tok in NOVELTY_STOPWORDS:
             continue
         stem = _stem_light(tok)
@@ -861,7 +938,7 @@ def _semantic_tokens(text: str) -> set[str]:
         elif stem in _DOWN_MOVES or tok in _DOWN_MOVES:
             out.add("__down__")
         else:
-            out.add(stem)
+            out.add(_DOMAIN_SYNONYMS.get(stem, stem))
     return out
 
 
