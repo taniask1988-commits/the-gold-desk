@@ -18,6 +18,7 @@ interface AssetSnapshot {
   source: string;
   fetched_at: number;
   error: string | null;
+  sector?: string;
 }
 
 interface MultiSnapshot {
@@ -176,11 +177,14 @@ function MultiAssetPanelImpl() {
   const [corr, setCorr] = useState<CorrMatrix | null>(null);
   const [window, setWindow] = useState<number>(30);
   const [method, setMethod] = useState<"pearson" | "spearman">("pearson");
+  const [universe, setUniverse] = useState<"watchlist" | "all">("watchlist");
+  const [sector, setSector] = useState<string>("all");
 
   const load = useCallback(async () => {
     try {
+      const q = universe === "all" ? "?all=1" : "";
       const [s, c] = await Promise.all([
-        fetch("/api/desk/markets/multi").then((x) => x.json()),
+        fetch(`/api/desk/markets/multi${q}`).then((x) => x.json()),
         fetch(`/api/desk/markets/correlation?window=${window}d&method=${method}`).then((x) => x.json()),
       ]);
       setSnap(s);
@@ -188,7 +192,7 @@ function MultiAssetPanelImpl() {
     } catch {
       setSnap(null);
     }
-  }, [window, method]);
+  }, [window, method, universe]);
 
   useEffect(() => {
     const kick = setTimeout(() => void load(), 0);
@@ -197,7 +201,10 @@ function MultiAssetPanelImpl() {
   }, [load]);
 
   const assets = snap?.assets || {};
-  const order = ["GC=F", "ES=F", "^TNX", "DX-Y.NYB", "BTC-USD", "^VIX", "CL=F", "EURUSD=X"];
+  const watchlist = ["GC=F", "ES=F", "^TNX", "DX-Y.NYB", "BTC-USD", "^VIX", "CL=F", "EURUSD=X"];
+  const order = universe === "all" ? Object.keys(assets) : watchlist;
+  const sectors = ["all", ...Array.from(new Set(order.map((s) => assets[s]?.sector).filter(Boolean) as string[]))];
+  const shown = sector === "all" ? order : order.filter((s) => assets[s]?.sector === sector);
   const errors = snap?.errors || [];
 
   return (
@@ -205,15 +212,38 @@ function MultiAssetPanelImpl() {
       <div className="flex flex-wrap items-baseline gap-3 border-b border-white/[0.08] pb-2">
         <span className="gdc-display text-[17px] italic text-[#f4f7fa]">Multi-asset monitor</span>
         <span className="gdc-kicker">
-          gold · s&p e-mini · 10y yield · dxy · btc · vix · wti · eur/usd — keyless yahoo
+          {universe === "all" ? "24-instrument universe · 8 sectors" : "gold · s&p e-mini · 10y yield · dxy · btc · vix · wti · eur/usd"} — keyless yahoo
         </span>
         <span className="ml-auto flex items-center gap-2 text-[8.5px] uppercase tracking-[0.18em] text-[#76828e]">
           {snap?.ok ? <span className="gdc-live-dot h-1.5 w-1.5 rounded-full bg-[#3fb950]" /> : null}
           {snap?.ok ? (snap.cache_hit ? "cached" : "live") : snap === null ? "loading…" : "feed unreachable"}
         </span>
       </div>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <button
+          onClick={() => { setUniverse("watchlist"); setSector("all"); }}
+          className={`rounded-full border px-2.5 py-0.5 text-[9px] uppercase tracking-[0.14em] transition-colors ${universe === "watchlist" ? "border-[#d4af37]/60 bg-[#d4af37]/10 text-[#d4af37]" : "border-white/10 text-[#76828e] hover:text-[#9aa6b3]"}`}
+        >
+          watchlist · 8
+        </button>
+        <button
+          onClick={() => { setUniverse("all"); setSector("all"); }}
+          className={`rounded-full border px-2.5 py-0.5 text-[9px] uppercase tracking-[0.14em] transition-colors ${universe === "all" ? "border-[#d4af37]/60 bg-[#d4af37]/10 text-[#d4af37]" : "border-white/10 text-[#76828e] hover:text-[#9aa6b3]"}`}
+        >
+          universe · 24
+        </button>
+        {universe === "all" && sectors.filter((s) => s !== "all").map((sec) => (
+          <button
+            key={sec}
+            onClick={() => setSector(sector === sec ? "all" : sec)}
+            className={`rounded-full border px-2.5 py-0.5 text-[9px] uppercase tracking-[0.14em] transition-colors ${sector === sec ? "border-[#d4af37]/60 bg-[#d4af37]/10 text-[#d4af37]" : "border-white/10 text-[#76828e] hover:text-[#9aa6b3]"}`}
+          >
+            {sec}
+          </button>
+        ))}
+      </div>
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
-        {order.map((sym) => (
+        {shown.map((sym) => (
           <AssetCard key={sym} asset={assets[sym] || { symbol: sym, name: "", calendar: "", price: null, prev_close: null, change_pct: null, session: "off", session_vwap: null, session_relative_pct: null, session_open_pct: null, sparkline: [], live: false, source: "", fetched_at: 0, error: "loading" }} />
         ))}
       </div>

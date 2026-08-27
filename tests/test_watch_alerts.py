@@ -538,7 +538,10 @@ class TestWatchLoop:
         loop, fetcher = self._loop(tmp_path, rules, quotes)
         fired = loop.run_once(now=SAT)          # COMEX closed Saturday
         assert fired == []
-        assert fetcher.calls and "GC=F" not in fetcher.calls[-1]
+        # R4-2 note: fetch happens in batches — GC=F must be absent from
+        # EVERY batch, not just the last one
+        polled = [s for call in fetcher.calls for s in call]
+        assert fetcher.calls and "GC=F" not in polled
         assert "GC=F" not in loop._polled
 
     def test_session_gated_open_instrument_polled(self, tmp_path):
@@ -547,7 +550,9 @@ class TestWatchLoop:
         loop, fetcher = self._loop(tmp_path, rules,
                                    {"GC=F": quote(2032.0, 2000.0)})
         loop.run_once(now=WED)
-        assert "GC=F" in fetcher.calls[-1]
+        # R4-2 note: fetch happens in batches — GC=F may land in any batch
+        polled = [s for call in fetcher.calls for s in call]
+        assert "GC=F" in polled
 
     def test_fail_soft_fetch_failure_then_recovery(self, tmp_path):
         rules = [AlertRule("gc-up", "GC=F", "pct_move",

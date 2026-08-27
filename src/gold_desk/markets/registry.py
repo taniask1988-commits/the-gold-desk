@@ -37,6 +37,13 @@ caller serves the INVERTED quote: price=1/price). Pairs where neither
 side is in the registry ("jpy/eur") resolve ad-hoc to the Yahoo symbol
 and board.fetch_detail anchors on whichever side Yahoo quotes at
 higher precision.
+
+Round-4 (GAUNTLET4-R2-BUILDER): `UNIVERSE` — the 24-instrument
+multi-asset desk universe (8 sector groups), with `sector_of()`,
+`universe_entry()`, `universe_symbols()`, `DEFAULT_WATCHLIST` (the
+original 8) and `resolve_symbols()` (None → 8, list → subset, all →
+24). The old SECTORS/ALIASES/normalize()/find()/resolve_pair() API is
+untouched — every R1-R3 call site keeps working.
 """
 from __future__ import annotations
 
@@ -230,28 +237,177 @@ ALIASES: dict[str, str] = {
 }
 
 
+# =====================================================================
+# R4-2 — UNIVERSE: the 24-instrument multi-asset desk universe
+# (GAUNTLET4-R2-BUILDER). The R3 charter's 8-instrument watchlist is the
+# DEFAULT_WATCHLIST (first 8 entries, order preserved); the R4 charter
+# expands coverage 8 → 24 across 8 sector groups, all keyless Yahoo:
+#
+#   metals    GC=F SI=F HG=F          (COMEX gold/silver/copper)
+#   energy    CL=F NG=F               (NYMEX WTI/natgas)
+#   ag        ZW=F ZC=F               (CBOT wheat/corn)
+#   indices   ES=F NQ=F YM=F RTY=F    (CME/CBOT equity index futures)
+#   fx        EURUSD=X GBPUSD=X USDJPY=X AUDUSD=X USDCAD=X  (24/5)
+#   rates     ^TNX ^FVX ^TYX DX-Y.NYB (10y/5y/30y yields + dollar index)
+#   crypto    BTC-USD ETH-USD SOL-USD (24/7)
+#   vol       ^VIX                    (CBOE)
+#
+# Every entry: {symbol, name, sector, calendar, exchange}. The sector
+# labels feed the web panel's filter chips; `calendar` mirrors the
+# SESSION_CALENDARS labels for the original 8 and extends the same
+# convention to the 16 new instruments.
+# =====================================================================
+UNIVERSE: list[dict] = [
+    # --- the original 8 (R3 charter watchlist — order preserved) ---
+    {"symbol": "GC=F", "name": "Gold", "sector": "metals",
+     "calendar": "COMEX", "exchange": "COMEX"},
+    {"symbol": "ES=F", "name": "S&P 500 E-mini", "sector": "indices",
+     "calendar": "CME", "exchange": "CME"},
+    {"symbol": "^TNX", "name": "US 10Y Yield", "sector": "rates",
+     "calendar": "US BOND", "exchange": "CBOE"},
+    {"symbol": "DX-Y.NYB", "name": "Dollar Index", "sector": "rates",
+     "calendar": "ICE", "exchange": "ICE"},
+    {"symbol": "BTC-USD", "name": "Bitcoin", "sector": "crypto",
+     "calendar": "24/7", "exchange": "crypto"},
+    {"symbol": "^VIX", "name": "VIX", "sector": "vol",
+     "calendar": "CBOE", "exchange": "CBOE"},
+    {"symbol": "CL=F", "name": "WTI Crude", "sector": "energy",
+     "calendar": "NYMEX", "exchange": "NYMEX"},
+    {"symbol": "EURUSD=X", "name": "EUR/USD", "sector": "fx",
+     "calendar": "24/5", "exchange": "FX"},
+    # --- R4-2 expansion: metals ---
+    {"symbol": "SI=F", "name": "Silver", "sector": "metals",
+     "calendar": "COMEX", "exchange": "COMEX"},
+    {"symbol": "HG=F", "name": "Copper", "sector": "metals",
+     "calendar": "COMEX", "exchange": "COMEX"},
+    # --- R4-2 expansion: energy ---
+    {"symbol": "NG=F", "name": "Nat Gas", "sector": "energy",
+     "calendar": "NYMEX", "exchange": "NYMEX"},
+    # --- R4-2 expansion: agriculture ---
+    {"symbol": "ZW=F", "name": "Wheat", "sector": "ag",
+     "calendar": "CBOT", "exchange": "CBOT"},
+    {"symbol": "ZC=F", "name": "Corn", "sector": "ag",
+     "calendar": "CBOT", "exchange": "CBOT"},
+    # --- R4-2 expansion: equity index futures ---
+    {"symbol": "NQ=F", "name": "Nasdaq 100 E-mini", "sector": "indices",
+     "calendar": "CME", "exchange": "CME"},
+    {"symbol": "YM=F", "name": "Dow E-mini", "sector": "indices",
+     "calendar": "CBOT", "exchange": "CBOT"},
+    {"symbol": "RTY=F", "name": "Russell 2000 E-mini", "sector": "indices",
+     "calendar": "CME", "exchange": "CME"},
+    # --- R4-2 expansion: FX majors (24/5) ---
+    {"symbol": "GBPUSD=X", "name": "GBP/USD", "sector": "fx",
+     "calendar": "24/5", "exchange": "FX"},
+    {"symbol": "USDJPY=X", "name": "USD/JPY", "sector": "fx",
+     "calendar": "24/5", "exchange": "FX"},
+    {"symbol": "AUDUSD=X", "name": "AUD/USD", "sector": "fx",
+     "calendar": "24/5", "exchange": "FX"},
+    {"symbol": "USDCAD=X", "name": "USD/CAD", "sector": "fx",
+     "calendar": "24/5", "exchange": "FX"},
+    # --- R4-2 expansion: rates curve + dollar ---
+    {"symbol": "^FVX", "name": "US 5Y Yield", "sector": "rates",
+     "calendar": "US BOND", "exchange": "CBOE"},
+    {"symbol": "^TYX", "name": "US 30Y Yield", "sector": "rates",
+     "calendar": "US BOND", "exchange": "CBOE"},
+    # --- R4-2 expansion: crypto majors (24/7) ---
+    {"symbol": "ETH-USD", "name": "Ethereum", "sector": "crypto",
+     "calendar": "24/7", "exchange": "crypto"},
+    {"symbol": "SOL-USD", "name": "Solana", "sector": "crypto",
+     "calendar": "24/7", "exchange": "crypto"},
+]
+
+# Sector display groups (web filter chips) in canonical order.
+UNIVERSE_SECTORS: list[str] = ["metals", "energy", "ag", "indices", "fx",
+                               "rates", "crypto", "vol"]
+
+# The original R3 8-instrument watchlist (DEFAULT constructor target —
+# anything reading the old monitor API keeps getting exactly these 8).
+DEFAULT_WATCHLIST: list[str] = [e["symbol"] for e in UNIVERSE[:8]]
+
+# Fast symbol → universe-entry lookup (case-insensitive).
+_UNIVERSE_BY_SYMBOL: dict[str, dict] = {
+    e["symbol"].upper(): e for e in UNIVERSE}
+
+
+def universe_symbols() -> list[str]:
+    """All 24 UNIVERSE symbols in display order."""
+    return [e["symbol"] for e in UNIVERSE]
+
+
+def sector_of(symbol: str) -> str | None:
+    """UNIVERSE sector group for a symbol ("metals", "energy", "ag",
+    "indices", "fx", "rates", "crypto", "vol") or None when the symbol
+    isn't in the 24-instrument universe."""
+    entry = _UNIVERSE_BY_SYMBOL.get(str(symbol or "").strip().upper())
+    return entry["sector"] if entry else None
+
+
+def universe_entry(symbol: str) -> dict | None:
+    """Full UNIVERSE entry {symbol, name, sector, calendar, exchange} or
+    None for symbols outside the 24-instrument universe."""
+    entry = _UNIVERSE_BY_SYMBOL.get(str(symbol or "").strip().upper())
+    return dict(entry) if entry else None
+
+
+def resolve_symbols(symbols=None, all: bool = False) -> list[str]:
+    """Resolve a monitor symbol request to an ordered symbol list.
+
+    * `symbols=None` (default) → DEFAULT_WATCHLIST (the original 8 —
+      backward compatible with every R3 call site)
+    * `all=True` or `symbols="all"` → all 24 UNIVERSE symbols
+    * `symbols=[...]` → the requested list ordered by UNIVERSE position
+      (unknown symbols are kept at the tail — the monitor fail-softs
+      them like any dead feed rather than dropping them silently)
+    Duplicate symbols are collapsed preserving first occurrence.
+    """
+    if all or (isinstance(symbols, str) and symbols.strip().lower() == "all"):
+        return list(universe_symbols())
+    if symbols is None:
+        return list(DEFAULT_WATCHLIST)
+    if isinstance(symbols, str):
+        symbols = [s for s in
+                   (p.strip() for p in symbols.split(",")) if s]
+    out: list[str] = []
+    seen: set[str] = set()
+    for sym in symbols:
+        key = str(sym).strip().upper()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    # order by UNIVERSE position; unknowns (case-corrected) go last
+    pos = {e["symbol"].upper(): i for i, e in enumerate(UNIVERSE)}
+    known = [s for s in out if s in pos]
+    unknown = [s for s in out if s not in pos]
+    return ([UNIVERSE[pos[s]]["symbol"] for s in sorted(known,
+                                                        key=lambda s: pos[s])]
+            + unknown)
+
+
 # R3-1 BUILD 1 — session calendars for the 8-instrument multi-asset
 # monitor (per the charter). Each entry pins a market calendar label +
 # the session_mode the monitor uses to slice VWAP:
 #   "fixed"     UTC hour windows (asia / london / overlap / ny / off)
 #   "rolling24" last-24h bucket (BTC's 24/7 continuous tape)
+# Extended in R4-2: session metadata now derives from UNIVERSE (the 16
+# added instruments get the same fixed/rolling24 convention — only the
+# crypto majors are 24/7), so SESSION_CALENDARS is materialized from it.
+SESSION_MODES: dict[str, str] = {
+    # 24/7 continuous tape → rolling 24h VWAP bucket
+    "BTC-USD": "rolling24", "ETH-USD": "rolling24", "SOL-USD": "rolling24",
+}
 SESSION_CALENDARS: dict[str, dict] = {
-    "GC=F":      {"calendar": "COMEX",   "session_mode": "fixed",
-                  "trading_hours": "Mon-Fri, 18:00-17:00 US ET (nearly 23h)"},
-    "ES=F":      {"calendar": "CME",     "session_mode": "fixed",
-                  "trading_hours": "Mon-Fri, 18:00-17:00 US ET (nearly 23h)"},
-    "^TNX":      {"calendar": "US BOND", "session_mode": "fixed",
-                  "trading_hours": "Mon-Fri, NY session"},
-    "DX-Y.NYB":  {"calendar": "ICE",     "session_mode": "fixed",
-                  "trading_hours": "Mon-Fri, NY session"},
-    "BTC-USD":   {"calendar": "24/7",    "session_mode": "rolling24",
-                  "trading_hours": "continuous (24/7)"},
-    "^VIX":      {"calendar": "CBOE",    "session_mode": "fixed",
-                  "trading_hours": "Mon-Fri, NY session"},
-    "CL=F":      {"calendar": "NYMEX",    "session_mode": "fixed",
-                  "trading_hours": "Mon-Fri, NY session"},
-    "EURUSD=X":  {"calendar": "24/5",    "session_mode": "fixed",
-                  "trading_hours": "Sun 17:00 - Fri 17:00 US ET (24/5)"},
+    e["symbol"]: {
+        "calendar": e["calendar"],
+        "session_mode": SESSION_MODES.get(e["symbol"], "fixed"),
+        "trading_hours": ("continuous (24/7)"
+                          if SESSION_MODES.get(e["symbol"]) == "rolling24"
+                          else "Mon-Fri, near-24h US ET (futures)"
+                          if e["sector"] in ("metals", "energy", "ag",
+                                             "indices")
+                          else "Mon-Fri, NY session"),
+    }
+    for e in UNIVERSE
 }
 
 

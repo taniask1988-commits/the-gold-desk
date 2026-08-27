@@ -1069,12 +1069,15 @@ def cmd_markets_corr(args) -> int:
 
 
 def cmd_markets_multi(args) -> int:
-    """markets-multi — R3-1 Build 1: 8-instrument live multi-asset monitor
-    (gold, S&P e-mini, US 10y yield, DXY, BTC, VIX, WTI, EUR/USD) with
-    per-asset session VWAP + session-relative % move. Fail-soft per asset.
+    """markets-multi — R3-1 Build 1 multi-asset live monitor (R4-2: now
+    24 instruments via --all / --symbols). Default = the 8-instrument
+    watchlist (backward compat); per-asset session VWAP + session-relative
+    % move; fail-soft per asset.
     """
     from .markets.multi_asset import MultiAssetMonitor, INSTRUMENT_ORDER
-    mon = MultiAssetMonitor(data_root=args.data_root)
+    mon = MultiAssetMonitor(data_root=args.data_root,
+                            symbols=getattr(args, "symbols", None),
+                            all=getattr(args, "all", False))
     out = mon.snapshot()
     if args.json:
         print(json.dumps(out, sort_keys=True, default=str))
@@ -1082,7 +1085,10 @@ def cmd_markets_multi(args) -> int:
     if not out.get("ok"):
         print("multi-asset monitor failed:", out.get("error"))
         return 1
-    print("MULTI-ASSET MONITOR — 8 instruments (keyless Yahoo)")
+    universe_n = len(assets) if assets else 0
+    label = (f"{universe_n} instruments" if universe_n != 8
+             else "8 instruments (keyless Yahoo)")
+    print(f"MULTI-ASSET MONITOR — {label}")
     print("=" * 72)
     print(f"as of : {out.get('as_of', '?')}"
           + ("   (cached)" if out.get("cache_hit") else ""))
@@ -1091,7 +1097,10 @@ def cmd_markets_multi(args) -> int:
     print(f"{'symbol':<10s}{'name':<18s}{'price':>12s}"
           f"{'1d %':>9s}{'sess':>10s}{'vwap':>12s}{'rel %':>9s}")
     print("-" * 72)
-    for sym in INSTRUMENT_ORDER:
+    # iterate the snapshot's own key order (watchlist order or universe order)
+    order = [s for s in (out.get("symbols") or INSTRUMENT_ORDER)
+             if s in assets] or list(assets)
+    for sym in order:
         a = assets.get(sym) or {}
         if not a.get("live"):
             err = a.get("error", "fetch failed")
@@ -2381,8 +2390,14 @@ def main(argv=None) -> int:
     p_mam = sub.add_parser("markets-multi",
                             help="R3-1: 8-instrument multi-asset monitor "
                                  "(gold, ES, ^TNX, DXY, BTC, VIX, WTI, "
-                                 "EUR/USD) — live session VWAP + relative %")
+                                 "EUR/USD) — live session VWAP + relative % "
+                                 "(R4-2: --all = 24-instrument universe, "
+                                 "--symbols=A,B = any subset)")
     p_mam.add_argument("--json", action="store_true")
+    p_mam.add_argument("--all", action="store_true",
+                       help="monitor the full 24-instrument universe")
+    p_mam.add_argument("--symbols", default=None,
+                       help="comma-separated subset (e.g. SI=F,NQ=F,ETH-USD)")
     p_mam.add_argument("--data-root", default=str(REPO_ROOT / "data"))
     p_mam.set_defaults(func=cmd_markets_multi)
 

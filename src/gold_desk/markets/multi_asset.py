@@ -1,9 +1,20 @@
 """R3-1 BUILD 1 — Multi-Asset Live Monitor (beats OpenBB Terminal markets panel).
 
-A `MultiAssetMonitor` covers 8 cross-asset instruments — gold (GC=F),
-S&P 500 E-mini (ES=F), US 10y Treasury yield (^TNX), US Dollar Index
-(DX-Y.NYB), Bitcoin (BTC-USD), VIX (^VIX), WTI crude (CL=F), EUR/USD
-(EURUSD=X) — every one keyless via Yahoo's chart endpoint.
+A `MultiAssetMonitor` covers cross-asset instruments — by default the
+R3 charter's 8 (gold GC=F, S&P 500 E-mini ES=F, US 10y Treasury yield
+^TNX, US Dollar Index DX-Y.NYB, Bitcoin BTC-USD, VIX ^VIX, WTI crude
+CL=F, EUR/USD EURUSD=X) — every one keyless via Yahoo's chart endpoint.
+
+R4-2 (GAUNTLET4-R2-BUILDER): the monitor generalizes to the
+24-instrument UNIVERSE (`markets.registry.UNIVERSE`): silver, copper,
+natgas, wheat, corn, Nasdaq/Dow/Russell futures, 4 more FX majors,
+5y/30y yields, ETH and SOL — `MultiAssetMonitor(symbols=[...])` takes
+any subset, `MultiAssetMonitor(all=True)` takes all 24, and the
+default constructor still takes the original 8 (backward compatible).
+Fan-out runs in batches of 6 with a small inter-batch pause
+(rate-limit friendly), snapshot rows carry their UNIVERSE `sector`,
+and daily closes are cached per symbol for an hour so a 24×24
+correlation matrix completes in seconds.
 
 Capabilities:
 
@@ -66,7 +77,10 @@ YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/"
 HTTP_TIMEOUT = 8.0
 MULTI_TTL_S = 60            # 1-minute live quote cache
 CORR_TTL_S = 15 * 60        # 15-minute correlation-matrix cache
+DAILY_TTL_S = 60 * 60       # R4-2: 1-hour per-symbol daily-closes cache
 WORKERS = 8                 # threaded fan-out width (one per instrument)
+BATCH_SIZE = 6              # R4-2: fan-out batch width (rate-limit friendly)
+BATCH_PAUSE_S = 0.15        # R4-2: pause between fan-out batches (seconds)
 
 # Session windows in UTC (matches clock.py SESSION_BOUNDS).
 SESSION_BOUNDS = [
@@ -376,6 +390,7 @@ class AssetSnapshot:
 
     Plain dataclass — JSON-serializable via `asdict` and `json.dumps
     (test: snapshot_json_serializable pins the round-trip).
+    R4-2 adds `sector` (UNIVERSE sector group, "" for unknown symbols).
     """
     symbol: str
     name: str
@@ -397,10 +412,34 @@ class AssetSnapshot:
     # "single_bar", "typical_unweighted" (zero-volume fallback),
     # "none" (no bars).
     vwap_method: str = "none"
+    # R4-2: UNIVERSE sector group (metals/energy/ag/indices/fx/rates/
+    # crypto/vol) — "" for symbols outside the 24-instrument universe.
+    sector: str = ""
 
 
 class MultiAssetMonitor:
-    """8-instrument live monitor with cross-asset correlation.
+    """Live monitor with cross-asset correlation over the UNIVERSE.
+
+    R3-1: 8-instrument monitor (the DEFAULT_WATCHLIST — gold, S&P
+    e-mini, 10y yield, DXY, BTC, VIX, WTI, EUR/USD).
+
+    R4-2 (GAUNTLET4-R2-BUILDER): the constructor generalizes to the
+    24-instrument UNIVERSE —
+
+        MultiAssetMonitor()                    → the original 8 (compat)
+        MultiAssetMonitor(symbols=["SI=F", …]) → any subset (UNIVERSE
+                                                  order, unknowns last)
+        MultiAssetMonitor(all=True)            → all 24
+        MultiAssetMonitor(symbols="all")       → all 24 (CLI passthrough)
+        MultiAssetMonitor(symbols="SI=F,NQ=F") → comma-list passthrough
+
+    Fan-out runs in batches of BATCH_SIZE (6) with a small pause
+    between batches (rate-limit friendly), fail-soft per asset, and
+    snapshot rows carry their UNIVERSE `sector`. Correlation works on
+    any subset with a 1-hour per-symbol daily-closes cache so a 24×24
+    matrix completes comfortably (the 15-minute matrix cache is
+    namespaced per symbol-set — a subset monitor never poisons the
+    default monitor's cache, and vice versa).
 
     Lifecycle: instantiate once, call `snapshot()` for the live row
     dict and `compute_correlation(window, method)` for the matrix. Both
@@ -413,25 +452,62 @@ class MultiAssetMonitor:
     """
 
     def __init__(self, data_root: str | Path = "data",
-                 fetcher: Callable[[list[str]], dict] | None = None):
+                 fetcher: Callable[[list[str]], dict] | None = None,
+                 symbols=None, all: bool = False):
+        from .registry import resolve_symbols
         self.data_root = data_root
+        # R4-2: resolve the symbol request (None → default 8, list/str
+        # → subset, all=True → 24). Ordered by UNIVERSE position.
+        self._symbols: list[str] = resolve_symbols(symbols, all=all)
         # injectable fetcher for tests (mocked Yahoo response)
         self._fetcher = fetcher or fetch_multi_quote
 
+    # ----------------------------------------------------------- symbols
+    @property
+    def symbols(self) -> list[str]:
+        """The monitor's instrument list (ordered, as resolved)."""
+        return list(self._symbols)
+
+    def _meta(self, symbol: str) -> dict:
+        """name/calendar/session_mode/sector for a symbol (UNIVERSE
+        metadata; unknown symbols get a placeholder that fail-softs)."""
+        from .registry import universe_entry, SESSION_MODES
+        entry = universe_entry(symbol)
+        if entry:
+            return {
+                "name": entry["name"],
+                "calendar": entry["calendar"],
+                "session_mode": SESSION_MODES.get(symbol, "fixed"),
+                "sector": entry["sector"],
+            }
+        return {"name": symbol, "calendar": "unknown",
+                "session_mode": "fixed", "sector": ""}
+
+    def _cache_slug(self) -> str:
+        """Cache namespace for this symbol set ("" for the default 8 —
+        legacy cache files keep working)."""
+        import hashlib
+        from .registry import DEFAULT_WATCHLIST
+        if self._symbols == list(DEFAULT_WATCHLIST):
+            return ""
+        raw = "|".join(self._symbols)
+        return "_" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10]
+
     # ----------------------------------------------------------- snapshot
     def snapshot(self) -> dict:
-        """Live snapshot for all 8 instruments.
+        """Live snapshot for the monitor's instruments.
 
-        Returns {ok, as_of, assets: {symbol: AssetSnapshot-as-dict},
-        errors: [symbol, ...]} — never raises. One asset's failure
-        lands in `errors`; the others are served normally.
+        Returns {ok, as_of, instruments, assets: {symbol:
+        AssetSnapshot-as-dict}, errors: [symbol, ...]} — never raises.
+        One asset's failure lands in `errors`; the others are served
+        normally.
         """
         def _build() -> dict:
-            quotes = self._fetcher(list(INSTRUMENTS.keys()))
+            quotes = self._fetch_batched(list(self._symbols))
             assets: dict[str, dict] = {}
             errors: list[str] = []
-            for sym in INSTRUMENT_ORDER:
-                meta = INSTRUMENTS[sym]
+            for sym in self._symbols:
+                meta = self._meta(sym)
                 q = quotes.get(sym) or {}
                 if not q.get("ok"):
                     errors.append(sym)
@@ -445,6 +521,7 @@ class MultiAssetMonitor:
                         live=False, source="", fetched_at=0,
                         cache_hit=False,
                         error=q.get("error", "fetch failed"),
+                        sector=meta["sector"],
                     )
                     assets[sym] = asdict(snap)
                     continue
@@ -479,25 +556,42 @@ class MultiAssetMonitor:
                     cache_hit=False,
                     error=None,
                     vwap_method=vwap_method,
+                    sector=meta["sector"],
                 )
                 assets[sym] = asdict(snap)
             return {
                 "ok": True,
                 "as_of": datetime.now(timezone.utc).isoformat(
                     timespec="seconds").replace("+00:00", "Z"),
-                "instruments": list(INSTRUMENTS.keys()),
+                "instruments": list(self._symbols),
                 "assets": assets,
                 "errors": sorted(errors),
             }
-        out = _cached_fetch(self.data_root, "markets_multi", MULTI_TTL_S,
-                            _build)
+        out = _cached_fetch(self.data_root,
+                            f"markets_multi{self._cache_slug()}",
+                            MULTI_TTL_S, _build)
         out["kind"] = "markets_multi"
+        return out
+
+    # ---------------------------------------------------- batched fan-out
+    def _fetch_batched(self, symbols: list[str]) -> dict:
+        """Fan out the fetcher in batches of BATCH_SIZE with a small
+        pause between batches (R4-2 — rate-limit friendly). Results are
+        merged; per-symbol fail-soft is the fetcher's job."""
+        out: dict = {}
+        for i in range(0, len(symbols), BATCH_SIZE):
+            batch = symbols[i:i + BATCH_SIZE]
+            out.update(self._fetcher(batch) or {})
+            if i + BATCH_SIZE < len(symbols) and BATCH_PAUSE_S > 0:
+                time.sleep(BATCH_PAUSE_S)
         return out
 
     # ------------------------------------------------------ correlation
     def compute_correlation(self, window: int = 30,
                            method: str = "pearson") -> dict:
-        """Symmetric correlation matrix across the 8 instruments.
+        """Symmetric correlation matrix across the monitor's instruments
+        (any subset of the 24-instrument UNIVERSE; 24×24 completes in
+        seconds thanks to the per-symbol daily-closes cache).
 
         Returns {ok, degraded, window, method, symbols, matrix,
         n_points, errors} where `matrix[sym_i][sym_j]` is a float in
@@ -517,22 +611,23 @@ class MultiAssetMonitor:
             {"symbol", "pair", "reason": "insufficient_common_dates",
             "common_dates"} per pair with < window+2 common dates
             (those cells are None, rendered "n/a" by the CLI).
-        Cached 15 minutes per (window, method) under
-        <data_root>/cache/markets_corr_{w}_{m}.json.
+        Cached 15 minutes per (window, method, symbol-set) under
+        <data_root>/cache/markets_corr_{w}_{m}{set-slug}.json (the
+        default watchlist keeps the legacy un-suffixed name).
         """
         method = (method or "pearson").lower()
         if method not in ("pearson", "spearman"):
             return {"ok": False, "error": f"unknown method: {method}"}
-        cache_name = f"markets_corr_{window}_{method}"
+        cache_name = f"markets_corr_{window}_{method}{self._cache_slug()}"
 
         def _build() -> dict:
             closes_map = self._fetch_daily_closes_for_all()
             errors: list[dict] = []
-            for sym in INSTRUMENT_ORDER:
+            for sym in self._symbols:
                 if not closes_map.get(sym):
                     errors.append({"symbol": sym,
                                    "reason": "daily_closes_fetch_failed"})
-            syms = [s for s in INSTRUMENT_ORDER if closes_map.get(s)]
+            syms = [s for s in self._symbols if closes_map.get(s)]
             matrix: dict[str, dict[str, float | None]] = \
                 {s: {} for s in syms}
             n_points: dict[str, int] = {}
@@ -581,8 +676,12 @@ class MultiAssetMonitor:
     def _fetch_daily_closes_for_all(self) -> dict[str, dict[str, float]]:
         """Daily close history per instrument, DATE-KEYED (D2 fix).
 
-        One Yahoo v8/chart call per symbol at range=1y&interval=1d,
-        threaded to 8 workers. Each value maps "YYYY-MM-DD" → close so
+        One Yahoo v8/chart call per symbol at range=1y&interval=1d for
+        each of the monitor's symbols (any subset of the 24-instrument
+        UNIVERSE), threaded to 8 workers and CACHED PER SYMBOL for one
+        hour (R4-2 — a 24×24 matrix reuses yesterday's-subset closes;
+        the same monitor in another panel doesn't refetch 24 charts).
+        Each value maps "YYYY-MM-DD" → close so
         `compute_correlation` can pair returns on the intersection of
         trading dates (a 24/7 calendar never misaligns against a
         5-day/week one). Symbols whose fetch fails are simply absent
@@ -592,12 +691,13 @@ class MultiAssetMonitor:
         canned = _TEST_DAILY_CLOSES
         if canned is not None:
             return {sym: dict(canned.get(sym, {}))
-                    for sym in INSTRUMENTS}
+                    for sym in self._symbols}
 
         out: dict[str, dict[str, float]] = {}
-        with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-            futures = {ex.submit(self._fetch_daily_one, sym): sym
-                       for sym in INSTRUMENTS}
+        with ThreadPoolExecutor(max_workers=min(WORKERS,
+                                                len(self._symbols) or 1)) as ex:
+            futures = {ex.submit(self._fetch_daily_one_cached, sym): sym
+                       for sym in self._symbols}
             for fut in as_completed(futures):
                 sym = futures[fut]
                 try:
@@ -605,6 +705,29 @@ class MultiAssetMonitor:
                 except Exception:  # noqa: BLE001 — fail-soft per symbol
                     pass
         return out
+
+    def _fetch_daily_one_cached(self, symbol: str) -> dict[str, float]:
+        """Cache-through wrapper around `_fetch_daily_one` (R4-2).
+
+        One-hour TTL per symbol under <data_root>/cache/
+        daily_{urlsafe-symbol}.json — daily bars barely move intraday,
+        so a 24-instrument correlation run that follows a subset run
+        (or a repeat within the hour) costs 0 HTTP calls. Failures are
+        never cached: the exception propagates to the per-symbol
+        fail-soft in `_fetch_daily_closes_for_all`.
+        """
+        urlsafe = "".join(ch if (ch.isalnum() or ch in ".-") else "_"
+                         for ch in symbol)
+        name = f"daily_{urlsafe}"
+
+        def _fetch() -> dict:
+            return {"closes": self._fetch_daily_one(symbol)}
+
+        out = _cached_fetch(self.data_root, name, DAILY_TTL_S, _fetch)
+        closes = out.get("closes") or {}
+        if not closes:
+            raise RuntimeError(f"no daily closes for {symbol}")
+        return {d: float(v) for d, v in closes.items()}
 
     def _fetch_daily_one(self, symbol: str) -> dict[str, float]:
         """One Yahoo v8/chart daily call → {"YYYY-MM-DD": close}.
@@ -730,5 +853,19 @@ def _rank_avg(values: list[float]) -> list[float]:
 
 # ------------------------------------------------------------------ helpers
 def instrument_meta(symbol: str) -> dict:
-    """Public accessor for the 8-instrument metadata map."""
-    return INSTRUMENTS.get(symbol, {})
+    """Public accessor for instrument metadata.
+
+    R3-1: the original 8 instruments (INSTRUMENTS map — name, calendar,
+    session_mode). R4-2: falls through to the 24-instrument UNIVERSE
+    for the 16 added symbols ({name, calendar, session_mode, sector}).
+    Returns {} for unknown symbols.
+    """
+    if symbol in INSTRUMENTS:
+        return INSTRUMENTS[symbol]
+    from .registry import universe_entry, SESSION_MODES
+    entry = universe_entry(symbol)
+    if entry:
+        return {"name": entry["name"], "calendar": entry["calendar"],
+                "session_mode": SESSION_MODES.get(symbol, "fixed"),
+                "sector": entry["sector"]}
+    return {}
