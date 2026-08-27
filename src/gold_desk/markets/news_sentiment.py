@@ -514,7 +514,9 @@ _EVENT_KEYWORDS: dict[str, dict[str, tuple[str, ...]]] = {
         "booster": tuple(),
     },
     "crypto": {
-        "primary": ("hack", "hacks", "hacked", "hacking", "heist",
+        "primary": ("bitcoin", "ethereum", "crypto", "cryptocurrency",
+                    "cryptocurrencies", "altcoin", "altcoins", "token",
+                    "hack", "hacks", "hacked", "hacking", "heist",
                     "halving", "wallet", "wallets", "stablecoin",
                     "stablecoins", "binance", "coinbase", "etf approval",
                     "crypto exchange", "bitcoin etf", "spot bitcoin"),
@@ -880,6 +882,15 @@ _PHRASE_SYNONYMS: tuple[tuple[str, str], ...] = (
     ("rate hike", "ratehike"),
     ("policy easing", "easing"),
     ("policy tightening", "tightening"),
+    # entity substitution (re-critic P2/P4): oil-market synonyms for OPEC
+    # and data-speak for inflation releases
+    ("producer group", "opec"),
+    ("producer cartel", "opec"),
+    ("oil cartel", "opec"),
+    ("cpi print", "inflation data"),
+    ("inflation print", "inflation data"),
+    ("inflation data", "inflation data"),
+    ("price data", "inflation data"),
 )
 _DOMAIN_SYNONYMS: dict[str, str] = {
     # gold
@@ -901,6 +912,14 @@ _DOMAIN_SYNONYMS: dict[str, str] = {
     "easing": "easing", "stimulus": "easing", "pivot": "easing",
     # oil
     "crude": "oil", "wti": "oil", "brent": "oil",
+    "cartel": "opec", "opec": "opec",
+    # macro data speak
+    "cpi": "inflation", "inflation": "inflation",
+    "print": "data", "reading": "data", "report": "data",
+    "cooler": "soft", "soft": "soft", "softer": "dovish",
+    "supply": "output", "output": "output", "target": "target",
+    "targets": "target", "plan": "target", "plans": "target",
+    "gain": "__up__", "gains": "__up__",
     # stocks
     "stock": "equities", "stocks": "equities", "share": "equities",
     "shares": "equities", "equity": "equities", "wall": "equities",
