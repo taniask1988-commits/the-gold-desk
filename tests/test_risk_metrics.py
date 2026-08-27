@@ -420,3 +420,298 @@ def test_risk_report_degenerate_series():
     assert with_b["beta"]["n"] == 1
     assert with_b["stress"]["portfolio_shocks"]["gfc_2008"] == pytest.approx(
         -0.385)
+
+
+# ============================================================== R4-3
+# Historical stress replay — REAL daily-return paths on the current book
+import json as _json                                     # noqa: E402
+from datetime import timedelta as _td                    # noqa: E402
+
+# hand-built 5-day path inside the covid_2020 window
+# (pad close 2020-02-18 so day 1 of the window has a return basis)
+REPLAY_BARS = {
+    "SPY": {"2020-02-18": 100.0, "2020-02-19": 101.0, "2020-02-20": 99.0,
+            "2020-02-21": 95.0, "2020-02-24": 90.0, "2020-02-25": 92.0,
+            "2020-02-26": 91.0},
+    "GOLD": {"2020-02-18": 1600.0, "2020-02-19": 1620.0,
+             "2020-02-20": 1610.0, "2020-02-21": 1630.0,
+             "2020-02-24": 1600.0, "2020-02-25": 1610.0,
+             "2020-02-26": 1620.0},
+}
+REPLAY_POS = [{"symbol": "SPY", "weight": 0.5},
+              {"symbol": "GOLD", "weight": 0.5}]
+
+
+def test_r43_replay_windows_pinned():
+    """The three charter windows, exact dates."""
+    assert rm.REPLAY_WINDOWS["gfc_2008"]["start"] == "2008-09-01"
+    assert rm.REPLAY_WINDOWS["gfc_2008"]["end"] == "2009-03-09"
+    assert rm.REPLAY_WINDOWS["covid_2020"]["start"] == "2020-02-19"
+    assert rm.REPLAY_WINDOWS["covid_2020"]["end"] == "2020-03-23"
+    assert rm.REPLAY_WINDOWS["rate_shock_2022"]["start"] == "2022-01-03"
+    assert rm.REPLAY_WINDOWS["rate_shock_2022"]["end"] == "2022-10-12"
+
+
+def test_r43_replay_five_day_hand_path_exact():
+    """Hand-computed: day returns (SPY|GOLD, 50/50 book):
+      02-20: .5·(99/101−1)  + .5·(1610/1620−1)  = −0.012987
+      02-21: .5·(95/99−1)   + .5·(1630/1610−1)  = −0.013991
+      02-24: .5·(90/95−1)   + .5·(1600/1630−1)  = −0.035518  ← worst
+      02-25: .5·(92/90−1)   + .5·(1610/1600−1)  = +0.014236
+      02-26: .5·(91/92−1)   + .5·(1620/1610−1)  = −0.002329
+    equity 1.0 → .987013 → .973203 → .938637 → .952 → .949782
+    cumulative −0.050218 · worst day −0.035518 (02-24) · MaxDD 0.061363
+    """
+    out = rm.stress_replay(REPLAY_POS, "covid_2020",
+                           bars_by_symbol=REPLAY_BARS)
+    assert out["ok"] is True and out["mode"] == "historical"
+    assert out["n_days"] == 5
+    assert out["cumulative"] == pytest.approx(-0.050218, abs=1e-6)
+    assert out["worst_day"] == pytest.approx(-0.035518, abs=1e-6)
+    assert out["worst_day_date"] == "2020-02-24"
+    assert out["max_drawdown"] == pytest.approx(0.061363, abs=1e-6)
+    assert out["path"][0]["date"] == "2020-02-20"
+    assert out["path"][0]["equity"] == pytest.approx(0.987013, abs=1e-6)
+    assert out["path"][-1]["equity"] == pytest.approx(0.949782, abs=1e-6)
+    assert len(out["path"]) == 5
+    assert out["static"]["portfolio_shock"] == pytest.approx(
+        0.5 * -0.339 + 0.5 * -0.12)                    # −0.2295
+
+
+def test_r43_replay_window_boundaries():
+    """Returns are keyed for dates in (start, end]: the start day itself
+    is the entry basis (no return), the pad day never enters the path."""
+    rets = rm._window_returns(REPLAY_BARS["SPY"], "2020-02-19",
+                              "2020-03-23")
+    assert "2020-02-19" not in rets          # start = basis day
+    assert "2020-02-20" in rets              # first replayed day
+    assert rets["2020-02-20"] == pytest.approx(99.0 / 101.0 - 1.0)
+    assert set(rets) == {"2020-02-20", "2020-02-21", "2020-02-24",
+                         "2020-02-25", "2020-02-26"}
+
+
+def test_r43_replay_missing_symbol_zero_and_unshocked():
+    """A symbol with no bars contributes 0 and lands in unshocked —
+    never a crash, never a silent re-weight."""
+    pos = REPLAY_POS + [{"symbol": "CASH", "weight": 0.3},
+                        {"symbol": "ZZZZ", "weight": 0.2}]
+    out = rm.stress_replay(pos, "covid_2020", bars_by_symbol=REPLAY_BARS)
+    assert out["ok"] is True
+    assert out["unshocked"] == ["CASH", "ZZZZ"]
+    assert out["shocked"] == ["GOLD", "SPY"]
+    # identical numbers to the 2-symbol book (the dead legs added 0)
+    base = rm.stress_replay(REPLAY_POS, "covid_2020",
+                            bars_by_symbol=REPLAY_BARS)
+    assert out["cumulative"] == base["cumulative"]
+    assert out["max_drawdown"] == base["max_drawdown"]
+
+
+def test_r43_replay_fetch_injection_seam():
+    def fetch(symbol, start, end, data_root="data"):
+        return dict(REPLAY_BARS[symbol])
+
+    out = rm.stress_replay(REPLAY_POS, "covid_2020", fetch=fetch)
+    hand = rm.stress_replay(REPLAY_POS, "covid_2020",
+                            bars_by_symbol=REPLAY_BARS)
+    assert out["cumulative"] == hand["cumulative"]
+    assert out["worst_day"] == hand["worst_day"]
+    assert out["n_days"] == hand["n_days"]
+
+
+def test_r43_replay_total_network_failure_falls_back_static():
+    """Yahoo down: {ok: False, fallback: static} + the static vector."""
+    def boom(symbol, start, end):
+        raise RuntimeError("network down")
+
+    out = rm.stress_replay(REPLAY_POS, "covid_2020", fetch=boom)
+    assert out["ok"] is False
+    assert out["fallback"] == "static"
+    assert out["mode"] == "fallback"
+    assert "network down" in out["error"]
+    assert out["static"]["portfolio_shock"] == pytest.approx(-0.2295)
+    assert out["unshocked"] == ["GOLD", "SPY"]
+
+
+def test_r43_replay_partial_failure_is_fail_soft():
+    """One symbol dead, one alive → replay proceeds with the survivor."""
+    def fetch(symbol, start, end):
+        if symbol == "GOLD":
+            raise RuntimeError("no gold bars")
+        return dict(REPLAY_BARS["SPY"])
+
+    out = rm.stress_replay(REPLAY_POS, "covid_2020", fetch=fetch)
+    assert out["ok"] is True
+    assert out["unshocked"] == ["GOLD"]
+    assert out["shocked"] == ["SPY"]
+    # the GOLD weight is NOT re-weighted: its 50% sits in dead cash, so
+    # cumulative = Π(1 + 0.5·r_spy,t) − 1 (hand-compounded below)
+    rets = rm._window_returns(REPLAY_BARS["SPY"], "2020-02-19",
+                              "2020-03-23")
+    hand = 1.0
+    for d in sorted(rets):
+        hand *= (1.0 + 0.5 * rets[d])
+    assert out["cumulative"] == pytest.approx(hand - 1.0, abs=1e-6)
+
+
+def test_r43_replay_fast_mode_serves_static_vector():
+    out = rm.stress_replay(REPLAY_POS, "gfc_2008", fast=True)
+    assert out["ok"] is True and out["mode"] == "static"
+    assert out["portfolio_shock"] == pytest.approx(
+        0.5 * -0.385 + 0.5 * -0.20)                    # GOLD alias shock
+    assert out["window"]["start"] == "2008-09-01"
+
+
+def test_r43_replay_empty_book_serves_static_vector():
+    out = rm.stress_replay([], "covid_2020")
+    assert out["ok"] is True and out["mode"] == "static"
+    assert out["portfolio_shock"] == 0.0
+
+
+def test_r43_replay_unknown_scenario():
+    out = rm.stress_replay(REPLAY_POS, "dotcom_2000")
+    assert out["ok"] is False
+    assert "unknown scenario" in out["error"]
+
+
+def test_r43_replay_path_capped_at_400(monkeypatch):
+    """A 730-day window → n_path_points 730 but only the last 400 in
+    the output path (the charter's cap)."""
+    bars = {"SPY": {}, "GOLD": {}}
+    d = rm.datetime(2020, 1, 1)
+    px = {"SPY": 100.0, "GOLD": 1600.0}
+    for i in range(731):
+        day = (d + _td(days=i)).strftime("%Y-%m-%d")
+        for sym in bars:
+            px[sym] *= 1.001
+            bars[sym][day] = round(px[sym], 4)
+    monkeypatch.setitem(rm.REPLAY_WINDOWS, "long_window",
+                        {"label": "synthetic long window",
+                         "start": "2020-01-01", "end": "2021-12-31"})
+    out = rm.stress_replay(REPLAY_POS, "long_window",
+                           bars_by_symbol=bars)
+    assert out["n_path_points"] == 730
+    assert len(out["path"]) == rm.REPLAY_PATH_MAX
+    assert out["path"][0]["date"] == "2020-11-27"     # 730 − 400 + 1
+
+
+def test_r43_replay_all_three_scenarios():
+    out = rm.stress_replay_all(REPLAY_POS, fast=True)
+    assert out["ok"] is True and out["n_ok"] == 3
+    assert list(out["replays"]) == ["gfc_2008", "covid_2020",
+                                    "rate_shock_2022"]
+    assert all(s["mode"] == "static" for s in out["scenarios"])
+
+
+class _FakeResponse:
+    def __init__(self, payload: bytes):
+        self._payload = payload
+
+    def read(self) -> bytes:
+        return self._payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_r43_fetch_window_closes_parses_and_caches(monkeypatch, tmp_path):
+    """One Yahoo v8/chart call with period1/period2 epoch bounds →
+    {date: close}; the second call is served from the file cache (the
+    HTTP seam stays cold)."""
+    calls = []
+
+    def fake_urlopen(req, timeout=10.0):
+        calls.append(req.full_url)
+        t19 = int(rm.datetime(2020, 2, 19, tzinfo=rm.timezone.utc).timestamp())
+        chart = {"chart": {"result": [{
+            "timestamp": [t19, t19 + 86400],       # 2020-02-19/20 UTC
+            "indicators": {"quote": [{"close": [100.0, 99.0]}]},
+        }]}}
+        return _FakeResponse(_json.dumps(chart).encode())
+
+    monkeypatch.setattr(rm.urllib.request, "urlopen", fake_urlopen)
+    closes = rm.fetch_window_closes("SPY", "2020-02-19", "2020-02-20",
+                                    data_root=tmp_path)
+    assert closes == {"2020-02-19": 100.0, "2020-02-20": 99.0}
+    assert len(calls) == 1
+    url = calls[0]
+    assert "period1=" in url and "period2=" in url and "interval=1d" in url
+    # p1 = 2020-02-19 minus the 10-day pad (UTC epoch)
+    p1 = int(url.split("period1=")[1].split("&")[0])
+    assert p1 == int(rm.datetime(2020, 2, 19, tzinfo=rm.timezone.utc)
+                     .timestamp()) - rm.REPLAY_PAD_DAYS * 86400
+    # cached second call: no extra HTTP
+    again = rm.fetch_window_closes("SPY", "2020-02-19", "2020-02-20",
+                                   data_root=tmp_path)
+    assert again == closes
+    assert len(calls) == 1
+
+
+def test_r43_fetch_window_closes_raises_on_empty(monkeypatch, tmp_path):
+    def fake_urlopen(req, timeout=10.0):
+        return _FakeResponse(b'{"chart": {"result": []}}')
+
+    monkeypatch.setattr(rm.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(RuntimeError):
+        rm.fetch_window_closes("SPY", "2020-02-19", "2020-02-20",
+                               data_root=tmp_path)
+
+
+# ------------------------------------------------------ R4-3 CLI wiring
+class _RiskArgs:
+    returns = '[0.01,-0.02,0.015,0.005,-0.01,0.02,-0.005,0.012,0.008,-0.014]'
+    benchmark_returns = None
+    positions = '[{"symbol":"SPY","weight":0.5},{"symbol":"GOLD","weight":0.5}]'
+    stress_replay = True
+    fast = True
+    json = True
+    data_root = ""
+
+
+def test_r43_cli_risk_stress_replay_json(capsys, tmp_path):
+    from gold_desk.cli import cmd_risk
+    args = _RiskArgs()
+    args.data_root = str(tmp_path)
+    rc = cmd_risk(args)
+    out = _json.loads(capsys.readouterr().out)
+    assert rc == 0
+    replay = out["stress_replay"]
+    assert replay["ok"] is True and replay["n_ok"] == 3
+    gfc = replay["replays"]["gfc_2008"]
+    assert gfc["mode"] == "static"
+    assert gfc["portfolio_shock"] == pytest.approx(-0.2925)
+    assert gfc["window"] == {"start": "2008-09-01", "end": "2009-03-09"}
+
+
+def test_r43_cli_risk_stress_replay_pretty(capsys, tmp_path):
+    from gold_desk.cli import cmd_risk
+    args = _RiskArgs()
+    args.json = False
+    args.data_root = str(tmp_path)
+    rc = cmd_risk(args)
+    text = capsys.readouterr().out
+    assert rc == 0
+    assert "STRESS REPLAY" in text
+    assert "2008-09-01" in text and "static vector (--fast)" in text
+
+
+def test_r43_cli_risk_replay_only_when_default_fetch_fails(
+        capsys, tmp_path, monkeypatch):
+    """1y default-portfolio fetch down + --stress-replay --fast → the
+    replay-only report still ships (static vectors), rc 0."""
+    import gold_desk.cli as cli
+    from gold_desk.cli import cmd_risk
+    monkeypatch.setattr(cli, "_risk_default_portfolio",
+                        lambda data_root: None)
+    args = _RiskArgs()
+    args.returns = None
+    args.positions = None
+    args.data_root = str(tmp_path)
+    rc = cmd_risk(args)
+    out = _json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["ok"] is True
+    assert out["stress_replay"]["n_ok"] == 3
+    assert "replay-only" in out["portfolio"]

@@ -1,7 +1,7 @@
 """R3-2 BUILD 4 — risk metrics: VaR, ES, beta, stress scenarios, ratios.
 
-Pure stdlib math, no I/O, fully deterministic. Every function operates on
-either:
+Pure stdlib math, no I/O at import, fully deterministic. Every function
+operates on either:
 
 * a plain returns series  — list[float] of period returns (e.g. daily),
   expressed as fractions (+0.01 = +1%). VaR/ES values are RETURN
@@ -14,6 +14,14 @@ either:
   [{"symbol": "SPY", "weight": 0.5, "returns": [...]}, ...]; returns are
   blended element-wise (tail-aligned) by `portfolio_returns`, and stress
   shocks are applied symbol-wise by `stress_test`.
+
+R4-3 exception — `fetch_window_closes` / `stress_replay` perform OPTIONAL
+cached network I/O (keyless Yahoo v8/chart with period1/period2 epoch
+bounds) so the historical stress replay can apply the REAL 2008/2020/2022
+daily-return paths to the current book. The math stays pure and
+deterministic given bars: `stress_replay` accepts injected
+`bars_by_symbol` / `fetch` seams, and every network failure fails SOFT to
+the static STRESS_SCENARIOS vectors (the documented fast fallback).
 
 Conventions pinned by the test suite:
 * sigma is the SAMPLE standard deviation (ddof=1) — the estimator used in
@@ -33,8 +41,14 @@ into the orchestrator's decision loop (constitution-gated).
 """
 from __future__ import annotations
 
+import json
 import math
 import random
+import time
+import urllib.parse
+import urllib.request
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 # z values at full double precision (scipy.stats.norm.ppf) — the rounded
 # 1.645 / 2.326 from the brief are these same numbers to 3dp.
@@ -85,6 +99,264 @@ STRESS_SCENARIOS: dict[str, dict] = {
                    "BTC-USD": -0.65, "BTC": -0.65},
     },
 }
+
+# ------------------------------------------------------------------ R4-3
+# Historical stress replay — the REAL daily-return paths of the 2008-H2,
+# 2020-Mar and 2022 windows applied to the current book (static vectors
+# above stay as the fast fallback / --fast mode).
+REPLAY_WINDOWS: dict[str, dict] = {
+    "gfc_2008": {"label": "2008 Global Financial Crisis",
+                 "start": "2008-09-01", "end": "2009-03-09"},
+    "covid_2020": {"label": "2020 COVID crash",
+                   "start": "2020-02-19", "end": "2020-03-23"},
+    "rate_shock_2022": {"label": "2022 rate shock",
+                        "start": "2022-01-03", "end": "2022-10-12"},
+}
+REPLAY_PATH_MAX = 400     # output path series cap (last N points)
+REPLAY_PAD_DAYS = 10      # bars fetched before the window so day 1 has a return
+REPLAY_TTL_S = 30 * 24 * 3600   # historical windows never change
+REPLAY_HTTP_TIMEOUT = 10.0
+REPLAY_USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+REPLAY_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/"
+
+
+def fetch_window_closes(symbol: str, start: str, end: str,
+                        data_root: str | Path = "data",
+                        timeout: float = REPLAY_HTTP_TIMEOUT) -> dict[str, float]:
+    """R4-3 — REAL historical daily closes for one symbol over
+    [start − REPLAY_PAD_DAYS, end] via the keyless Yahoo v8/chart
+    endpoint with period1/period2 epoch bounds (range= parameters can't
+    reach 2008). Returns {"YYYY-MM-DD": close}; raises on any transport/
+    parse failure. Cached under <data_root>/cache/replay_<SYM>_<start>_
+    <end>.json with a 30-day TTL — history does not change.
+    """
+    sym = str(symbol or "").strip().upper()
+    start_dt = datetime.strptime(start, "%Y-%m-%d").replace(
+        tzinfo=timezone.utc)
+    end_dt = (datetime.strptime(end, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+              + timedelta(days=1))
+    p1 = int(start_dt.timestamp()) - REPLAY_PAD_DAYS * 86400
+    p2 = int(end_dt.timestamp())
+    slug = "".join(ch if (ch.isalnum() or ch in ".-") else "_"
+                   for ch in sym)
+    cache = (Path(data_root) / "cache"
+             / f"replay_{slug}_{start}_{end}.json")
+
+    def _fetch() -> dict[str, float]:
+        url = (f"{REPLAY_CHART_URL}{urllib.parse.quote(sym, safe='')}"
+               f"?period1={p1}&period2={p2}&interval=1d")
+        req = urllib.request.Request(url, headers={
+            "User-Agent": REPLAY_USER_AGENT,
+            "Accept": "application/json, */*"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+        results = (data.get("chart") or {}).get("result") or []
+        if not results or not results[0]:
+            raise RuntimeError(f"no chart result for {sym}")
+        r = results[0]
+        quote = ((r.get("indicators") or {}).get("quote") or [{}])[0]
+        ts_arr = r.get("timestamp") or []
+        closes = quote.get("close") or []
+        out: dict[str, float] = {}
+        for t, c in zip(ts_arr, closes):
+            if t is None or c is None:
+                continue
+            d = datetime.fromtimestamp(int(t), tz=timezone.utc).strftime(
+                "%Y-%m-%d")
+            out[d] = float(c)
+        if not out:
+            raise RuntimeError(f"no closes in window for {sym}")
+        return out
+
+    payload = None
+    if cache.exists():
+        try:
+            raw = json.loads(cache.read_text())
+            if time.time() - float(raw.get("fetched_at", 0)) < REPLAY_TTL_S:
+                payload = raw.get("closes") or {}
+        except (json.JSONDecodeError, OSError, ValueError):
+            payload = None
+    if payload is None:
+        payload = _fetch()
+        try:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_text(json.dumps(
+                {"fetched_at": time.time(), "closes": payload}))
+        except OSError:
+            pass                              # cache write is best-effort
+    if not payload:
+        raise RuntimeError(f"no closes in window for {sym}")
+    return {d: float(v) for d, v in payload.items()}
+
+
+def _window_returns(closes: dict[str, float], start: str,
+                    end: str) -> dict[str, float]:
+    """{date: simple return} for the dates in (start, end], each return
+    computed vs the symbol's OWN previous close (any calendar — BTC trades
+    days futures don't; a missing day simply contributes no entry)."""
+    dates = sorted(d for d, c in (closes or {}).items()
+                   if c and c > 0)
+    out: dict[str, float] = {}
+    for prev, cur in zip(dates, dates[1:]):
+        if start < cur <= end:
+            out[cur] = closes[cur] / closes[prev] - 1.0
+    return out
+
+
+def _replay_from_bars(positions: list[dict], scenario: str,
+                       bars_by_symbol: dict[str, dict[str, float]]) -> dict:
+    """Pure replay math — deterministic given bars. Portfolio daily
+    return_t = Σ w_i · r_i,t on the UNION of trading dates (a symbol
+    with no bar that day contributes 0); equity compounds 1.0 → path;
+    worst_day is the most negative daily return; max_drawdown is the
+    positive peak-to-trough fraction of the equity path."""
+    spec = REPLAY_WINDOWS[scenario]
+    start, end = spec["start"], spec["end"]
+    weights: dict[str, float] = {}
+    rets: dict[str, dict[str, float]] = {}
+    for pos in positions or []:
+        sym = str(pos.get("symbol", "")).upper().strip()
+        w = float(pos.get("weight", 0.0) or 0.0)
+        if not sym:
+            continue
+        weights[sym] = weights.get(sym, 0.0) + w
+        bars = bars_by_symbol.get(sym) or {}
+        r = _window_returns(bars, start, end)
+        if r:
+            rets[sym] = r
+    all_dates = sorted(set().union(*(set(r) for r in rets.values()))
+                       ) if rets else []
+    equity = 1.0
+    peak = 1.0
+    mdd = 0.0
+    worst_day, worst_day_date = 0.0, None
+    path: list[dict] = []
+    for d in all_dates:
+        r = sum(w * rets[sym].get(d, 0.0)
+                for sym, w in weights.items() if sym in rets)
+        equity *= (1.0 + r)
+        if r < worst_day:
+            worst_day, worst_day_date = r, d
+        if equity > peak:
+            peak = equity
+        if peak > 0:
+            mdd = max(mdd, (peak - equity) / peak)
+        path.append({"date": d, "equity": round(equity, 6)})
+    return {
+        "scenario": scenario,
+        "label": spec["label"],
+        "window": {"start": start, "end": end},
+        "n_days": len(all_dates),
+        "cumulative": round(equity - 1.0, 6),
+        "worst_day": round(worst_day, 6),
+        "worst_day_date": worst_day_date,
+        "max_drawdown": round(mdd, 6),
+        "path": path[-REPLAY_PATH_MAX:],
+        "n_path_points": len(path),
+        "shocked": sorted(rets),
+    }
+
+
+def stress_replay(positions: list[dict], scenario: str,
+                  bars_by_symbol: dict[str, dict[str, float]] | None = None,
+                  fetch=None, fast: bool = False,
+                  data_root: str | Path = "data") -> dict:
+    """R4-3 — historical stress replay: apply the REAL daily-return path
+    of the scenario window (Yahoo, keyless) to the current book.
+
+    * `scenario` — one of REPLAY_WINDOWS (gfc_2008 / covid_2020 /
+      rate_shock_2022)
+    * `bars_by_symbol` — inject {symbol: {"YYYY-MM-DD": close}} for
+      hermetic runs (tests); when omitted, bars come from
+      `fetch(symbol, start, end)` (default: fetch_window_closes)
+    * `fast=True` — skip the network, serve the static vector result
+    * every per-symbol fetch failure lands that symbol in `unshocked`
+      (weight effectively 0 for the window); a TOTAL failure returns
+      {"ok": False, "fallback": "static"} + the static vector result
+    """
+    if scenario not in REPLAY_WINDOWS:
+        return {"ok": False, "error": f"unknown scenario {scenario!r} "
+                                      f"(use {sorted(REPLAY_WINDOWS)})"}
+    static_spec = STRESS_SCENARIOS.get(scenario)
+    static_entry = (stress_test(positions, {scenario: static_spec})
+                    ["scenarios"][0] if static_spec is not None else None)
+    if fast or not (positions or []):
+        # --fast (or an empty book — nothing to replay): static vector
+        out = dict(static_entry) if static_entry else {
+            "portfolio_shock": 0.0, "shocked": [], "unshocked": []}
+        out.update({"ok": True, "mode": "static", "scenario": scenario,
+                    "label": REPLAY_WINDOWS[scenario]["label"],
+                    "window": {"start": REPLAY_WINDOWS[scenario]["start"],
+                               "end": REPLAY_WINDOWS[scenario]["end"]}})
+        return out
+
+    syms: list[str] = []
+    for pos in positions or []:
+        sym = str(pos.get("symbol", "")).upper().strip()
+        if sym and sym not in syms:
+            syms.append(sym)
+    if bars_by_symbol is None:
+        bars_by_symbol = {}
+        fetcher = fetch or fetch_window_closes
+        errors: list[str] = []
+        spec = REPLAY_WINDOWS[scenario]
+        for sym in syms:
+            try:
+                if _takes_data_root(fetcher):
+                    bars = fetcher(sym, spec["start"], spec["end"],
+                                   data_root=data_root)
+                else:
+                    bars = fetcher(sym, spec["start"], spec["end"])
+                if bars:
+                    bars_by_symbol[sym] = bars
+                else:
+                    errors.append(f"{sym}: empty bars")
+            except Exception as e:  # noqa: BLE001 — fail-soft per symbol
+                errors.append(f"{sym}: {type(e).__name__}: {e}")
+        if not bars_by_symbol:
+            return {
+                "ok": False, "fallback": "static", "mode": "fallback",
+                "scenario": scenario,
+                "label": REPLAY_WINDOWS[scenario]["label"],
+                "error": "; ".join(errors)[:300] or "no bars fetched",
+                "unshocked": sorted(syms),
+                "static": static_entry,
+            }
+
+    out = _replay_from_bars(positions, scenario, bars_by_symbol)
+    out["ok"] = True
+    out["mode"] = "historical"
+    out["static"] = static_entry
+    out["unshocked"] = sorted(s for s in syms
+                              if s not in out["shocked"])
+    return out
+
+
+def _takes_data_root(fetcher) -> bool:
+    """Injection seam tolerance: accept fetchers with or without a
+    data_root kwarg (tests use both shapes)."""
+    try:
+        import inspect
+        return "data_root" in inspect.signature(fetcher).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def stress_replay_all(positions: list[dict], fast: bool = False,
+                      fetch=None, data_root: str | Path = "data") -> dict:
+    """All three windows in REPLAY_WINDOWS order — the CLI/web shape:
+    {"scenarios": [replay dicts], "replays": {name: replay}}."""
+    scenarios = []
+    replays: dict[str, dict] = {}
+    for name in REPLAY_WINDOWS:
+        r = stress_replay(positions, name, fetch=fetch, fast=fast,
+                          data_root=data_root)
+        scenarios.append(r)
+        replays[name] = r
+    n_ok = sum(1 for r in scenarios if r.get("ok"))
+    return {"ok": n_ok > 0, "n_ok": n_ok,
+            "n_scenarios": len(scenarios), "scenarios": scenarios,
+            "replays": replays}
 
 
 # ------------------------------------------------------------ basic stats

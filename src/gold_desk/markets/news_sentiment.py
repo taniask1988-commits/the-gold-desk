@@ -14,8 +14,21 @@ for genuinely ambiguous stories:
                       (exact symbol 1.0 / name 0.8 / fuzzy 0.5)
     - relevance     — asset-mention density × headline-position weight
                       (asset in the first 5 words = 1.0, later = 0.7)
-    - novelty       — 1 − max trigram overlap with the last 24h of scored
-                      stories (persisted n-gram cache; 80% overlap → 0.2)
+    - novelty       — SEMANTIC ensemble (R4-3): 1 − max(token-set cosine,
+                      char-3gram Jaccard, word-trigram overlap) vs the last
+                      24h of scored stories — a paraphrase ("Gold surges as
+                      Fed signals dovish pivot" vs "Gold rallies after
+                      dovish Fed signal") is caught by the token/char members
+                      even when trigram overlap is 0
+    - event         — R4-3 event taxonomy (macro/fed/geopolitical/supply_
+                      shock/demand/crypto/earnings/flows/other) with
+                      confidence (multi-keyword → higher confidence)
+    - per_asset     — R4-3 per-asset polarity: a CROSS-asset headline scores
+                      each detected instrument separately ("Gold surges as
+                      dollar weakens" → gold +, DXY −) via clause splitting,
+                      nearest-term association and the inverse driver rules
+                      (dollar↔gold/oil/EUR, yields↔gold/stocks,
+                      VIX↔stocks/crypto)
     - terms_fired   — the audit trail: which term fired, where, with what
                       weight / intensifier multiplier / negation flip
 
@@ -174,6 +187,10 @@ LEXICON: dict[str, tuple[float, bool]] = {
     "dump": (-0.6, False), "dumps": (-0.6, False),
     "slammed": (-0.6, False), "slams": (-0.6, False),
     "hammered": (-0.6, False), "routed": (-0.6, False),
+    # ---- weakens/strengthens (R4-3: clause-level per-asset polarity needs
+    # the dollar's own direction verbs, not just the comparative forms)
+    "weakens": (-0.5, True), "strengthened": (0.5, True),
+    "strengthens": (0.5, True), "strengthening": (0.5, True),
     # ---- negative, subjective
     "weak": (-0.5, True), "weaker": (-0.5, True), "weakness": (-0.5, True),
     "weakest": (-0.6, True),
@@ -444,6 +461,460 @@ def _novelty_ngrams(tokens: list[str]) -> set[str]:
     return set()
 
 
+# ================================================================== R4-3
+# Event taxonomy — classify_event
+# ------------------------------------------------------------------
+# Keyword rules per category. `primary` keywords count on their own;
+# `booster` keywords only count when ≥1 primary of the SAME category
+# already fired (so the generic "exchange" never drags "Gold ETF sees
+# record inflows" into crypto). Matched with word-boundary regex on the
+# lowercased headline; multi-word phrases allowed. Confidence rises with
+# the number of distinct keywords fired:
+#     conf = min(0.95, 0.35 + 0.20·(n−1))  — 1 hit → 0.35, 2 → 0.55, 3 → 0.75
+# Ties on hit count resolve in the listed (deterministic) order.
+EVENT_CATEGORIES: list[str] = ["macro", "fed", "geopolitical", "supply_shock",
+                               "demand", "crypto", "earnings", "flows"]
+EVENT_OTHER = "other"
+_EVENT_KEYWORDS: dict[str, dict[str, tuple[str, ...]]] = {
+    "macro": {
+        "primary": ("gdp", "inflation", "cpi", "pce", "jobs", "jobless",
+                    "payrolls", "payroll", "nfp", "nonfarm", "non farm",
+                    "recession", "unemployment", "labor market",
+                    "job market", "economic growth"),
+        "booster": ("economy", "consumer confidence"),
+    },
+    "fed": {
+        "primary": ("fed", "fomc", "powell", "dovish", "hawkish",
+                    "rate cut", "rate cuts", "rate hike", "rate hikes",
+                    "federal reserve", "jackson hole", "basis points",
+                    "rate path"),
+        "booster": ("easing", "tightening"),
+    },
+    "geopolitical": {
+        "primary": ("war", "wars", "sanctions", "tariff", "tariffs",
+                    "conflict", "election", "elections", "invasion",
+                    "invade", "escalation", "escalate", "escalating",
+                    "ceasefire", "geopolitical", "middle east", "ukraine",
+                    "israel", "iran", "russia", "nato", "tensions",
+                    "trade war"),
+        "booster": tuple(),
+    },
+    "supply_shock": {
+        "primary": ("opec", "output cut", "output cuts", "production cut",
+                    "production cuts", "production", "supply", "supplies",
+                    "disruption", "disruptions", "disrupt", "strike",
+                    "strikes", "pipeline", "refinery", "embargo",
+                    "hurricane", "outage", "outages"),
+        "booster": tuple(),
+    },
+    "demand": {
+        "primary": ("demand", "consumption", "inventories", "inventory",
+                    "stockpiles", "stockpile", "fuel demand",
+                    "demand growth", "appetite"),
+        "booster": tuple(),
+    },
+    "crypto": {
+        "primary": ("hack", "hacks", "hacked", "hacking", "heist",
+                    "halving", "wallet", "wallets", "stablecoin",
+                    "stablecoins", "binance", "coinbase", "etf approval",
+                    "crypto exchange", "bitcoin etf", "spot bitcoin"),
+        "booster": ("exchange", "blockchain"),
+    },
+    "earnings": {
+        "primary": ("beats", "beat", "beaten", "misses", "miss",
+                    "missed", "guidance", "revenue", "revenues", "eps",
+                    "earnings", "quarterly results", "profit warning",
+                    "blowout"),
+        "booster": ("estimates", "results"),
+    },
+    "flows": {
+        "primary": ("etf flows", "fund flows", "positioning", "cot",
+                    "holdings", "inflows", "outflows", "money flows",
+                    "institutional flows", "etf holdings", "etf inflows",
+                    "etf outflows", "short covering"),
+        "booster": tuple(),
+    },
+}
+_EVENT_CONF_BASE = 0.35
+_EVENT_CONF_STEP = 0.20
+_EVENT_CONF_MAX = 0.95
+# keyword → compiled word-boundary pattern (built once, lazily on use)
+_EVENT_PATTERNS: dict[str, re.Pattern] = {}
+
+
+def _event_pattern(kw: str) -> re.Pattern:
+    pat = _EVENT_PATTERNS.get(kw)
+    if pat is None:
+        pat = _term_pattern(kw)
+        _EVENT_PATTERNS[kw] = pat
+    return pat
+
+
+def _event_category_hits(text: str, category: str) -> list[str]:
+    """Distinct keywords of `category` that fire on the lowercased text
+    (boosters only count when a primary of the same category fired)."""
+    norm = (text or "").lower()
+    spec = _EVENT_KEYWORDS[category]
+    hits = [kw for kw in spec["primary"] if _event_pattern(kw).search(norm)]
+    if hits:
+        hits += [kw for kw in spec["booster"]
+                 if kw not in hits and _event_pattern(kw).search(norm)]
+    return hits
+
+
+def classify_event(headline: str) -> dict:
+    """R4-3 event taxonomy → {event, confidence, matched}.
+
+    Categories (charter order — ties on hit count resolve in this
+    order, so the result is fully deterministic): macro, fed,
+    geopolitical, supply_shock, demand, crypto, earnings, flows;
+    "other" (confidence 0.0) when nothing fires. Multi-keyword matches
+    raise the confidence: 1 hit → 0.35, 2 → 0.55, 3 → 0.75, ≥4 → 0.95.
+    """
+    norm = (headline or "").lower()
+    if not norm.strip():
+        return {"event": EVENT_OTHER, "confidence": 0.0, "matched": []}
+    best_cat, best_hits = None, []
+    for cat in EVENT_CATEGORIES:
+        hits = _event_category_hits(norm, cat)
+        if len(hits) > len(best_hits):
+            best_cat, best_hits = cat, hits
+    if best_cat is None:
+        return {"event": EVENT_OTHER, "confidence": 0.0, "matched": []}
+    n = len(best_hits)
+    conf = min(_EVENT_CONF_MAX, _EVENT_CONF_BASE + _EVENT_CONF_STEP * (n - 1))
+    return {"event": best_cat, "confidence": round(conf, 2),
+            "matched": best_hits}
+
+
+# ------------------------------------------------------------------ R4-3
+# Per-asset polarity — clause split + proximity + inverse driver rules
+#
+# The inverse driver table (all desk rules are inverse sign):
+#   dollar (DX-Y.NYB)  ↔ gold (GC=F) / oil (CL=F) / EUR (EURUSD=X)
+#   yields (^TNX)      ↔ gold (GC=F) / stocks (ES=F)
+#   risk sentiment (^VIX) ↔ stocks (ES=F) / crypto (BTC-USD)
+# "Gold surges as dollar weakens" → gold + (its own clause) and DXY −
+# (its own clause, or the inverse rule when the clause has no terms).
+DRIVER_RULES: dict[frozenset[str], str] = {
+    frozenset({"DX-Y.NYB", "GC=F"}): "dollar↔gold inverse",
+    frozenset({"DX-Y.NYB", "CL=F"}): "dollar↔oil inverse",
+    frozenset({"DX-Y.NYB", "EURUSD=X"}): "dollar↔EUR inverse",
+    frozenset({"^TNX", "GC=F"}): "yields↔gold inverse",
+    frozenset({"^TNX", "ES=F"}): "yields↔stocks inverse",
+    frozenset({"^VIX", "ES=F"}): "vix↔stocks inverse",
+    frozenset({"^VIX", "BTC-USD"}): "vix↔crypto inverse",
+}
+
+# clause connectives — the raw headline splits here (comma included)
+_CLAUSE_SPLIT_RE = re.compile(
+    r",|\b(?:as|after|on|amid|while|whilst|despite|but|and|or|because|"
+    r"since|when|before|following|with)\b", re.IGNORECASE)
+
+
+def _split_clauses(headline: str) -> list[str]:
+    """Split a headline into clauses at connectives/commas. Empty parts
+    are dropped; order preserved. "Gold surges as dollar weakens" →
+    ["Gold surges", "dollar weakens"]."""
+    parts = [p.strip() for p in _CLAUSE_SPLIT_RE.split(headline or "")]
+    return [p for p in parts if p]
+
+
+def _lexicon_polarity(tokens: list[str]) -> tuple[float, list[str]]:
+    """Lexicon polarity of a token list — the same phrase/single/negator/
+    intensifier machinery as the analyzer's local score, factored out so
+    clause-level per-asset scoring reuses it. Returns (polarity, terms)."""
+    n = len(tokens)
+    consumed = [False] * n
+    matches: list[tuple[int, int, str, float, bool]] = []
+    for span in (3, 2):
+        for i in range(n - span + 1):
+            if any(consumed[i:i + span]):
+                continue
+            phrase = " ".join(tokens[i:i + span])
+            if phrase in PHRASES:
+                w, subj = PHRASES[phrase]
+                matches.append((i, i + span, phrase, w, subj))
+                for k in range(i, i + span):
+                    consumed[k] = True
+    for i, tok in enumerate(tokens):
+        if consumed[i]:
+            continue
+        hit = LEXICON.get(tok)
+        if hit is not None:
+            w, subj = hit
+            matches.append((i, i + 1, tok, w, subj))
+            consumed[i] = True
+    negators = {i for i, t in enumerate(tokens) if t in NEGATORS}
+    intens = {i: INTENSIFIERS[t] for i, t in enumerate(tokens)
+              if t in INTENSIFIERS}
+    total = 0.0
+    terms: list[str] = []
+    for start, _end, term, weight, _subj in sorted(matches):
+        negated = any(0 < start - ni <= MODIFIER_WINDOW for ni in negators)
+        multiplier = 1.0
+        for ii, mult in intens.items():
+            if 0 < start - ii <= MODIFIER_WINDOW:
+                multiplier = mult
+        total += weight * multiplier * (-1.0 if negated else 1.0)
+        terms.append(term)
+    return math.tanh(total), terms
+
+
+def _proximity_split(tokens: list[str], my_pos: int | None,
+                     other_pos: int | None) -> tuple[float | None, list[str]]:
+    """Two assets share a clause: each keeps only the sentiment terms
+    closer to IT than to the partner (ties → the earlier asset). Returns
+    (polarity, terms) for MY asset; (None, []) when nothing is closer.
+    Term position = start token index in the clause."""
+    n = len(tokens)
+    consumed = [False] * n
+    matches: list[tuple[int, int, str, float]] = []
+    for span in (3, 2):
+        for i in range(n - span + 1):
+            if any(consumed[i:i + span]):
+                continue
+            phrase = " ".join(tokens[i:i + span])
+            if phrase in PHRASES:
+                matches.append((i, i + span, phrase, PHRASES[phrase][0]))
+                for k in range(i, i + span):
+                    consumed[k] = True
+    for i, tok in enumerate(tokens):
+        if consumed[i]:
+            continue
+        hit = LEXICON.get(tok)
+        if hit is not None:
+            matches.append((i, i + 1, tok, hit[0]))
+            consumed[i] = True
+    total, terms = 0.0, []
+    for start, _end, term, weight in sorted(matches):
+        d_me = abs(start - my_pos) if my_pos is not None else 10 ** 6
+        d_ot = abs(start - other_pos) if other_pos is not None else 10 ** 6
+        if d_me <= d_ot:
+            total += weight
+            terms.append(term)
+    if not terms:
+        return None, []
+    return math.tanh(total), terms
+
+
+def per_asset_polarity(headline: str) -> list[dict]:
+    """R4-3 — score each detected asset SEPARATELY.
+
+    * single-asset headline → one entry carrying the headline polarity
+    * cross-asset headline → clause split ("Gold surges as dollar
+      weakens" → "Gold surges" / "dollar weakens"), each asset scored on
+      the clause containing its first mention; when an asset's clause
+      carries no direction term, the inverse DRIVER_RULES infer its sign
+      from its rule partner (all desk rules are inverse); assets sharing
+      a clause split the clause's terms by nearest-asset proximity
+    * fallback — headline polarity (honest, no rule)
+
+    Returns [{symbol, name, polarity, evidence}] in detection order.
+    """
+    headline = (headline or "").strip()
+    if not headline:
+        return []
+    all_tokens = _tokenize(headline)
+    headline_polarity, _ = _lexicon_polarity(all_tokens)
+
+    # assets per clause; merge to first-mention (ASSET_ORDER stable)
+    clauses = _split_clauses(headline)
+    clause_assets: list[list[dict]] = [detect_assets(c) for c in clauses]
+    merged: dict[str, dict] = {}
+    clause_of: dict[str, int] = {}
+    for ci, assets in enumerate(clause_assets):
+        for a in assets:
+            merged.setdefault(a["symbol"], a)
+            clause_of.setdefault(a["symbol"], ci)
+    if not merged:
+        return []
+    if len(merged) == 1:
+        sym, a = next(iter(merged.items()))
+        return [{"symbol": sym, "name": a["name"],
+                 "polarity": round(headline_polarity, 4),
+                 "evidence": "single-asset: headline polarity"}]
+
+    pol: dict[str, float | None] = {}
+    ev: dict[str, str] = {}
+    for sym, a in merged.items():
+        ci = clause_of[sym]
+        tokens = _tokenize(clauses[ci])
+        c_pol, c_terms = _lexicon_polarity(tokens)
+        if c_terms:
+            # shared clause with a rule partner → split terms by proximity
+            partner = next((s for s in merged
+                            if s != sym
+                            and DRIVER_RULES.get(frozenset({sym, s}))
+                            and clause_of.get(s) == ci), None)
+            if partner is not None:
+                p_pos = next((x["position"] for x in clause_assets[ci]
+                              if x["symbol"] == partner), None)
+                my_pol, my_terms = _proximity_split(tokens, a["position"],
+                                                    p_pos)
+                if my_terms:
+                    pol[sym] = my_pol
+                    ev[sym] = ("clause (nearest terms): "
+                               + ", ".join(my_terms[:3]))
+                    continue
+                # every clause term sits closer to the rule partner → let
+                # the inverse rule infer this asset's sign ("Dollar
+                # weakness lifts gold" → gold +)
+                pol[sym] = None
+                ev[sym] = (f"terms nearer {partner}; "
+                           f"inferred via "
+                           f"{DRIVER_RULES[frozenset({sym, partner})]}")
+                continue
+            pol[sym] = c_pol
+            ev[sym] = "clause: " + ", ".join(sorted(set(c_terms))[:3])
+        else:
+            pol[sym] = None
+
+    # inverse-rule inference for assets whose clause had no terms
+    syms = sorted(merged, key=lambda s: ASSET_ORDER.index(s)
+                  if s in ASSET_ORDER else len(ASSET_ORDER))
+    for i, sym in enumerate(syms):
+        if pol[sym] is not None:
+            continue
+        for other in syms[i + 1:] + syms[:i]:
+            rule = DRIVER_RULES.get(frozenset({sym, other}))
+            if rule and pol.get(other) is not None:
+                pol[sym] = -pol[other]
+                ev[sym] = f"inferred via {rule} ({other} {pol[other]:+.3f})"
+                break
+    for sym in syms:
+        if pol[sym] is None:
+            pol[sym] = headline_polarity
+            ev[sym] = "cross-asset, no rule: headline polarity"
+    return [{"symbol": sym, "name": merged[sym]["name"],
+             "polarity": round(pol[sym], 4), "evidence": ev[sym]}
+            for sym in syms]
+
+
+# ------------------------------------------------------------------ R4-3
+# Semantic novelty — token-set cosine + char-3gram Jaccard + trigram
+NOVELTY_STOPWORDS = frozenset({
+    "the", "a", "an", "as", "of", "to", "in", "on", "for", "and", "or",
+    "but", "after", "at", "by", "with", "from", "is", "are", "was",
+    "were", "be", "been", "its", "this", "that", "than", "then", "amid",
+    "into", "over", "while", "during", "since", "because", "their",
+    "they", "it", "has", "have", "had", "will", "would", "could", "may",
+    "might", "about", "how", "what", "when", "who", "why", "upcoming",
+})
+# move-verb clusters — the semantic dimension: "surges" and "rallies"
+# are the SAME event word for novelty purposes (checked after light
+# stemming AND raw, so every inflection form hits)
+_UP_MOVES = frozenset({
+    "surge", "surges", "surged", "surging", "soar", "soars", "soared",
+    "soaring", "rally", "rallies", "rallied", "rallying", "jump",
+    "jumps", "jumped", "jumping", "climb", "climbs", "climbed",
+    "climbing", "rise", "rises", "rose", "risen", "rising", "gain",
+    "gains", "gained", "gaining", "advance", "advances", "advanced",
+    "advancing", "higher", "highs", "high", "spike", "spikes", "spiked",
+    "spiking", "rebound", "rebounds", "rebounded", "rebounding",
+    "recover", "recovers", "recovery", "boom", "booming", "grow",
+    "growth", "grows", "lift", "lifts", "lifted", "boost", "boosts",
+    "boosted", "melt", "up", "record",
+})
+_DOWN_MOVES = frozenset({
+    "plunge", "plunges", "plunged", "plunging", "plummet", "plummets",
+    "plummeted", "plummeting", "crash", "crashes", "crashed",
+    "crashing", "collapse", "collapses", "collapsed", "collapsing",
+    "slump", "slumps", "slumped", "slumping", "slide", "slides",
+    "slid", "sliding", "drop", "drops", "dropped", "dropping", "fall",
+    "falls", "fell", "fallen", "falling", "tumble", "tumbles",
+    "tumbled", "tumbling", "sink", "sinks", "sank", "sunk", "sinking",
+    "dive", "dives", "dived", "diving", "lower", "lows", "low",
+    "retreat", "retreats", "retreated", "decline", "declines",
+    "declined", "declining", "lose", "loses", "lost", "losing", "dump",
+    "dumps", "dumped", "weaken", "weakens", "weakened", "weakening",
+    "weaker", "weakness", "weak", "slip", "slips", "slipped",
+    "selloff", "down", "rout", "routed", "hammered", "slammed",
+})
+
+
+def _stem_light(tok: str) -> str:
+    """Light suffix stem: -ies→-y (rallies→rally), -sses→-ss; plural -s
+    stripped (not -ss/-us/-is). Everything else passes through."""
+    if len(tok) > 4 and tok.endswith("ies"):
+        return tok[:-3] + "y"
+    if len(tok) > 5 and tok.endswith("sses"):
+        return tok[:-2]
+    if (len(tok) > 3 and tok.endswith("s")
+            and not tok.endswith(("ss", "us", "is"))):
+        return tok[:-1]
+    return tok
+
+
+def _semantic_tokens(text: str) -> set[str]:
+    """Content-word set with semantic normalization: stopwords dropped,
+    light stemming, move verbs mapped to __up__/__down__ cluster tokens.
+    "Gold surges as Fed signals dovish pivot" →
+    {gold, __up__, fed, signal, dovish, pivot}."""
+    out: set[str] = set()
+    for tok in _tokenize(text):
+        if tok in NOVELTY_STOPWORDS:
+            continue
+        stem = _stem_light(tok)
+        if stem in _UP_MOVES or tok in _UP_MOVES:
+            out.add("__up__")
+        elif stem in _DOWN_MOVES or tok in _DOWN_MOVES:
+            out.add("__down__")
+        else:
+            out.add(stem)
+    return out
+
+
+def _char3grams(text: str) -> set[str]:
+    """Char-3gram set of the lowercased alphanumeric string."""
+    s = re.sub(r"[^a-z0-9]", "", (text or "").lower())
+    if len(s) < 3:
+        return {s} if s else set()
+    return {s[i:i + 3] for i in range(len(s) - 2)}
+
+
+def _token_cosine(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / math.sqrt(len(a) * len(b))
+
+
+def _jaccard(a: set, b: set) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def semantic_novelty(headline: str, prior_headlines: list[str]) -> float:
+    """R4-3 — ensemble novelty of `headline` vs prior headlines:
+
+        novelty = 1 − max(token-set cosine, char-3gram Jaccard,
+                          word-trigram overlap)
+
+    each similarity taken against ANY single prior. The token member
+    uses content-word sets with light stemming + move-verb clustering
+    ("surges" ≡ "rallies"), so the paraphrase pair
+        "Gold surges as Fed signals dovish pivot"
+        "Gold rallies after dovish Fed signal"
+    has ~0 trigram overlap yet token-cosine ≈ 0.83 → novelty < 0.3.
+    Identical → 0.0; fully distinct stories → ≈ 1.0.
+    """
+    priors = [p for p in (prior_headlines or []) if p]
+    if not priors:
+        return 1.0
+    sem = _semantic_tokens(headline)
+    ch3 = _char3grams(headline)
+    grams = _novelty_ngrams(_tokenize(headline))
+    worst = 0.0
+    for prior in priors:
+        worst = max(worst,
+                    _token_cosine(sem, _semantic_tokens(prior)),
+                    _jaccard(ch3, _char3grams(prior)),
+                    ((len(grams & _novelty_ngrams(_tokenize(prior)))
+                      / len(grams)) if grams else 0.0))
+    return 1.0 - worst
+
+
 # ------------------------------------------------------------------ analyzer
 class NewsSentimentAnalyzer:
     """Lexicon sentiment scorer with asset detection, relevance, novelty
@@ -500,26 +971,38 @@ class NewsSentimentAnalyzer:
         except OSError:
             pass                              # fail-soft: novelty is best-effort
 
-    def _novelty(self, grams: set[str]) -> float:
-        """1 − max overlap: fraction of THIS story's n-grams already seen in
-        any prior (24h) story. Identical story → 0.0; fully distinct → 1.0;
-        80% trigram overlap → 0.2."""
-        if not grams or not self._cache:
-            return 1.0
-        new = grams
-        worst = 0.0
+    def _novelty_ensemble(self, sem: set[str], ch3: set[str],
+                          grams: set[str]) -> tuple[float, dict]:
+        """R4-3 semantic novelty: 1 − max(token-set cosine, char-3gram
+        Jaccard, word-trigram overlap) vs ANY prior (24h) story.
+        Identical story → 0.0; fully distinct → 1.0; a paraphrase with 0
+        trigram overlap still collapses (token/char members carry it).
+        Old cache entries (trigram-only) still contribute their trigram
+        similarity — graceful upgrade. Returns (novelty, detail dict)."""
+        if (not sem and not ch3 and not grams) or not self._cache:
+            return 1.0, {"token_cosine": 0.0, "char_jaccard": 0.0,
+                         "trigram_overlap": 0.0}
+        worst = {"token_cosine": 0.0, "char_jaccard": 0.0,
+                 "trigram_overlap": 0.0}
         for entry in self._cache:
-            prior = set(entry.get("ngrams") or [])
-            if not prior:
-                continue
-            overlap = len(new & prior) / len(new)
-            if overlap > worst:
-                worst = overlap
-        return 1.0 - worst
+            prior_sem = set(entry.get("tokens") or [])
+            prior_ch3 = set(entry.get("char3") or [])
+            prior_grams = set(entry.get("ngrams") or [])
+            worst["token_cosine"] = max(
+                worst["token_cosine"], _token_cosine(sem, prior_sem))
+            worst["char_jaccard"] = max(
+                worst["char_jaccard"], _jaccard(ch3, prior_ch3))
+            if grams and prior_grams:
+                worst["trigram_overlap"] = max(
+                    worst["trigram_overlap"],
+                    len(grams & prior_grams) / len(grams))
+        return 1.0 - max(worst.values()), worst
 
-    def _remember(self, grams: set[str]) -> None:
+    def _remember(self, sem: set[str], ch3: set[str],
+                  grams: set[str]) -> None:
         now = self.clock()
-        self._cache.append({"ts": now, "ngrams": sorted(grams)})
+        self._cache.append({"ts": now, "ngrams": sorted(grams),
+                            "tokens": sorted(sem), "char3": sorted(ch3)})
         self._cache = [e for e in self._cache
                        if now - float(e.get("ts", 0)) < NOVELTY_WINDOW_S]
         if len(self._cache) > NOVELTY_CACHE_MAX:
@@ -641,10 +1124,14 @@ class NewsSentimentAnalyzer:
         local = self._local_score(headline)
         tokens = local["tokens"]
         grams = _novelty_ngrams(tokens)
-        novelty = self._novelty(grams)
+        sem = _semantic_tokens(headline)
+        ch3 = _char3grams(headline)
+        novelty, novelty_detail = self._novelty_ensemble(sem, ch3, grams)
 
         assets = detect_assets(headline)
         _relevance(assets, len(tokens))
+        event = classify_event(headline)
+        per_asset = per_asset_polarity(headline)
 
         polarity = local["polarity"]
         out: dict = {
@@ -657,6 +1144,13 @@ class NewsSentimentAnalyzer:
             "assets": assets,
             "relevance": max((a["relevance"] for a in assets), default=0.0),
             "novelty": round(novelty, 4),
+            "semantic_novelty": round(novelty, 4),
+            "novelty_detail": {k: round(v, 4)
+                               for k, v in novelty_detail.items()},
+            "event": event["event"],
+            "event_confidence": event["confidence"],
+            "event_matched": event["matched"],
+            "per_asset": per_asset,
             "terms_fired": local["terms_fired"],
             "llm_fallback_used": False,
             "n_tokens": len(tokens),
@@ -685,7 +1179,7 @@ class NewsSentimentAnalyzer:
             except Exception:  # noqa: BLE001 — fail-closed, never block
                 out["llm_fallback_failed"] = True
 
-        self._remember(grams)                 # novelty cache AFTER scoring
+        self._remember(sem, ch3, grams)       # novelty cache AFTER scoring
         return out
 
     @staticmethod

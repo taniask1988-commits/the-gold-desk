@@ -48,6 +48,10 @@ function resolvePython(harness: string): { py: string; err: string | null } {
  * keyless Yahoo daily bars, DATE-ALIGNED across calendars; benchmark = SPY.
  * Pass ?returns=[...] to score an explicit JSON series offline (URL-encoded
  * JSON list of floats; optional &benchmark=[...] and &positions=[...]).
+ * R4-3: ?replay=1 adds stress_replay — the REAL historical daily-return
+ * paths (2008-H2 / 2020-Mar / 2022) applied to the book (cumulative /
+ * worst day / MaxDD + equity path); ?replay=1&fast=1 serves the static
+ * vectors without the network.
  */
 export async function GET(req: Request) {
   const HARNESS = resolveHarness();
@@ -64,6 +68,10 @@ export async function GET(req: Request) {
     if (bench) cliArgs.push("--benchmark-returns", bench);
     const positions = params.get("positions");
     if (positions) cliArgs.push("--positions", positions);
+  }
+  if (params.get("replay") === "1") {
+    cliArgs.push("--stress-replay");
+    if (params.get("fast") === "1") cliArgs.push("--fast");
   }
   cliArgs.push("--data-root", path.join(HARNESS, "data"));
   const result = await new Promise<Record<string, unknown>>((resolve) => {

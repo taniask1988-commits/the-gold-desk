@@ -22,6 +22,13 @@ interface SentimentAsset {
   mentions: number;
 }
 
+interface PerAssetPolarity {
+  symbol: string;
+  name?: string;
+  polarity: number;
+  evidence: string;
+}
+
 interface SentimentScore {
   ok: boolean;
   headline?: string;
@@ -32,6 +39,11 @@ interface SentimentScore {
   assets?: SentimentAsset[];
   relevance?: number;
   novelty?: number;
+  semantic_novelty?: number;
+  event?: string;
+  event_confidence?: number;
+  event_matched?: string[];
+  per_asset?: PerAssetPolarity[];
   terms_fired?: TermFired[];
   llm_fallback_used?: boolean;
   llm_fallback_failed?: boolean;
@@ -48,6 +60,8 @@ interface TapeStory {
   feed_symbol?: string;
   published?: string;
   assets?: SentimentAsset[];
+  event?: string;
+  event_confidence?: number;
 }
 
 interface TapeResult {
@@ -59,6 +73,18 @@ interface TapeResult {
   stories?: TapeStory[];
   error?: string;
 }
+
+const EVENT_COLORS: Record<string, string> = {
+  macro: "#7ab5e0",
+  fed: "#a78bfa",
+  geopolitical: "#f85149",
+  supply_shock: "#d9a343",
+  demand: "#3fb950",
+  crypto: "#e3b341",
+  earnings: "#56d364",
+  flows: "#79c0ff",
+  other: "#76828e",
+};
 
 const GAUGE_W = 260;
 const GAUGE_H = 26;
@@ -148,7 +174,7 @@ function SentimentPanelImpl() {
       <div className="flex flex-wrap items-baseline gap-3 border-b border-white/[0.08] pb-2">
         <span className="gdc-display text-[17px] italic text-[#f4f7fa]">News sentiment</span>
         <span className="gdc-kicker">
-          nlp polarity · magnitude · subjectivity · 8-asset detection · novelty — keyless, llm fallback
+          nlp polarity · magnitude · subjectivity · 8-asset detection · semantic novelty · event taxonomy — keyless, llm fallback
         </span>
         <span className="ml-auto text-[8.5px] uppercase tracking-[0.18em] text-[#76828e]">
           {busy ? "scoring…" : score?.ok ? "scored" : score === null ? "loading…" : "error"}
@@ -196,11 +222,24 @@ function SentimentPanelImpl() {
                   background: "rgba(255,255,255,0.04)",
                 }}
               >{score.label}</span>
+              <span
+                className="rounded px-1.5 py-0.5 text-[8.5px] uppercase tracking-[0.15em]"
+                style={{
+                  color: EVENT_COLORS[score.event || "other"] || "#76828e",
+                  background: "rgba(255,255,255,0.04)",
+                }}
+                title={score.event_matched && score.event_matched.length
+                  ? `matched: ${score.event_matched.join(", ")}`
+                  : "no taxonomy keywords matched"}
+              >
+                {score.event || "other"} · {(score.event_confidence ?? 0).toFixed(2)}
+              </span>
             </div>
             <MiniBar label="magnitude" v={score.magnitude ?? 0} color="#7ab5e0" />
             <MiniBar label="subjectivity" v={score.subjectivity ?? 0} color="#a78bfa" />
             <MiniBar label="relevance" v={score.relevance ?? 0} color="#3fb950" />
             <MiniBar label="novelty" v={score.novelty ?? 0} color="#d9a343" />
+            <MiniBar label="semantic nov" v={score.semantic_novelty ?? score.novelty ?? 0} color="#e3b341" />
             {score.llm_fallback_used && (
               <div className="text-[9px] text-[#7ab5e0]">
                 llm 2nd opinion: blended 50/50 · llm polarity {score.llm_polarity?.toFixed(3)}
@@ -226,6 +265,31 @@ function SentimentPanelImpl() {
                     {" "}{a.name} · conf {a.confidence.toFixed(1)} ({a.tier}) · rel {a.relevance.toFixed(2)}
                   </span>
                 ))}
+              </div>
+            )}
+            {(score.per_asset || []).length > 1 && (
+              <div className="space-y-1">
+                <div className="gdc-kicker text-[#9aa6b3]">per-asset polarity (r4-3 — cross-asset sign split)</div>
+                <table className="gdc-data w-full border-collapse text-[10px] tabular-nums">
+                  <thead>
+                    <tr className="text-left text-[#76828e]">
+                      <th className="py-0.5 pr-3 font-normal">symbol</th>
+                      <th className="py-0.5 pr-3 text-right font-normal">polarity</th>
+                      <th className="py-0.5 font-normal">evidence</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(score.per_asset || []).map((pa) => (
+                      <tr key={pa.symbol} className="border-t border-white/[0.05]">
+                        <td className="py-0.5 pr-3 text-[#f4f7fa]">{pa.symbol}{pa.name ? <span className="text-[#76828e]"> · {pa.name}</span> : null}</td>
+                        <td className="py-0.5 pr-3 text-right" style={{ color: polarityColor(pa.polarity) }}>
+                          {pa.polarity >= 0 ? "+" : ""}{pa.polarity.toFixed(4)}
+                        </td>
+                        <td className="py-0.5 text-[8.5px] italic text-[#76828e]">{pa.evidence}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             )}
             <div className="gdc-kicker text-[#9aa6b3]">terms fired (explanation)</div>
@@ -269,6 +333,14 @@ function SentimentPanelImpl() {
                   </span>
                   <span className="gdc-data w-[72px] shrink-0 truncate text-[8.5px] text-[#76828e]">{s.feed_symbol}</span>
                   <span className="flex-1 truncate text-[10px] text-[#9aa6b3]" title={s.headline}>{s.headline}</span>
+                  {s.event && (
+                    <span
+                      className="shrink-0 rounded px-1 py-0.5 text-[7.5px] uppercase tracking-[0.12em]"
+                      style={{ color: EVENT_COLORS[s.event] || "#76828e", background: "rgba(255,255,255,0.04)" }}
+                    >
+                      {s.event}
+                    </span>
+                  )}
                 </div>
               ))}
             </div>

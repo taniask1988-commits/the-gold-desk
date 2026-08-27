@@ -575,3 +575,293 @@ def test_cli_news_sentiment_tape(capsys, tmp_path, monkeypatch):
     text = capsys.readouterr().out
     assert rc == 0
     assert "TAPE" in text and "Gold surges" in text
+
+
+# ============================================================== R4-3
+# Event taxonomy · per-asset polarity · semantic novelty
+from gold_desk.markets.news_sentiment import (  # noqa: E402
+    classify_event,
+    per_asset_polarity,
+    semantic_novelty,
+)
+
+# ------------------------------------------------------ R4-3 event taxonomy
+# 12 hand-labeled headlines — 2 per major category
+TAXONOMY_CASES = [
+    ("US inflation accelerates to 3.5% in March", "macro"),
+    ("Nonfarm payrolls beat expectations as jobs market stays hot", "macro"),
+    ("Powell signals rate cut as inflation cools", "fed"),
+    ("FOMC holds rates steady with a hawkish tone", "fed"),
+    ("War in the Middle East escalates as conflict widens", "geopolitical"),
+    ("New tariffs on steel spark trade war fears", "geopolitical"),
+    ("OPEC announces surprise output cut", "supply_shock"),
+    ("Refinery strike disrupts fuel supply", "supply_shock"),
+    ("Fuel demand slumps as consumption weakens", "demand"),
+    ("Copper inventories build as stockpiles grow", "demand"),
+    ("Crypto exchange hack drains wallets", "crypto"),
+    ("Spot bitcoin ETF approval fuels inflows", "crypto"),
+]
+
+
+@pytest.mark.parametrize("headline,expected", TAXONOMY_CASES,
+                         ids=[h.split()[0].lower() for h, _ in TAXONOMY_CASES])
+def test_r43_taxonomy_hand_labeled(headline, expected):
+    out = classify_event(headline)
+    assert out["event"] == expected, out
+    assert out["confidence"] > 0.3, out
+    assert out["matched"], out                     # audit trail present
+
+
+def test_r43_taxonomy_earnings_and_flows():
+    assert classify_event("Apple beats earnings estimates, raises guidance"
+                          )["event"] == "earnings"
+    assert classify_event("Revenue misses as guidance cut"
+                          )["event"] == "earnings"
+    assert classify_event("Gold ETF sees record inflows")["event"] == "flows"
+    assert classify_event("COT positioning shows record shorts"
+                          )["event"] == "flows"
+
+
+def test_r43_taxonomy_other_when_nothing_fires():
+    out = classify_event("Gold surges as dollar weakens")
+    assert out == {"event": "other", "confidence": 0.0, "matched": []}
+
+
+def test_r43_taxonomy_multi_keyword_confidence_rises():
+    one = classify_event("US inflation accelerates")
+    two = classify_event("US inflation and CPI both accelerate")
+    assert one["confidence"] == pytest.approx(0.35)
+    assert two["confidence"] > one["confidence"]
+    assert two["confidence"] == pytest.approx(0.55)   # 2 distinct keywords
+
+
+def test_r43_taxonomy_ties_resolve_in_charter_order():
+    """macro and geopolitical each fire once → macro wins (listed first)."""
+    out = classify_event("War shocks markets as inflation spikes")
+    assert out["event"] == "macro"
+
+
+def test_r43_taxonomy_deterministic():
+    h = "Powell signals rate cut as inflation cools"
+    assert classify_event(h) == classify_event(h)
+
+
+def test_r43_taxonomy_wired_into_score(analyzer):
+    out = analyzer.score("OPEC announces surprise output cut")
+    assert out["event"] == "supply_shock"
+    assert out["event_confidence"] == pytest.approx(0.55)
+    assert "opec" in out["event_matched"]
+    assert out["per_asset"] == [{"symbol": "CL=F",
+                                 "name": "WTI Crude",
+                                 "polarity": out["polarity"],
+                                 "evidence": "single-asset: headline polarity"}]
+
+
+def test_r43_taxonomy_empty_headline():
+    assert classify_event("")["event"] == "other"
+    assert classify_event("   ")["confidence"] == 0.0
+
+
+# ------------------------------------------------------ R4-3 per-asset polarity
+def test_r43_per_asset_gold_dollar_inverse_signs():
+    """Charter pin: 'Gold surges as dollar weakens' → gold +, DXY −."""
+    out = per_asset_polarity("Gold surges as dollar weakens")
+    by_sym = {e["symbol"]: e["polarity"] for e in out}
+    assert by_sym["GC=F"] > 0.3
+    assert by_sym["DX-Y.NYB"] < -0.3
+
+
+def test_r43_per_asset_stocks_yields_inverse_signs():
+    """Charter pin: 'Stocks rally as yields fall' → ES+, ^TNX−."""
+    out = per_asset_polarity("Stocks rally as yields fall")
+    by_sym = {e["symbol"]: e["polarity"] for e in out}
+    assert by_sym["ES=F"] > 0.3
+    assert by_sym["^TNX"] < -0.3
+
+
+def test_r43_per_asset_single_asset_unchanged(analyzer):
+    out = analyzer.score("Gold surges to record high")
+    per = out["per_asset"]
+    assert len(per) == 1
+    assert per[0]["symbol"] == "GC=F"
+    assert per[0]["polarity"] == out["polarity"]   # existing polarity
+
+
+def test_r43_per_asset_reverse_directions():
+    """'Gold slides as yields rise' → gold −, yields + (rule-consistent)."""
+    out = per_asset_polarity("Gold slides as yields rise")
+    by_sym = {e["symbol"]: e["polarity"] for e in out}
+    assert by_sym["GC=F"] < 0
+    assert by_sym["^TNX"] > 0
+
+
+def test_r43_per_asset_rule_inference_when_clause_has_no_terms():
+    """'Dollar weakness lifts gold' — gold's clause has no lexicon term
+    ('lifts' isn't in the lexicon); the inverse rule infers gold +."""
+    out = per_asset_polarity("Dollar weakness lifts gold")
+    by_sym = {e["symbol"]: e["polarity"] for e in out}
+    assert by_sym["DX-Y.NYB"] < 0
+    assert by_sym["GC=F"] > 0
+    gold = next(e for e in out if e["symbol"] == "GC=F")
+    assert "inverse" in gold["evidence"]
+
+
+def test_r43_per_asset_vix_stocks_and_crypto():
+    stocks = per_asset_polarity("Equities slide as VIX surges")
+    by = {e["symbol"]: e["polarity"] for e in stocks}
+    assert by["ES=F"] < 0 and by["^VIX"] > 0
+    crypto = per_asset_polarity("Bitcoin crashes as VIX spikes")
+    by = {e["symbol"]: e["polarity"] for e in crypto}
+    assert by["BTC-USD"] < 0 and by["^VIX"] > 0
+
+
+def test_r43_per_asset_euro_dollar_pair():
+    out = per_asset_polarity("Euro falls as dollar strengthens")
+    by = {e["symbol"]: e["polarity"] for e in out}
+    assert by["EURUSD=X"] < 0 and by["DX-Y.NYB"] > 0
+
+
+def test_r43_per_asset_no_assets_returns_empty():
+    assert per_asset_polarity("Corporate earnings season starts") == []
+    assert per_asset_polarity("") == []
+
+
+def test_r43_per_asset_no_rule_pair_gets_headline_polarity():
+    """Gold and bitcoin move together — no rule pair → no invented
+    cross-effect: every asset carries the headline's sign (the
+    term-less clause falls back to the headline polarity verbatim)."""
+    out = per_asset_polarity("Gold and bitcoin surge higher")
+    assert len(out) == 2
+    assert all(e["polarity"] > 0 for e in out)
+    by_sym = {e["symbol"]: e for e in out}
+    # 'Gold' sits alone in its clause (no terms) → headline polarity
+    assert "headline polarity" in by_sym["GC=F"]["evidence"]
+    assert by_sym["GC=F"]["polarity"] == by_sym["BTC-USD"]["polarity"]
+
+
+def test_r43_per_asset_polarity_bounded_and_evidenced():
+    for h in ("Gold surges as dollar weakens", "Stocks rally as yields fall",
+              "Bitcoin crashes as VIX spikes"):
+        for e in per_asset_polarity(h):
+            assert -1.0 <= e["polarity"] <= 1.0
+            assert e["evidence"]
+
+
+def test_r43_per_asset_wired_into_score(analyzer):
+    out = analyzer.score("Gold surges as dollar weakens")
+    assert len(out["per_asset"]) == 2
+    syms = {e["symbol"] for e in out["per_asset"]}
+    assert syms == {"GC=F", "DX-Y.NYB"}
+
+
+# ------------------------------------------------------ R4-3 semantic novelty
+PARAPHRASE_A = "Gold surges as Fed signals dovish pivot"
+PARAPHRASE_B = "Gold rallies after dovish Fed signal"
+
+
+def test_r43_semantic_novelty_paraphrase_pair():
+    """Trigram overlap ~0 but token-cosine carries it → novelty < 0.3."""
+    assert semantic_novelty(PARAPHRASE_B, [PARAPHRASE_A]) < 0.3
+
+
+def test_r43_semantic_novelty_identical():
+    assert semantic_novelty(PARAPHRASE_A, [PARAPHRASE_A]) < 0.15
+
+
+def test_r43_semantic_novelty_distinct_story():
+    assert semantic_novelty("OPEC announces surprise production cut",
+                            [PARAPHRASE_A]) > 0.7
+
+
+def test_r43_semantic_novelty_no_priors_is_fresh():
+    assert semantic_novelty(PARAPHRASE_A, []) == 1.0
+    assert semantic_novelty(PARAPHRASE_A, None) == 1.0
+
+
+def test_r43_semantic_tokens_cluster_move_verbs():
+    """'surges' and 'rallies' normalize to the same __up__ cluster token —
+    that is what makes the paraphrase detectable."""
+    a = ns._semantic_tokens(PARAPHRASE_A)
+    b = ns._semantic_tokens(PARAPHRASE_B)
+    assert "__up__" in a and "__up__" in b
+    assert ns._stem_light("rallies") == "rally"
+    assert ns._stem_light("signals") == "signal"
+    # stopwords are dropped
+    assert "as" not in a and "after" not in b
+
+
+def test_r43_semantic_novelty_analyzer_cache_paraphrase():
+    """Scored through the analyzer: the second (paraphrased) story's
+    novelty collapses even though its trigram overlap with the first
+    is zero."""
+    a = NewsSentimentAnalyzer(data_root=None, llm_enabled=False)
+    first = a.score(PARAPHRASE_A)
+    second = a.score(PARAPHRASE_B)
+    assert first["novelty"] > 0.7
+    assert second["novelty"] < 0.3
+    assert second["semantic_novelty"] == second["novelty"]
+    detail = second["novelty_detail"]
+    assert detail["token_cosine"] > 0.7
+    assert detail["trigram_overlap"] == 0.0
+
+
+def test_r43_semantic_novelty_old_trigram_only_cache(tmp_path):
+    """A pre-R4-3 cache file (ngrams only, no tokens/char3) still
+    contributes its trigram similarity — graceful upgrade, no crash."""
+    a1 = NewsSentimentAnalyzer(data_root=tmp_path, llm_enabled=False)
+    h = "Silver is not one of our instruments but this is a stale story"
+    a1.score(h)
+    # strip the new fields to simulate the old format
+    for entry in a1._cache:
+        entry.pop("tokens", None)
+        entry.pop("char3", None)
+    a1._save_cache()
+    a2 = NewsSentimentAnalyzer(data_root=tmp_path, llm_enabled=False)
+    assert a2.score(h)["novelty"] < 0.3
+
+
+def test_r43_semantic_novelty_char3_member():
+    """Same tokens reordered: token cosine 1.0 → caught (order matters
+    not for sets, but the member is still the token-set cosine)."""
+    assert semantic_novelty("dollar weakens gold surges", ["Gold surges as dollar weakens"]) < 0.3
+
+
+# ------------------------------------------------------ R4-3 CLI wiring
+def test_cli_news_sentiment_r43_fields(capsys, tmp_path):
+    from gold_desk.cli import cmd_news_sentiment
+
+    class _Args:
+        headline = "Gold surges as dollar weakens"
+        tape = False
+        limit = 20
+        no_llm = True
+        json = False
+        data_root = str(tmp_path)
+
+    rc = cmd_news_sentiment(_Args())
+    text = capsys.readouterr().out
+    assert rc == 0
+    assert "event" in text                       # taxonomy line
+    assert "per-asset" in text                   # per-asset polarity block
+    assert "DX-Y.NYB" in text
+    assert "semantic" in text                    # semantic novelty field
+
+
+def test_cli_news_sentiment_r43_json(capsys, tmp_path):
+    from gold_desk.cli import cmd_news_sentiment
+
+    class _Args:
+        headline = "OPEC announces surprise output cut"
+        tape = False
+        limit = 20
+        no_llm = True
+        json = True
+        data_root = str(tmp_path)
+
+    rc = cmd_news_sentiment(_Args())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["event"] == "supply_shock"
+    assert out["event_confidence"] > 0.3
+    assert out["per_asset"][0]["symbol"] == "CL=F"
+    assert "semantic_novelty" in out

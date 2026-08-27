@@ -1298,7 +1298,7 @@ def cmd_news_sentiment(args) -> int:
     if not out.get("ok"):
         print("news-sentiment failed:", out.get("error"))
         return 1
-    print("NEWS SENTIMENT — local lexicon + LLM fallback (R3-2)")
+    print("NEWS SENTIMENT — local lexicon + LLM fallback (R3-2 · R4-3)")
     print("=" * 64)
     print(f"headline    : {out.get('headline')}")
     print(f"polarity    : {_polarity_gauge(out.get('polarity', 0.0))}"
@@ -1306,7 +1306,13 @@ def cmd_news_sentiment(args) -> int:
     print(f"magnitude   : {out.get('magnitude', 0):.3f}    "
           f"subjectivity: {out.get('subjectivity', 0):.3f}")
     print(f"novelty     : {out.get('novelty', 0):.3f}    "
+          f"semantic   : {out.get('semantic_novelty', out.get('novelty', 0)):.3f}    "
           f"relevance   : {out.get('relevance', 0):.3f}")
+    ev_conf = out.get('event_confidence', 0.0)
+    ev_matched = out.get('event_matched') or []
+    print(f"event       : {out.get('event', 'other')} "
+          f"(confidence {ev_conf:.2f})"
+          + (f"  [{', '.join(ev_matched[:4])}]" if ev_matched else ""))
     assets = out.get("assets") or []
     if assets:
         parts = [f"{a['symbol']} ({a['name']}, conf {a['confidence']:.1f}, "
@@ -1314,6 +1320,16 @@ def cmd_news_sentiment(args) -> int:
         print(f"assets      : " + " | ".join(parts))
     else:
         print("assets      : (none of the 8 desk instruments detected)")
+    per_asset = out.get("per_asset") or []
+    if len(per_asset) > 1:
+        print("per-asset   :")
+        for pa in per_asset:
+            print(f"  {pa['symbol']:<10} {pa['polarity']:+.4f}  "
+                  f"{pa.get('evidence', '')[:66]}")
+    elif per_asset:
+        pa = per_asset[0]
+        print(f"per-asset   : {pa['symbol']} {pa['polarity']:+.4f} "
+              f"({pa.get('evidence', '')})")
     terms = out.get("terms_fired") or []
     if terms:
         parts = [f"{t['term']} {t['contribution']:+.2f}"
@@ -1406,12 +1422,48 @@ def _parse_json_list(raw: str, flag: str):
     return data, None
 
 
+def _print_stress_replay(replay: dict) -> None:
+    """Pretty-print the R4-3 historical stress-replay block."""
+    print()
+    print("STRESS REPLAY — historical daily-return paths (R4-3)")
+    print("-" * 64)
+    for s in (replay or {}).get("scenarios") or []:
+        win = s.get("window") or {}
+        mode = s.get("mode", "historical")
+        tag = {"historical": f"historical, {s.get('n_days', 0)} days",
+               "static": "static vector (--fast)",
+               "fallback": "STATIC FALLBACK (fetch failed)"}.get(mode, mode)
+        print(f"  {s.get('label', s.get('scenario'))} "
+              f"({win.get('start')} → {win.get('end')})  [{tag}]")
+        if mode == "historical":
+            wd = s.get("worst_day", 0.0)
+            wdd = (f" ({s.get('worst_day_date')})"
+                   if s.get("worst_day_date") else "")
+            print(f"    cumulative {s.get('cumulative', 0):+.2%}   "
+                  f"worst day {wd:+.2%}{wdd}   "
+                  f"MaxDD {s.get('max_drawdown', 0):.2%}")
+        else:
+            st = s.get("static") or s
+            print(f"    portfolio shock {st.get('portfolio_shock', 0):+.2%}")
+        st = s.get("static")
+        if mode == "historical" and st:
+            print(f"    (static vector for contrast: "
+                  f"{st.get('portfolio_shock', 0):+.2%})")
+        unshocked = s.get("unshocked") or []
+        if unshocked:
+            print(f"    unshocked: {', '.join(unshocked)}")
+        if mode == "fallback" and s.get("error"):
+            print(f"    error: {s['error'][:100]}")
+
+
 def cmd_risk(args) -> int:
     """risk — R3-2 Build 4: VaR (parametric Gaussian / historical /
     Monte Carlo) at 95%+99%, Expected Shortfall, beta-adjusted exposure
     and the GFC/COVID/2022 stress scenarios for a portfolio.
+    R4-3: --stress-replay applies the REAL historical daily-return paths
+    (2008-H2 / 2020-Mar / 2022) to the current book (--fast = static).
     """
-    from .risk.metrics import risk_report
+    from .risk.metrics import risk_report, stress_replay_all
     positions = None
     returns = None
     benchmark = None
@@ -1438,6 +1490,28 @@ def cmd_risk(args) -> int:
     else:
         built = _risk_default_portfolio(args.data_root)
         if built is None:
+            if getattr(args, "stress_replay", False):
+                # replay-only report on the static default book — the
+                # replay fetches its own window bars, so it still works
+                replay = stress_replay_all(
+                    DEFAULT_RISK_PORTFOLIO, fast=getattr(args, "fast", False),
+                    data_root=args.data_root)
+                out = {"ok": bool(replay.get("ok")),
+                       "portfolio": ("default 40% SPY / 30% GC=F / 15% "
+                                     "BTC-USD / 15% cash (replay-only: "
+                                     "1y bar fetch failed)"),
+                       "error": "default portfolio 1y fetch failed — "
+                                "VaR block unavailable",
+                       "stress_replay": replay}
+                if args.json:
+                    print(json.dumps(out, sort_keys=True, default=str))
+                else:
+                    print("RISK REPORT — VaR · ES · beta · stress (R3-2 · R4-3)")
+                    print("=" * 64)
+                    print(f"portfolio   : {out['portfolio']}")
+                    print(out["error"])
+                    _print_stress_replay(replay)
+                return 0 if out["ok"] else 1
             msg = ("default portfolio fetch failed (Yahoo daily bars "
                    "unreachable — pass --returns '[...]' for an offline "
                    "series)")
@@ -1455,6 +1529,11 @@ def cmd_risk(args) -> int:
 
     out = risk_report(returns, benchmark=benchmark, positions=positions)
     out["portfolio"] = portfolio_label
+    if getattr(args, "stress_replay", False):
+        rp_positions = positions if positions else list(DEFAULT_RISK_PORTFOLIO)
+        out["stress_replay"] = stress_replay_all(
+            rp_positions, fast=getattr(args, "fast", False),
+            data_root=args.data_root)
     if args.json:
         print(json.dumps(out, sort_keys=True, default=str))
         return 0 if out.get("ok") else 1
@@ -1499,6 +1578,8 @@ def cmd_risk(args) -> int:
                     else "")
             print(f"  {s.get('label', s.get('name')):<34s}"
                   f"{s.get('portfolio_shock', 0):+.2%}{note}")
+    if getattr(args, "stress_replay", False) and out.get("stress_replay"):
+        _print_stress_replay(out["stress_replay"])
     return 0
 
 
@@ -2445,7 +2526,9 @@ def main(argv=None) -> int:
     p_risk = sub.add_parser("risk",
                              help="R3-2: VaR (Gaussian/historical/Monte "
                                   "Carlo) + ES + beta + stress scenarios "
-                                  "(GFC/COVID/2022) for a portfolio")
+                                  "(GFC/COVID/2022) for a portfolio; R4-3 "
+                                  "--stress-replay applies the REAL "
+                                  "historical daily-return paths")
     p_risk.add_argument("--returns", default=None,
                          help="JSON list of returns (offline mode; default: "
                               "live 40%% SPY / 30%% GC=F / 15%% BTC / 15%% "
@@ -2456,6 +2539,15 @@ def main(argv=None) -> int:
     p_risk.add_argument("--positions", default=None,
                          help="JSON list of {symbol, weight} positions for "
                               "the stress scenarios")
+    p_risk.add_argument("--stress-replay", action="store_true",
+                         dest="stress_replay",
+                         help="R4-3: replay the REAL historical daily-return "
+                              "paths (2008-H2 / 2020-Mar / 2022) on the "
+                              "current book (cumulative / worst day / MaxDD "
+                              "+ equity path)")
+    p_risk.add_argument("--fast", action="store_true",
+                         help="stress replay: skip the network, use the "
+                              "static shock vectors")
     p_risk.add_argument("--json", action="store_true")
     p_risk.add_argument("--data-root", default=str(REPO_ROOT / "data"))
     p_risk.set_defaults(func=cmd_risk)

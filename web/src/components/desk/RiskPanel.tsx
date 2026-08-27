@@ -2,6 +2,23 @@
 
 import { memo, useCallback, useEffect, useState } from "react";
 
+interface ReplayScenario {
+  scenario?: string;
+  label?: string;
+  mode?: string;
+  ok?: boolean;
+  cumulative?: number;
+  worst_day?: number;
+  worst_day_date?: string | null;
+  max_drawdown?: number;
+  n_days?: number;
+  window?: { start?: string; end?: string };
+  unshocked?: string[];
+  error?: string;
+  static?: { portfolio_shock?: number };
+  portfolio_shock?: number;
+}
+
 interface RiskReport {
   ok: boolean;
   portfolio?: string;
@@ -31,6 +48,10 @@ interface RiskReport {
       yield_change_pp?: number;
     }>;
   };
+  stress_replay?: {
+    ok?: boolean;
+    scenarios?: ReplayScenario[];
+  };
   error?: string;
 }
 
@@ -53,6 +74,9 @@ function shockColor(v: number): string {
 
 function RiskPanelImpl() {
   const [data, setData] = useState<RiskReport | null>(null);
+  const [replay, setReplay] = useState<RiskReport | null>(null);
+  const [replayBusy, setReplayBusy] = useState(false);
+  const [replayError, setReplayError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -60,6 +84,20 @@ function RiskPanelImpl() {
       setData(r as RiskReport);
     } catch {
       setData({ ok: false, error: "transport failure" });
+    }
+  }, []);
+
+  const loadReplay = useCallback(async () => {
+    setReplayBusy(true);
+    setReplayError(null);
+    try {
+      const r = await fetch("/api/desk/risk?replay=1").then((x) => x.json());
+      if (r && r.ok) setReplay(r as RiskReport);
+      else setReplayError((r && r.error) || "replay failed");
+    } catch {
+      setReplayError("transport failure");
+    } finally {
+      setReplayBusy(false);
     }
   }, []);
 
@@ -73,6 +111,7 @@ function RiskPanelImpl() {
   const es = data?.expected_shortfall || {};
   const beta = data?.beta;
   const scenarios = data?.stress?.scenarios || [];
+  const replayScenarios = replay?.stress_replay?.scenarios || [];
 
   return (
     <div className="gdc-panel space-y-3 p-4">
@@ -85,6 +124,15 @@ function RiskPanelImpl() {
           {data?.ok ? <span className="gdc-live-dot h-1.5 w-1.5 rounded-full bg-[#3fb950]" /> : null}
           {data?.ok ? "computed" : data === null ? "loading…" : "unreachable"}
         </span>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 border-b border-white/[0.08] pb-2">
+        <button
+          onClick={() => void loadReplay()}
+          disabled={replayBusy}
+          className="rounded bg-[#1f2632] px-3 py-1.5 text-[10px] uppercase tracking-[0.15em] text-[#f4f7fa] hover:bg-[#273040] disabled:opacity-50"
+        >{replayBusy ? "replaying windows…" : "stress replay — real 2008 / 2020 / 2022 paths (r4-3)"}</button>
+        {replayError && <span className="text-[9px] italic text-[#d9a343]">{replayError}</span>}
       </div>
 
       {data && !data.ok && (
@@ -148,7 +196,7 @@ function RiskPanelImpl() {
 
           {scenarios.length > 0 && (
             <div className="space-y-1.5">
-              <div className="gdc-kicker text-[#9aa6b3]">stress scenarios</div>
+              <div className="gdc-kicker text-[#9aa6b3]">stress scenarios (static vectors)</div>
               <div className="grid gap-2 sm:grid-cols-3">
                 {scenarios.map((s) => (
                   <div key={s.name} className="rounded bg-[#1a1f2c] p-2.5">
@@ -164,6 +212,64 @@ function RiskPanelImpl() {
                     )}
                   </div>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {replayScenarios.length > 0 && (
+            <div className="space-y-1.5">
+              <div className="gdc-kicker text-[#9aa6b3]">
+                stress replay — real historical daily-return paths (r4-3)
+              </div>
+              <div className="overflow-x-auto">
+                <table className="gdc-data w-full border-collapse text-[10px] tabular-nums">
+                  <thead>
+                    <tr className="text-left text-[#76828e]">
+                      <th className="py-1 pr-4 font-normal">window</th>
+                      <th className="py-1 pr-4 text-right font-normal">mode</th>
+                      <th className="py-1 pr-4 text-right font-normal">cumulative</th>
+                      <th className="py-1 pr-4 text-right font-normal">worst day</th>
+                      <th className="py-1 pr-4 text-right font-normal">max dd</th>
+                      <th className="py-1 pr-4 text-right font-normal">static</th>
+                      <th className="py-1 font-normal">unshocked</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {replayScenarios.map((s) => {
+                      const hist = s.mode === "historical";
+                      const stat = s.static?.portfolio_shock ?? s.portfolio_shock ?? 0;
+                      return (
+                        <tr key={s.scenario || s.label} className="border-t border-white/[0.05]">
+                          <td className="py-1 pr-4 text-[#9aa6b3]">
+                            {s.label}
+                            {s.window?.start && (
+                              <span className="text-[#76828e]"> ({s.window.start} → {s.window.end})</span>
+                            )}
+                          </td>
+                          <td className="py-1 pr-4 text-right text-[#7ab5e0]">
+                            {hist ? `historical · ${s.n_days}d` : s.mode === "fallback" ? "static fallback" : "static"}
+                          </td>
+                          <td className="py-1 pr-4 text-right" style={{ color: shockColor(s.cumulative ?? 0) }}>
+                            {hist ? pct(s.cumulative) : "—"}
+                          </td>
+                          <td className="py-1 pr-4 text-right text-[#f85149]">
+                            {hist && s.worst_day_date ? `${pct(s.worst_day)} (${s.worst_day_date})` : "—"}
+                          </td>
+                          <td className="py-1 pr-4 text-right text-[#d9a343]">
+                            {hist ? pct(s.max_drawdown) : "—"}
+                          </td>
+                          <td className="py-1 pr-4 text-right text-[#76828e]">{pct(stat)}</td>
+                          <td className="py-1 text-[8px] italic text-[#76828e]">
+                            {(s.unshocked || []).join(", ") || "—"}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div className="text-[8.5px] italic text-[#76828e]">
+                daily equity path = Σ w·r compounded over each symbol's own historical bars; symbols without data in the window (e.g. BTC in 2008) contribute 0 and are listed unshocked.
               </div>
             </div>
           )}

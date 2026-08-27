@@ -375,3 +375,180 @@ def attribution_report(ledger: list | None = None, source: str = "ledger"
     out = attribute(ledger or [])
     out["source"] = source
     return out
+
+
+# ================================================================== R4-3
+# Brinson attribution — two-way (allocation/selection/interaction)
+# decomposition of ACTIVE RETURN by GROUP (asset sector).
+#
+# Classic Brinson-Fachler per group g (r_b = total benchmark return):
+#     allocation_g  = (w_p,g − w_b,g) · (r_b,g − r_b)
+#     selection_g   = w_b,g · (r_p,g − r_b,g)
+#     interaction_g = (w_p,g − w_b,g) · (r_p,g − r_b,g)
+# Conservation is algebraic: Σ(A+S+I) = R_p − R_b exactly (pinned at
+# 1e-9), even when the raw weights do NOT sum to 1 — no silent
+# normalization; the totals are computed from the same raw weights.
+BRINSON_TOLERANCE = 1e-9
+
+# desk-alias group fallbacks for symbols the registries don't carry
+# (the synthetic/P&L ledgers use XAUUSD-style tickers)
+_BRINSON_ALIASES: dict[str, str] = {
+    "XAUUSD": "metals", "XAGUSD": "metals", "XAU": "metals",
+    "GOLD": "metals", "SILVER": "metals", "XPTUSD": "metals",
+    "BTC": "crypto", "ETH": "crypto", "SOL": "crypto",
+    "SPX": "indices", "NDX": "indices", "RUT": "indices",
+    "DXY": "rates", "TNX": "rates", "US10Y": "rates",
+    "WTI": "energy", "BRENT": "energy", "NG": "energy",
+}
+_BRINSON_SECTOR_INDEX: dict[str, str] | None = None
+
+
+def brinson_group_of(symbol: str) -> str:
+    """Sector group for Brinson: the 24-instrument UNIVERSE sector first
+    (markets.registry.sector_of), then the 67-symbol SECTORS registry,
+    then the desk-alias table, else \"other\"."""
+    global _BRINSON_SECTOR_INDEX
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return "other"
+    try:
+        from ..markets.registry import SECTORS, sector_of
+        g = sector_of(sym)
+        if g:
+            return g
+        if _BRINSON_SECTOR_INDEX is None:
+            _BRINSON_SECTOR_INDEX = {
+                entry["symbol"].upper(): sector
+                for sector, spec in (SECTORS or {}).items()
+                for entry in spec.get("symbols", [])}
+        return _BRINSON_SECTOR_INDEX.get(sym) or _BRINSON_ALIASES.get(
+            sym, "other")
+    except Exception:  # noqa: BLE001 — registry must never break the math
+        return _BRINSON_ALIASES.get(sym, "other")
+
+
+def _brinson_exposure(ledger: list) -> dict[str, dict[str, float]]:
+    """Ledger rows → {group: {weight, return}} on the P&L-on-cost basis:
+    group weight = Σ|qty·entry| / Σ_all|qty·entry| (shorts carry their
+    exposure notional too); group return = Σpnl / Σ|qty·entry|."""
+    rows, _skipped = normalize_ledger(ledger)
+    notional: dict[str, float] = {}
+    pnl: dict[str, float] = {}
+    total_notional = 0.0
+    for r in rows:
+        g = brinson_group_of(r["symbol"])
+        n = abs(r["qty"] * r["entry"])
+        p = trade_pnl(r)
+        notional[g] = notional.get(g, 0.0) + n
+        pnl[g] = pnl.get(g, 0.0) + p
+        total_notional += n
+    out: dict[str, dict[str, float]] = {}
+    for g in notional:
+        out[g] = {
+            "weight": (notional[g] / total_notional) if total_notional else 0.0,
+            "return": (pnl[g] / notional[g]) if notional[g] else 0.0,
+        }
+    return out
+
+
+def _brinson_aggregate(side) -> dict[str, dict[str, float]]:
+    """Accept EITHER the aggregated form {group: (w, r)} /
+    {group: {weight, return}} / [{group, weight, return}] OR a raw trade
+    ledger (list of rows) — normalized to {group: {weight, return}}."""
+    if side is None:
+        return {}
+    if isinstance(side, dict):
+        out: dict[str, dict[str, float]] = {}
+        for g, v in side.items():
+            if isinstance(v, dict):
+                w = v.get("weight", v.get("w", 0.0))
+                r = v.get("return", v.get("r", 0.0))
+            elif isinstance(v, (tuple, list)) and len(v) == 2:
+                w, r = v[0], v[1]
+            else:
+                raise ValueError(
+                    f"group {g!r}: expected (weight, return) or "
+                    f"{{weight, return}}, got {v!r}")
+            out[str(g)] = {"weight": float(w), "return": float(r)}
+        return out
+    if isinstance(side, list) and side and all(
+            isinstance(e, dict) and "symbol" in e for e in side):
+        return _brinson_exposure(side)          # a raw trade ledger
+    if isinstance(side, list):
+        out = {}
+        for e in side:                          # [{group, weight, return}]
+            g = str(e.get("group", "")).strip()
+            if not g:
+                continue
+            out[g] = {"weight": float(e.get("weight", 0.0)),
+                      "return": float(e.get("return", 0.0))}
+        return out
+    raise ValueError("brinson side must be a ledger or an aggregated "
+                     "{group: (weight, return)} mapping")
+
+
+def brinson(portfolio_ledger, benchmark_ledger) -> dict:
+    """R4-3 — Brinson-Fachler two-way attribution by asset-sector group.
+
+    Both arguments accept the SAME two shapes:
+    * a trade ledger (list of {symbol, side, qty, entry, exit} rows) —
+      group weights derive from entry notional, group returns from
+      P&L-on-cost (see _brinson_exposure)
+    * an aggregated mapping {group: (weight, return)} or
+      {group: {weight, return}} (or a list of {group, weight, return})
+
+    Returns {ok, groups: [{group, w_p, w_b, r_p, r_b, allocation,
+    selection, interaction, total}], allocation, selection, interaction,
+    total, total_return_portfolio, total_return_benchmark,
+    conservation_ok, conservation_error} — `total` is the active return
+    R_p − R_b and Σ(allocation+selection+interaction) == total to 1e-9.
+    """
+    try:
+        p = _brinson_aggregate(portfolio_ledger)
+        b = _brinson_aggregate(benchmark_ledger)
+    except (ValueError, TypeError) as e:
+        return {"ok": False, "error": str(e), "allocation": 0.0,
+                "selection": 0.0, "interaction": 0.0, "total": 0.0}
+
+    groups = sorted(set(p) | set(b))
+    zero = {"weight": 0.0, "return": 0.0}
+    r_b_total = sum(b.get(g, zero)["weight"] * b.get(g, zero)["return"]
+                    for g in groups)
+    r_p_total = sum(p.get(g, zero)["weight"] * p.get(g, zero)["return"]
+                    for g in groups)
+
+    rows: list[dict] = []
+    sum_a = sum_s = sum_i = 0.0
+    for g in groups:
+        w_p = p.get(g, {}).get("weight", 0.0)
+        r_p = p.get(g, {}).get("return", 0.0)
+        w_b = b.get(g, {}).get("weight", 0.0)
+        r_b = b.get(g, {}).get("return", 0.0)
+        allocation = (w_p - w_b) * (r_b - r_b_total)
+        selection = w_b * (r_p - r_b)
+        interaction = (w_p - w_b) * (r_p - r_b)
+        sum_a += allocation
+        sum_s += selection
+        sum_i += interaction
+        rows.append({
+            "group": g,
+            "w_p": w_p, "w_b": w_b, "r_p": r_p, "r_b": r_b,
+            "allocation": allocation, "selection": selection,
+            "interaction": interaction,
+            "total": allocation + selection + interaction,
+        })
+    total = r_p_total - r_b_total
+    residual = (sum_a + sum_s + sum_i) - total
+    return {
+        "ok": True,
+        "n_groups": len(groups),
+        "groups": rows,
+        "allocation": sum_a,
+        "selection": sum_s,
+        "interaction": sum_i,
+        "total": total,
+        "total_return_portfolio": r_p_total,
+        "total_return_benchmark": r_b_total,
+        "conservation_ok": abs(residual) <= BRINSON_TOLERANCE,
+        "conservation_error": residual,
+    }
