@@ -454,7 +454,19 @@ def test_cli_risk_default_portfolio_epoch_ms_bars(monkeypatch, capsys):
     """REGRESSION (found live): fetch_daily_bars stamps bars with EPOCH-MS
     INTEGER ts (board.py's shape), not ISO strings — the default-portfolio
     path must convert to date keys, not crash with TypeError. BTC trades
-    weekends so the date-alignment intersection also gets exercised."""
+    weekends so the date-alignment intersection also gets exercised.
+
+    HERMETIC (R3-3 FIX 0): the bar fetch is fully monkeypatched, so the
+    test runs offline forever; the stress assertions pin the exact
+    documented shock math for the default book 40% SPY / 30% GC=F /
+    15% BTC-USD / 15% cash (CASH unshocked → surfaced, never zeroed
+    silently):
+      GFC   0.40×(−0.385) + 0.30×(−0.20) + 0.15×(−0.45) = −0.2815
+      COVID 0.40×(−0.339) + 0.30×(−0.12) + 0.15×(−0.50) = −0.2466
+      2022  0.40×(−0.194) + 0.30×(−0.05) + 0.15×(−0.65) = −0.1901
+    (the pre-gold/BTC-vector value −0.154 = 0.4×−0.385 only held while
+    gold+BTC were unmodeled; R3-3 shocked them, so this pin moved.)
+    """
     from datetime import datetime, timedelta, timezone
 
     from gold_desk.cli import cmd_risk
@@ -493,8 +505,18 @@ def test_cli_risk_default_portfolio_epoch_ms_bars(monkeypatch, capsys):
     # ~85 common weekdays across the three calendars (intersection < 120)
     assert 60 <= out["n_observations"] <= 119
     assert out["beta"]["n"] == out["n_observations"]  # SPY benchmark aligned
-    # 40% SPY carries the documented shocks (0.4 × −0.385 = −0.154)
-    assert out["stress"]["portfolio_shocks"]["gfc_2008"] == pytest.approx(-0.154)
+    # exact documented stress math for the default book (gold+BTC now
+    # shocked, CASH the only unmodeled leg)
+    shocks = out["stress"]["portfolio_shocks"]
+    assert shocks["gfc_2008"] == pytest.approx(
+        0.40 * -0.385 + 0.30 * -0.20 + 0.15 * -0.45, abs=1e-12)      # −0.2815
+    assert shocks["covid_2020"] == pytest.approx(
+        0.40 * -0.339 + 0.30 * -0.12 + 0.15 * -0.50, abs=1e-12)      # −0.2466
+    assert shocks["rate_shock_2022"] == pytest.approx(
+        0.40 * -0.194 + 0.30 * -0.05 + 0.15 * -0.65, abs=1e-12)     # −0.1901
+    gfc = {s["name"]: s for s in out["stress"]["scenarios"]}["gfc_2008"]
+    assert gfc["shocked"] == ["BTC-USD", "GC=F", "SPY"]
+    assert gfc["unshocked"] == []   # CASH leg is excluded from positions
 
 
 R_SERIES = [0.01, -0.02, 0.015, 0.005, -0.01, 0.02, -0.005, 0.012,

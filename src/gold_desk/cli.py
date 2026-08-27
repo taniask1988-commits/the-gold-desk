@@ -63,6 +63,27 @@
                                                     # hit-rate/profit-factor
                                                     # + equity journal +
                                                     # buy-and-hold compare
+    python -m gold_desk.cli portfolio [--method mv|rp|hrp]
+                                      [--lookback 90d] [--symbols A,B,C]
+                                      [--max-weight 0.4] [--lambda 2.0]
+                                      [--returns JSON] [--json]
+                                                    # R3-3: portfolio
+                                                    # construction — mean-
+                                                    # variance / risk parity
+                                                    # (ERC) / HRP weights +
+                                                    # risk contributions +
+                                                    # diversification ratio
+    python -m gold_desk.cli pnl [--source journal|ledger]
+                                [--ledger PATH] [--json]
+                                                    # R3-3: P&L attribution —
+                                                    # by asset / by setup /
+                                                    # by hour-of-day with
+                                                    # session labels
+                                                    # (journal reconstruction
+                                                    # or a ledger file;
+                                                    # a deterministic
+                                                    # synthetic ledger when
+                                                    # no file is given)
 """
 from __future__ import annotations
 
@@ -1297,6 +1318,25 @@ DEFAULT_RISK_PORTFOLIO = [
 ]
 
 
+def _bar_day_key(bar: dict) -> str | None:
+    """fetch_daily_bars stamps bars with EPOCH-MS integers (board.py's
+    shape) — convert to a UTC YYYY-MM-DD key; tolerate ISO strings too.
+    Returns None on an unusable timestamp (bar dropped, not crashed).
+    Shared by the `risk` and `portfolio` live default paths."""
+    from datetime import datetime, timezone
+    ts = bar.get("ts")
+    try:
+        if isinstance(ts, (int, float)):
+            return datetime.fromtimestamp(float(ts) / 1000.0,
+                                          tz=timezone.utc
+                                          ).strftime("%Y-%m-%d")
+        if isinstance(ts, str):
+            return ts[:10]
+    except (OverflowError, OSError, ValueError):
+        return None
+    return None
+
+
 def _risk_default_portfolio(data_root: str):
     """Live default portfolio: 1y daily closes per symbol (keyless Yahoo,
     cached, fail-soft per symbol), DATE-ALIGNED across calendars (the
@@ -1304,26 +1344,10 @@ def _risk_default_portfolio(data_root: str):
     where benchmark is the SPY return series; None on any fetch failure
     (fail-closed — a missing leg must never silently re-weight).
     """
-    from datetime import datetime, timezone
-
     from .markets.board import fetch_daily_bars
     from .risk.metrics import date_aligned_returns, portfolio_returns
 
-    def _day_key(bar: dict) -> str | None:
-        """fetch_daily_bars stamps bars with EPOCH-MS integers (board.py's
-        shape) — convert to a UTC YYYY-MM-DD key; tolerate ISO strings too.
-        Returns None on an unusable timestamp (bar dropped, not crashed)."""
-        ts = bar.get("ts")
-        try:
-            if isinstance(ts, (int, float)):
-                return datetime.fromtimestamp(float(ts) / 1000.0,
-                                              tz=timezone.utc
-                                              ).strftime("%Y-%m-%d")
-            if isinstance(ts, str):
-                return ts[:10]
-        except (OverflowError, OSError, ValueError):
-            return None
-        return None
+    _day_key = _bar_day_key
 
     closes: dict[str, dict[str, float]] = {}
     for pos in DEFAULT_RISK_PORTFOLIO:
@@ -1509,6 +1533,203 @@ def cmd_backtest(args) -> int:
         for t in trades[-6:]:
             print(f"{t['side']:<6s}{t['entry']:>10.2f}{t['exit']:>10.2f}"
                   f"{t['pnl']:>10.2f}  {t['reason']:<10s}{t['bars_held']:>5d}")
+    return 0
+
+
+PORTFOLIO_SYMBOLS = ["SPY", "GC=F", "BTC-USD"]
+
+
+def _parse_lookback(raw: str) -> int:
+    """'90d' / '90' → 90 return observations (tail of the aligned window)."""
+    text = str(raw).strip().lower().rstrip("d")
+    try:
+        n = int(text)
+    except ValueError:
+        raise ValueError(f"invalid --lookback {raw!r} (use e.g. 90d)")
+    if n < 2:
+        raise ValueError(f"--lookback {raw!r} must be ≥ 2 observations")
+    return n
+
+
+def _portfolio_returns_map(symbols: list[str], lookback: int,
+                           data_root: str) -> tuple[dict, int]:
+    """Live returns map for the portfolio optimizers: 1y keyless Yahoo
+    daily bars per symbol, DATE-ALIGNED across calendars (R3-1 D2
+    lesson), tail-truncated to `lookback` return observations. Returns
+    (returns_by_symbol, n_aligned). Raises ValueError on any fetch
+    failure (fail-closed — a missing leg must never silently re-weight).
+    """
+    from .markets.board import fetch_daily_bars
+    from .risk.metrics import date_aligned_returns
+
+    closes: dict[str, dict[str, float]] = {}
+    for sym in symbols:
+        bars = fetch_daily_bars(sym, "1y", data_root=data_root)
+        by_date: dict[str, float] = {}
+        for b in bars:
+            c = b.get("c")
+            day = _bar_day_key(b)
+            if c is not None and day:
+                by_date[day] = float(c)
+        if len(by_date) < 30:
+            raise ValueError(f"not enough daily bars for {sym} "
+                             f"({len(by_date)} dates)")
+        closes[sym] = by_date
+    aligned = date_aligned_returns(closes)
+    n_aligned = min((len(v) for v in aligned.values() if v), default=0)
+    if n_aligned < 2:
+        raise ValueError("date alignment left < 2 common observations")
+    return {s: v[-lookback:] for s, v in aligned.items() if v}, n_aligned
+
+
+def cmd_portfolio(args) -> int:
+    """portfolio — R3-3 Build 5a: mean-variance / risk-parity / HRP
+    weights over the default 3-asset book (or --returns offline map) with
+    portfolio vol, per-asset risk contributions and the diversification
+    ratio. Deterministic (MV search seed-pinned)."""
+    from .risk.portfolio import optimize
+
+    if args.returns:
+        try:
+            parsed = json.loads(args.returns)
+        except json.JSONDecodeError as e:
+            print(json.dumps({"ok": False,
+                              "error": f"--returns: invalid JSON ({e})"})
+                  if args.json else f"--returns: invalid JSON ({e})")
+            return 1
+        if not isinstance(parsed, dict):
+            print(json.dumps({"ok": False,
+                              "error": "--returns: expected a JSON object "
+                                       "{symbol: [returns]}"}) if args.json
+                  else "--returns: expected a JSON object "
+                        "{symbol: [returns]}")
+            return 1
+        returns_map, n_aligned = parsed, min(
+            (len(v) for v in parsed.values()
+             if isinstance(v, list) and v), default=0)
+        label = "explicit series"
+    else:
+        symbols = [s.strip().upper() for s in args.symbols.split(",")
+                   if s.strip()]
+        try:
+            returns_map, n_aligned = _portfolio_returns_map(
+                symbols, _parse_lookback(args.lookback), args.data_root)
+        except ValueError as e:
+            msg = (f"live bar fetch failed ({e} — pass "
+                   f"--returns '{{\"SPY\": [...]}}' for an offline map)")
+            print(json.dumps({"ok": False, "error": msg}) if args.json
+                  else msg)
+            return 1
+        label = (f"live {', '.join(symbols)} · last "
+                 f"{min(n_aligned, _parse_lookback(args.lookback))} obs")
+
+    kwargs = {}
+    if args.method == "mv":
+        kwargs = {"lambda_risk": args.lambda_risk,
+                  "max_weight": args.max_weight, "seed": args.seed}
+    out = optimize(returns_map, method=args.method, **kwargs)
+    out["source"] = label
+    out["lookback"] = args.lookback
+    if args.json:
+        print(json.dumps(out, sort_keys=True, default=str))
+        return 0 if out.get("ok") else 1
+    if not out.get("ok"):
+        print(f"portfolio optimization failed: {out.get('error')}")
+        return 1
+    print(f"PORTFOLIO — {out['method']} · {len(out['symbols'])} assets · "
+          f"{out['n_observations']} obs (R3-3)")
+    print("=" * 64)
+    print(f"source      : {label}")
+    if out["method"] == "mv":
+        print(f"objective   : μᵀw − {out['lambda_risk']}·wᵀΣw "
+              f"(max_weight {out['max_weight']}, "
+              f"{out['n_candidates']} candidates, seed {out['seed']})")
+    if out["method"] == "rp":
+        print(f"ERC         : converged in {out['iterations']} sweeps "
+              f"(tol {out['tol']})")
+    if out["method"] == "hrp":
+        print(f"quasi-diag  : {' → '.join(out['quasi_diagonal_order'])}")
+    print(f"σ portfolio : {out['portfolio_vol']:.4%}   "
+          f"DR {out['diversification_ratio']:.3f}   "
+          f"E[r] {out['expected_return']:+.4%}")
+    print()
+    print(f"{'symbol':<10s}{'weight':>9s}{'vol':>9s}{'E[r]':>9s}"
+          f"{'risk contrib':>14s}")
+    print("-" * 56)
+    for sym in out["symbols"]:
+        print(f"{sym:<10s}{out['weights'][sym]:>9.2%}"
+              f"{out['volatilities'][sym]:>9.2%}"
+              f"{out['expected_returns'][sym]:>9.4%}"
+              f"{out['risk_contributions'][sym]:>13.2%}")
+    return 0
+
+
+def cmd_pnl(args) -> int:
+    """pnl — R3-3 Build 5b: P&L attribution over a trade ledger: by asset,
+    by setup (with win rates) and by hour-of-day (24 UTC buckets, Asia /
+    London / NY session labels). Sources: journal reconstruction, a
+    ledger file, or the deterministic synthetic demo ledger."""
+    from .risk.attribution import (attribute, load_journal_ledger,
+                                   read_ledger_file, synthetic_ledger)
+
+    reconstruction = None
+    if args.source == "journal":
+        rec = load_journal_ledger(args.data_root)
+        ledger = rec["ledger"]
+        reconstruction = {k: v for k, v in rec.items() if k != "ledger"}
+        source_label = (f"journal reconstruction "
+                        f"({reconstruction['matched']} matched trades)")
+    elif args.ledger:
+        ledger = read_ledger_file(args.ledger)
+        source_label = f"ledger file {args.ledger}"
+    else:
+        ledger = synthetic_ledger()
+        source_label = "synthetic demo ledger (deterministic, seed 11)"
+
+    out = attribute(ledger)
+    out["source"] = source_label
+    if reconstruction is not None:
+        out["reconstruction"] = reconstruction
+    if args.json:
+        print(json.dumps(out, sort_keys=True, default=str))
+        return 0 if out.get("ok") else 1
+    print(f"P&L ATTRIBUTION — {source_label} (R3-3)")
+    print("=" * 64)
+    print(f"trades      : {out['n_trades']}  "
+          f"({out['n_wins']}W/{out['n_losses']}L  "
+          f"win {out['win_rate']:.1%})")
+    print(f"total P&L   : {out['total_pnl']:+,.2f}")
+    print(f"gross P/L   : {out['gross_profit']:+,.2f} / "
+          f"{-out['gross_loss']:+,.2f}   "
+          f"profit factor: {_fmt(out['profit_factor'], '{:.2f}')}")
+    if out["n_skipped_rows"]:
+        print(f"skipped rows: {out['n_skipped_rows']} (invalid — surfaced "
+              f"in JSON)")
+    print()
+    print(f"{'BY ASSET':<12s}{'P&L':>12s}{'% of total':>11s}"
+          f"{'trades':>8s}{'win rate':>10s}")
+    print("-" * 56)
+    for row in out["by_asset"]:
+        print(f"{row['symbol']:<12s}{row['pnl']:>12,.2f}"
+              f"{row['pct_of_total']:>10.1%}{row['n_trades']:>8d}"
+              f"{row['win_rate']:>10.1%}")
+    print()
+    print(f"{'BY SETUP':<28s}{'P&L':>12s}{'trades':>8s}{'win rate':>10s}")
+    print("-" * 60)
+    for row in out["by_setup"]:
+        print(f"{row['setup'][:27]:<28s}{row['pnl']:>12,.2f}"
+              f"{row['n_trades']:>8d}{row['win_rate']:>10.1%}")
+    print()
+    print(f"{'BY HOUR (UTC)':<22s}{'session':<9s}{'P&L':>12s}"
+          f"{'trades':>8s}")
+    print("-" * 52)
+    for row in out["by_hour"]:
+        if row["n_trades"] or row["hour"] % 3 == 0:
+            print(f"{row['hour']:02d}:00{'':<16s}{row['session']:<9s}"
+                  f"{row['pnl']:>12,.2f}{row['n_trades']:>8d}")
+    if out["n_unparsed_timestamps"]:
+        print(f"({out['n_unparsed_timestamps']} trades with unparseable "
+              f"timestamps excluded from the hourly view)")
     return 0
 
 
@@ -2035,6 +2256,53 @@ def main(argv=None) -> int:
     p_bt.add_argument("--json", action="store_true")
     p_bt.add_argument("--data-root", default=str(REPO_ROOT / "data"))
     p_bt.set_defaults(func=cmd_backtest)
+
+    # --- R3-3 portfolio construction + P&L attribution ---
+    p_port = sub.add_parser("portfolio",
+                             help="R3-3: portfolio construction — "
+                                  "mean-variance / risk parity (ERC) / HRP "
+                                  "weights + risk contributions + "
+                                  "diversification ratio")
+    p_port.add_argument("--method", default="mv", choices=["mv", "rp", "hrp"],
+                         help="optimizer (default mv: seed-pinned random/"
+                              "grid search on μᵀw − λ·wᵀΣw)")
+    p_port.add_argument("--lookback", default="90d",
+                         help="live mode: trailing return observations "
+                              "(default 90d)")
+    p_port.add_argument("--symbols", default=",".join(PORTFOLIO_SYMBOLS),
+                         help="comma-separated Yahoo symbols for live mode "
+                              f"(default {','.join(PORTFOLIO_SYMBOLS)})")
+    p_port.add_argument("--max-weight", type=float, default=0.4,
+                         dest="max_weight",
+                         help="MV per-asset cap (default 0.4)")
+    p_port.add_argument("--lambda", type=float, default=2.0,
+                         dest="lambda_risk",
+                         help="MV risk aversion λ (default 2.0)")
+    p_port.add_argument("--seed", type=int, default=7,
+                         help="MV search seed (determinism)")
+    p_port.add_argument("--returns", default=None,
+                         help="offline mode: JSON map {symbol: [returns]}")
+    p_port.add_argument("--json", action="store_true")
+    p_port.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_port.set_defaults(func=cmd_portfolio)
+
+    p_pnl = sub.add_parser("pnl",
+                            help="R3-3: P&L attribution — by asset / by "
+                                 "setup / by hour-of-day with Asia/London/"
+                                 "NY session labels")
+    p_pnl.add_argument("--source", default="journal",
+                        choices=["journal", "ledger"],
+                        help="ledger source (default journal: reconstruct "
+                             "closed trades from data/events/*.jsonl; "
+                             "ledger: --ledger file, or the deterministic "
+                             "synthetic demo ledger when no file is given)")
+    p_pnl.add_argument("--ledger", default=None,
+                        help="ledger file (JSONL or JSON array of trade "
+                             "rows: symbol/side/qty/entry/exit/timestamp/"
+                             "setup_tag)")
+    p_pnl.add_argument("--json", action="store_true")
+    p_pnl.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_pnl.set_defaults(func=cmd_pnl)
 
     args = parser.parse_args(argv)
     return args.func(args)

@@ -54,7 +54,7 @@ from ..clock import iso, utc_now
 # ------------------------------------------------------------------ lexicon
 # term -> (weight, subjective). Weight in [-1, 1]; subjective terms express
 # opinion/judgment (feed the subjectivity ratio), objective terms state
-# directional facts (feed polarity only). ~185 entries incl. variants —
+# directional facts (feed polarity only). ~210 entries incl. variants —
 # a deliberately compact financial lexicon, no stemming magic: exact token
 # match after a light tokenizer, so "golden" never fires "gold".
 LEXICON: dict[str, tuple[float, bool]] = {
@@ -63,12 +63,16 @@ LEXICON: dict[str, tuple[float, bool]] = {
     "surging": (0.8, False),
     "soar": (0.8, False), "soars": (0.8, False), "soared": (0.8, False),
     "soaring": (0.8, False),
+    "dive": (-0.7, False), "dives": (-0.7, False), "dived": (-0.7, False),
+    "diving": (-0.7, False),
     "skyrocket": (0.9, False), "skyrockets": (0.9, False),
     # ---- moderate positive, objective
     "rally": (0.7, False), "rallies": (0.7, False), "rallied": (0.7, False),
     "rallying": (0.7, False),
     "jump": (0.5, False), "jumps": (0.5, False), "jumped": (0.5, False),
     "jumping": (0.5, False),
+    "spike": (0.7, False), "spikes": (0.7, False), "spiked": (0.7, False),
+    "spiking": (0.7, False),
     "gain": (0.4, False), "gains": (0.4, False), "gained": (0.4, False),
     "gaining": (0.4, False),
     "rise": (0.4, False), "rises": (0.4, False), "rose": (0.4, False),
@@ -84,6 +88,7 @@ LEXICON: dict[str, tuple[float, bool]] = {
     "surpass": (0.5, False), "surpasses": (0.5, False),
     "upgrade": (0.6, False), "upgraded": (0.6, False), "upgrades": (0.6, False),
     "outperform": (0.5, False), "outperforms": (0.5, False),
+    "outperformed": (0.5, False),
     "rebound": (0.5, False), "rebounds": (0.5, False), "rebounded": (0.5, False),
     "recover": (0.4, False), "recovery": (0.4, False), "recovers": (0.4, False),
     "growth": (0.4, False), "expansion": (0.3, False), "expands": (0.3, False),
@@ -117,6 +122,8 @@ LEXICON: dict[str, tuple[float, bool]] = {
     "selloff": (-0.7, False),
     "tumble": (-0.7, False), "tumbles": (-0.7, False), "tumbled": (-0.7, False),
     "tumbling": (-0.7, False),
+    "steal": (-0.6, False), "steals": (-0.6, False), "stole": (-0.6, False),
+    "stolen": (-0.6, False), "theft": (-0.7, False),
     "sink": (-0.6, False), "sinks": (-0.6, False), "sank": (-0.6, False),
     "sunk": (-0.6, False), "sinking": (-0.6, False),
     # ---- moderate negative, objective
@@ -137,13 +144,18 @@ LEXICON: dict[str, tuple[float, bool]] = {
     "downgrade": (-0.6, False), "downgraded": (-0.6, False),
     "downgrades": (-0.6, False),
     "underperform": (-0.5, False), "underperforms": (-0.5, False),
+    "underperformed": (-0.5, False),
     "retreat": (-0.4, False), "retreats": (-0.4, False),
     "reversal": (-0.3, False), "reverses": (-0.3, False),
     "recession": (-0.6, False), "contraction": (-0.5, False),
     "crisis": (-0.7, False), "default": (-0.6, False), "defaults": (-0.6, False),
     "bankruptcy": (-0.8, False), "bankrupt": (-0.8, False),
     "hack": (-0.8, False), "hacked": (-0.8, False), "hacks": (-0.8, False),
+    "hackers": (-0.8, False), "hacker": (-0.7, False), "heist": (-0.8, False),
+    "exploit": (-0.7, False), "exploits": (-0.7, False),
+    "exploited": (-0.7, False),
     "breach": (-0.7, False), "breached": (-0.7, False),
+    "breaches": (-0.7, False),
     "fraud": (-0.8, False), "scandal": (-0.7, False),
     "probe": (-0.4, False), "probes": (-0.4, False), "lawsuit": (-0.4, False),
     "hawkish": (-0.5, False), "tightening": (-0.5, False),
@@ -211,6 +223,26 @@ PHRASES: dict[str, tuple[float, bool]] = {
     "flash crash": (-0.9, False),
     "melt up": (0.6, False),                # "melt-up" tokenizes to this
     "fails to": (-0.1, False),              # negator phrase, tiny weight
+    # ---- R3-3 critic gap-fix: estimate/forecast guidance phrases
+    "top estimate": (0.5, False),
+    "tops estimate": (0.5, False),
+    "tops estimates": (0.5, False),
+    "top estimates": (0.5, False),
+    "topped estimates": (0.5, False),
+    "raise forecast": (0.5, False),
+    "raises forecast": (0.5, False),
+    "raised forecast": (0.5, False),
+    "raise forecasts": (0.5, False),
+    "raises forecasts": (0.5, False),
+    "raise guidance": (0.5, False),
+    "raises guidance": (0.5, False),
+    "raised guidance": (0.5, False),
+    "cut forecast": (-0.5, False),
+    "cuts forecast": (-0.5, False),
+    "cut forecasts": (-0.5, False),
+    "cuts forecasts": (-0.5, False),
+    "cut guidance": (-0.5, False),
+    "cuts guidance": (-0.5, False),
 }
 
 # negators flip the polarity of the NEXT scored term within a 3-token window

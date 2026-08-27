@@ -6,6 +6,9 @@ import { AlpacaPanel } from "@/components/desk/AlpacaPanel";
 import { SentimentPanel } from "@/components/desk/SentimentPanel";
 import { RiskPanel } from "@/components/desk/RiskPanel";
 import { BacktestPanel } from "@/components/desk/BacktestPanel";
+// R3-3 panels (portfolio construction + P&L attribution)
+import { PortfolioPanel } from "@/components/desk/PortfolioPanel";
+import { AttributionPanel } from "@/components/desk/AttributionPanel";
 
 export default function Home() {
   return (
@@ -22,6 +25,10 @@ export default function Home() {
         <RiskPanel />
         {/* R3-2 Row 5: backtest (equity curve + stat grid) */}
         <BacktestPanel />
+        {/* R3-3 Row 6: portfolio construction (MV/RP/HRP weights + risk contributions) */}
+        <PortfolioPanel />
+        {/* R3-3 Row 7: P&L attribution (by asset / by setup / by hour + sessions) */}
+        <AttributionPanel />
       </div>
     </>
   );

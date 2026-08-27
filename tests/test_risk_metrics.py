@@ -19,8 +19,15 @@ import pytest
 
 from gold_desk.risk import metrics as rm
 
-scipy = pytest.importorskip("scipy.stats", reason="scipy reference optional")
-np = pytest.importorskip("numpy", reason="numpy reference optional")
+
+def _ref():
+    """scipy + numpy TEST-ONLY references, imported lazily PER TEST so the
+    ~25 stdlib-pure tests in this file still run when scipy/numpy are
+    absent (R3-2 critic hygiene fix: the module-level importorskip used to
+    collapse the whole file to 1 skip in stdlib-only deploys)."""
+    scipy_stats = pytest.importorskip("scipy.stats", reason="scipy reference optional")
+    np_ref = pytest.importorskip("numpy", reason="numpy reference optional")
+    return scipy_stats, np_ref
 
 # fixed 10-point series (the same one the CLI smoke probe uses)
 R10 = [0.01, -0.02, 0.015, 0.005, -0.01, 0.02, -0.005, 0.012, 0.008, -0.014]
@@ -31,6 +38,7 @@ R250 = [_rng.gauss(0.0004, 0.012) for _ in range(250)]
 
 # ---------------------------------------------------------- basic stats
 def test_mean_and_sample_stdev_match_scipy():
+    _scipy, np = _ref()
     assert rm.mean(R10) == pytest.approx(float(np.mean(R10)), abs=1e-15)
     assert rm.sample_stdev(R10) == pytest.approx(
         float(np.std(R10, ddof=1)), abs=1e-15)
@@ -42,6 +50,7 @@ def test_sample_stdev_degenerate():
 
 
 def test_percentile_matches_numpy_linear():
+    _scipy, np = _ref()
     for q in (1, 5, 25, 50, 95, 99):
         assert rm.percentile(R10, q) == pytest.approx(
             float(np.percentile(R10, q)), abs=1e-15), q
@@ -59,6 +68,7 @@ def test_percentile_edge_cases():
 @pytest.mark.parametrize("conf", [0.95, 0.99])
 def test_var_parametric_matches_scipy_ppf(conf):
     """mean − z·σ == scipy.stats.norm.ppf(1−conf, mean, σ_ddof1) to 1e-6."""
+    scipy, np = _ref()
     for series in (R10, R250):
         expected = float(scipy.norm.ppf(
             1.0 - conf, loc=float(np.mean(series)),
@@ -79,6 +89,7 @@ def test_var_parametric_signs_and_degenerate():
 
 @pytest.mark.parametrize("conf", [0.95, 0.99])
 def test_var_historical_matches_numpy_percentile(conf):
+    _scipy, np = _ref()
     expected = float(np.percentile(R250, (1.0 - conf) * 100.0))
     assert rm.var_historical(R250, conf) == pytest.approx(expected, abs=1e-15)
     assert rm.var_historical([], 0.95) is None
@@ -100,6 +111,7 @@ def test_var_monte_carlo_deterministic():
 
 
 def test_var_monte_carlo_matches_numpy_quantile_of_paths():
+    _scipy, np = _ref()
     paths = rm.monte_carlo_returns(R250, n_paths=1000, seed=42)
     assert len(paths) == 1000
     expected = float(np.percentile(paths, 5.0))
@@ -110,6 +122,7 @@ def test_var_monte_carlo_matches_numpy_quantile_of_paths():
 def test_monte_carlo_distribution_shape():
     """GBM paths: mean ± 2σ of the SIMULATED paths must contain ~95%
     (empirical 68/95 rule on the simulated sample itself)."""
+    _scipy, np = _ref()
     paths = rm.monte_carlo_returns(R250, n_paths=2000, seed=7)
     mu = sum(paths) / len(paths)
     sd = math.sqrt(sum((p - mu) ** 2 for p in paths) / (len(paths) - 1))
@@ -210,13 +223,67 @@ def test_stress_gfc_half_spy_half_cash():
 
 
 def test_stress_scenario_metadata_and_unshocked():
+    """R3-3 gap-fix: gold is now SHOCKED in all 3 scenarios (was unshocked
+    pre-fix) — a gold-only book reads −20%/−12%/−5%, and `unshocked` only
+    lists genuinely-unmodeled assets (CASH)."""
     out = rm.stress_test([{"symbol": "GC=F", "weight": 1.0}])
+    shocks = out["portfolio_shocks"]
+    assert shocks["gfc_2008"] == pytest.approx(-0.20, abs=1e-12)
+    assert shocks["covid_2020"] == pytest.approx(-0.12, abs=1e-12)
+    assert shocks["rate_shock_2022"] == pytest.approx(-0.05, abs=1e-12)
     gfc = {s["name"]: s for s in out["scenarios"]}["gfc_2008"]
     assert gfc["label"] == "2008 Global Financial Crisis"
-    assert gfc["portfolio_shock"] == 0.0             # gold unshocked → 0
-    assert gfc["unshocked"] == ["GC=F"]
+    assert gfc["shocked"] == ["GC=F"]
+    assert gfc["unshocked"] == []                  # gold modeled everywhere
     rate = {s["name"]: s for s in out["scenarios"]}["rate_shock_2022"]
     assert rate["yield_change_pp"] == 2.36
+    cash = rm.stress_test([{"symbol": "CASH", "weight": 1.0}])
+    assert cash["portfolio_shocks"]["gfc_2008"] == 0.0
+    assert cash["scenarios"][0]["unshocked"] == ["CASH"]   # truly unmodeled
+
+
+def test_stress_gold_btc_positions_shocked():
+    """R3-3 gap-fix headline: the default book's gold+BTC legs are shocked.
+    30% GC=F + 15% BTC-USD hand math per scenario."""
+    out = rm.stress_test([{"symbol": "GC=F", "weight": 0.30},
+                          {"symbol": "BTC-USD", "weight": 0.15}])
+    s = out["portfolio_shocks"]
+    # GFC: 0.30×(−0.20) + 0.15×(−0.45) = −0.1275
+    assert s["gfc_2008"] == pytest.approx(-0.1275, abs=1e-12)
+    # COVID: 0.30×(−0.12) + 0.15×(−0.50) = −0.111
+    assert s["covid_2020"] == pytest.approx(-0.111, abs=1e-12)
+    # 2022: 0.30×(−0.05) + 0.15×(−0.65) = −0.1125
+    assert s["rate_shock_2022"] == pytest.approx(-0.1125, abs=1e-12)
+    for scen in out["scenarios"]:
+        assert set(scen["shocked"]) == {"GC=F", "BTC-USD"}
+        assert scen["unshocked"] == []
+
+
+def test_stress_gapfix_40_30_30_gfc_exact():
+    """R3-3 gap-fix headline regression (hermetic — pure vector math, no
+    data): 40% SPY + 30% gold + 30% BTC under GFC =
+    0.4×(−0.385) + 0.3×(−0.20) + 0.3×(−0.45) = −0.349 EXACT, with all
+    three legs shocked and nothing unshocked."""
+    out = rm.stress_test([{"symbol": "SPY", "weight": 0.40},
+                          {"symbol": "GC=F", "weight": 0.30},
+                          {"symbol": "BTC-USD", "weight": 0.30}])
+    assert out["portfolio_shocks"]["gfc_2008"] == pytest.approx(
+        0.40 * -0.385 + 0.30 * -0.20 + 0.30 * -0.45, abs=1e-12)
+    assert out["portfolio_shocks"]["gfc_2008"] == pytest.approx(-0.349,
+                                                                abs=1e-12)
+    gfc = {s["name"]: s for s in out["scenarios"]}["gfc_2008"]
+    assert gfc["shocked"] == ["BTC-USD", "GC=F", "SPY"]
+    assert gfc["unshocked"] == []
+
+
+def test_stress_gold_aliases():
+    """XAU / XAUUSD / GOLD aliases carry the same shock as GC=F; BTC
+    alias carries the BTC vector."""
+    for alias in ("XAU", "XAUUSD", "GOLD"):
+        out = rm.stress_test([{"symbol": alias, "weight": 1.0}])
+        assert out["portfolio_shocks"]["covid_2020"] == pytest.approx(-0.12)
+    out = rm.stress_test([{"symbol": "BTC", "weight": 1.0}])
+    assert out["portfolio_shocks"]["rate_shock_2022"] == pytest.approx(-0.65)
 
 
 def test_stress_tnx_yield_shock_and_es_futures_alias():
@@ -322,6 +389,7 @@ def test_portfolio_returns_tail_aligned_and_empty():
 
 # ---------------------------------------------------------- risk_report
 def test_risk_report_shape_and_determinism():
+    _scipy, np = _ref()
     r1 = rm.risk_report(R250, benchmark=R250[:200],
                         positions=[{"symbol": "SPY", "weight": 0.5},
                                    {"symbol": "CASH", "weight": 0.5}])

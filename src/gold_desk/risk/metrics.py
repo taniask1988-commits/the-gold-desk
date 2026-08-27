@@ -50,25 +50,39 @@ PERIODS_PER_YEAR = 252    # daily returns convention
 
 # ------------------------------------------------------------------ stress
 # Scenario shock vectors. Values are RETURNS applied to positions in the
-# quoted instrument. Only charter-documented moves are encoded — SPX-family
-# shocks (−38.5% GFC, −33.9% COVID, −19.4% + 2022 rate shock) and the
-# 2022 10y-yield move (+2.36% on a ^TNX/10Y position, the yield's move in
-# the task's own units). Assets without a documented shock are surfaced in
-# each scenario's `unshocked` list rather than silently zeroed.
+# quoted instrument. Charter-documented moves:
+#   SPX family: −38.5% GFC, −33.9% COVID, −19.4% + 2022 rate shock
+#   (^TNX +2.36% on a yield position, the yield's move in its own units).
+# R3-3 critic gap-fix — gold + BTC peak-to-trough (p2t) shocks added so the
+# two alternative-asset legs of the desk's default book are no longer
+# inert under stress:
+#   gold : 2008 GFC −20% p2t (Mar 2008 peak → Nov 2008 trough),
+#          2020 COVID −12% p2t (Aug 2011-style liquidation echo, Mar 2020),
+#          2022 rates −5% p2t (real-yield squeeze)
+#   BTC  : 2008 −45% (pre-dates BTC; the GFC-magnitude crypto analogue),
+#          2020 COVID −50% p2t (12 Mar 2020), 2022 −65% p2t (Nov 2022)
+# Assets without a documented shock are surfaced in each scenario's
+# `unshocked` list rather than silently zeroed.
 STRESS_SCENARIOS: dict[str, dict] = {
     "gfc_2008": {
         "label": "2008 Global Financial Crisis",
-        "shocks": {"SPY": -0.385, "SPX": -0.385, "ES=F": -0.385},
+        "shocks": {"SPY": -0.385, "SPX": -0.385, "ES=F": -0.385,
+                   "GC=F": -0.20, "XAU": -0.20, "XAUUSD": -0.20, "GOLD": -0.20,
+                   "BTC-USD": -0.45, "BTC": -0.45},
     },
     "covid_2020": {
         "label": "2020 COVID crash",
-        "shocks": {"SPY": -0.339, "SPX": -0.339, "ES=F": -0.339},
+        "shocks": {"SPY": -0.339, "SPX": -0.339, "ES=F": -0.339,
+                   "GC=F": -0.12, "XAU": -0.12, "XAUUSD": -0.12, "GOLD": -0.12,
+                   "BTC-USD": -0.50, "BTC": -0.50},
     },
     "rate_shock_2022": {
         "label": "2022 rate shock",
         "yield_change_pp": 2.36,
         "shocks": {"SPY": -0.194, "SPX": -0.194, "ES=F": -0.194,
-                   "^TNX": 0.0236, "TNX": 0.0236, "10Y": 0.0236},
+                   "^TNX": 0.0236, "TNX": 0.0236, "10Y": 0.0236,
+                   "GC=F": -0.05, "XAU": -0.05, "XAUUSD": -0.05, "GOLD": -0.05,
+                   "BTC-USD": -0.65, "BTC": -0.65},
     },
 }
 

@@ -146,3 +146,36 @@ def tmp_data(tmp_path):
     (tmp_path / "events").mkdir(parents=True)
     (tmp_path / "tickets").mkdir(parents=True)
     return tmp_path
+
+
+# ------------------------------------------------------- scipy-free harness
+def pytest_addoption(parser):
+    """R3-3 gap-fix: `pytest --no-scipy` installs a meta-path blocker that
+    makes ANY import of scipy/numpy raise ModuleNotFoundError — used by
+    tests/test_scipy_free.py to prove the stdlib-pure risk/portfolio/
+    attribution tests still RUN (not skip wholesale) in a stdlib-only
+    deploy. Only the ~7 tests that genuinely reference scipy/numpy as
+    test oracles skip."""
+    parser.addoption("--no-scipy", action="store_true", default=False,
+                     help="block scipy/numpy imports (simulate stdlib-only "
+                          "deploy)")
+
+
+class _ScipyBlocker:
+    """Meta-path import blocker for scipy.* / numpy.* — `import scipy`
+    raises ModuleNotFoundError exactly as in a stdlib-only deploy."""
+
+    def find_spec(self, fullname, path=None, target=None):  # pragma: no cover
+        if fullname.split(".")[0] in ("scipy", "numpy"):
+            raise ModuleNotFoundError(f"No module named {fullname!r} "
+                                      f"(blocked by --no-scipy)")
+        return None
+
+
+def pytest_configure(config):
+    if config.getoption("--no-scipy"):
+        import sys
+        for mod in list(sys.modules):
+            if mod.split(".")[0] in ("scipy", "numpy"):
+                del sys.modules[mod]
+        sys.meta_path.insert(0, _ScipyBlocker())

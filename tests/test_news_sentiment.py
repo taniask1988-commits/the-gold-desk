@@ -85,6 +85,37 @@ def test_polarity_bounded_and_symmetric_gauge():
     assert -1.0 <= down < -0.9
 
 
+# ------------------------------------------------------ R3-3 critic gap-fix
+def test_regression_oil_spikes_after_opec_cut(analyzer):
+    """R3-2 critic live probe: 'Oil spikes after OPEC cut' scored 0.000
+    (the spike stem was absent from the lexicon). Must now be positive
+    > 0.2 with the spike term fired."""
+    out = analyzer.score("Oil spikes after OPEC cut")
+    assert out["ok"] is True
+    assert out["polarity"] > 0.2, out
+    assert out["label"] == "positive"
+    assert "spikes" in {t["term"] for t in out["terms_fired"]}
+
+
+def test_regression_hackers_steal_bitcoin(analyzer):
+    """R3-2 critic live probe: 'Hackers steal $130M in Bitcoin' scored
+    0.000 (hackers/steal/theft stems absent). Must now be negative
+    < -0.2 with both security terms fired."""
+    out = analyzer.score("Hackers steal $130M in Bitcoin")
+    assert out["ok"] is True
+    assert out["polarity"] < -0.2, out
+    assert out["label"] == "negative"
+    fired = {t["term"] for t in out["terms_fired"]}
+    assert "hackers" in fired and "steal" in fired
+    # companion stems from the same gap-fix batch
+    assert analyzer.score(
+        "Exchange exploit: $100M crypto theft in security breach"
+    )["polarity"] < -0.2
+    assert analyzer.score(
+        "Shares dive after guidance cut forecast revision"
+    )["polarity"] < -0.2
+
+
 # ------------------------------------------------------ negation
 def test_negation_flips_positive_to_negative(analyzer):
     """Charter: 'Fed does not signal easing' → negative, NOT positive."""
@@ -339,10 +370,12 @@ def test_subjectivity_mixed_terms():
 # ------------------------------------------------------ lexicon hygiene
 def test_lexicon_size_in_charter_range():
     """Compact by institutional standards (Loughran-McDonald ~85k,
-    VADER ~7.5k): ~180 distinct stems, ~270 entries with inflection
-    variants (surge/surges/surged/surging counted separately)."""
+    VADER ~7.5k): ~210 distinct stems, ~310 entries with inflection
+    variants (surge/surges/surged/surging counted separately) after the
+    R3-3 critic gap-fix added spike/steal/hackers/exploit/dive stems and
+    the estimate/forecast guidance phrases."""
     total = len(ns.LEXICON) + len(ns.PHRASES)
-    assert 150 <= total <= 300
+    assert 150 <= total <= 360
 
 
 def test_lexicon_weights_bounded():
