@@ -101,11 +101,14 @@ METHOD_ALIASES = {
 }
 
 # R4-2: covariance estimator options for every optimizer.
-COV_METHODS = ("sample", "ledoit_wolf")
+COV_METHODS = ("sample", "ledoit_wolf", "oas", "exp", "semi")
 COV_ALIASES = {
     "sample": "sample", "s": "sample",
     "ledoit_wolf": "ledoit_wolf", "ledoit-wolf": "ledoit_wolf",
     "lw": "ledoit_wolf", "shrunk": "ledoit_wolf",
+    "oas": "oas", "oracle_approximating": "oas",
+    "exp": "exp", "ewma": "exp", "exponential": "exp",
+    "semi": "semi", "semicovariance": "semi", "downside": "semi",
 }
 
 
@@ -336,6 +339,94 @@ def ledoit_wolf_shrinkage(columns: list[list[float]]) -> dict:
             "beta": beta, "target": target}
 
 
+def oas_shrinkage(columns: list[list[float]]) -> dict:
+    """Oracle Approximating Shrinkage (Chen–Deel–Singer 2010; the Ledoit–
+    Wolf 2004 μI-target family): shrink toward the scaled-identity
+    target F = (tr(S)/k)·I with the OAS intensity
+
+        α = (1 − 2/k)·tr(S²) + tr(S)²
+            ─────────────────────────────────────────────
+            (n + 1 − 2/k)·(tr(S²) − tr(S)²/k)
+
+    clipped to [0, 1]. Deterministic, pure stdlib. Where LW's
+    constant-correlation target keeps the correlation STRUCTURE, OAS
+    trades it for maximum conditioning (isotropic target) — the two
+    endpoints of the shrinkage zoo PyPortfolioOpt exposes.
+    Returns {cov, intensity, mu_bar}."""
+    k = len(columns)
+    n = len(columns[0]) if columns else 0
+    S = _cov_matrix(columns)
+    if k < 2 or n < 2:
+        return {"cov": S, "intensity": 0.0, "mu_bar": S[0][0] if k else 0.0}
+    tr_S = sum(S[i][i] for i in range(k))
+    tr_S2 = sum(S[i][j] * S[i][j] for i in range(k) for j in range(k))
+    mu_bar = tr_S / k
+    num = (1.0 - 2.0 / k) * tr_S2 + tr_S * tr_S
+    den = (n + 1.0 - 2.0 / k) * (tr_S2 - tr_S * tr_S / k)
+    if den <= 1e-18:
+        alpha = 1.0
+    else:
+        alpha = min(1.0, max(0.0, num / den))
+    target = [[mu_bar if i == j else 0.0 for j in range(k)]
+              for i in range(k)]
+    cov = [[(1.0 - alpha) * S[i][j] + alpha * target[i][j]
+            for j in range(k)] for i in range(k)]
+    return {"cov": cov, "intensity": alpha, "mu_bar": mu_bar}
+
+
+def exponential_covariance(columns: list[list[float]],
+                           halflife: float = 20.0) -> list[list[float]]:
+    """Exponentially-weighted (EWMA) covariance: weights w_t = λ^(n−t)
+    with λ = exp(−ln2/halflife) decay toward the past. Recency-honoring
+    estimator (RiskMetrics convention); deterministic; halflife ≤ 0 →
+    the plain sample estimator. Diagonal-normalized exactly like _cov_matrix
+    (weighted mean, sum-of-weights denominator)."""
+    k = len(columns)
+    n = len(columns[0]) if columns else 0
+    if k == 0 or n < 2:
+        return _cov_matrix(columns)
+    if halflife <= 0:
+        return _cov_matrix(columns)
+    lam = math.exp(-math.log(2.0) / float(halflife))
+    # weights oldest → newest
+    w = [lam ** (n - 1 - t) for t in range(n)]
+    wsum = sum(w)
+    w = [x / wsum for x in w]
+    mu = [sum(w[t] * columns[i][t] for t in range(n)) for i in range(k)]
+    cov = [[0.0] * k for _ in range(k)]
+    for i in range(k):
+        for j in range(i, k):
+            v = sum(w[t] * (columns[i][t] - mu[i]) * (columns[j][t] - mu[j])
+                    for t in range(n))
+            cov[i][j] = v
+            cov[j][i] = v
+    return cov
+
+
+def semi_covariance(columns: list[list[float]],
+                    target: float = 0.0) -> list[list[float]]:
+    """Downside semi-covariance (Markowitz mean-semivariance): only
+    returns BELOW `target` contribute —
+
+        Σ_ij = (1/(n−1))·Σ_t min(r_i,t − target, 0)·min(r_j,t − target, 0)
+
+    the risk measure loss-averse investors actually face. Deterministic;
+    target=0 by default (negative-return co-movement)."""
+    k = len(columns)
+    n = len(columns[0]) if columns else 0
+    if k == 0 or n < 2:
+        return _cov_matrix(columns)
+    down = [[min(columns[i][t] - target, 0.0) for t in range(n)]
+            for i in range(k)]
+    cov = [[0.0] * k for _ in range(k)]
+    for i in range(k):
+        for j in range(i, k):
+            v = sum(down[i][t] * down[j][t] for t in range(n)) / (n - 1)
+            cov[i][j] = v
+            cov[j][i] = v
+    return cov
+
+
 def _cov_for(columns: list[list[float]], cov_method: str = "sample") \
         -> tuple[list[list[float]], dict]:
     """Resolve the covariance estimator. Returns (cov, info-dict)."""
@@ -349,6 +440,18 @@ def _cov_for(columns: list[list[float]], cov_method: str = "sample") \
                 "shrink_intensity": lw["intensity"],
                 "shrink_delta": lw["delta"], "shrink_beta": lw["beta"]}
         return lw["cov"], info
+    if canonical == "oas":
+        oas = oas_shrinkage(columns)
+        info = {"cov_method": "oas",
+                "shrink_intensity": oas["intensity"],
+                "target_mu": oas["mu_bar"]}
+        return oas["cov"], info
+    if canonical == "exp":
+        info = {"cov_method": "exp"}
+        return exponential_covariance(columns), info
+    if canonical == "semi":
+        info = {"cov_method": "semi"}
+        return semi_covariance(columns), info
     return _cov_matrix(columns), {"cov_method": "sample"}
 
 

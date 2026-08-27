@@ -552,3 +552,147 @@ def brinson(portfolio_ledger, benchmark_ledger) -> dict:
         "conservation_ok": abs(residual) <= BRINSON_TOLERANCE,
         "conservation_error": residual,
     }
+
+
+# ------------------------------------------------------ R4-5 two-level
+# Two-level (nested) Brinson-Fachler: asset-class (level 1) x sector
+# (level 2). Level-1 decomposes the ACTIVE RETURN across asset classes;
+# level-2 decomposes each class's OWN active return across the sectors
+# inside it. Conservation holds at BOTH levels — the signature property
+# of a correctly-implemented multi-level attribution (the level-1 rows
+# sum to the total active return, and each class's level-2 rows sum to
+# that class's level-1 row).
+
+# Level-1 classification: the desk's coarse asset classes.
+def _asset_class_of(sector: str) -> str:
+    """Map a (level-2) sector group onto a level-1 asset class."""
+    s = (sector or "").lower()
+    if s in ("metals", "energy", "ag"):
+        return "commodities"
+    if s in ("indices",):
+        return "equities"
+    if s in ("fx", "rates"):
+        return "macro"
+    if s in ("crypto",):
+        return "crypto"
+    if s in ("vol",):
+        return "vol"
+    return "other"
+
+
+def brinson_two_level(portfolio_ledger, benchmark_ledger) -> dict:
+    """R4-5 — two-level Brinson-Fachler: asset-class x sector.
+
+    Level 1: classic Brinson-Fachler over asset classes (allocation +
+    selection + interaction per class; sums to the total active return).
+    Level 2: within EACH class, the same decomposition over that class's
+    sectors — each class's level-2 rows sum exactly to the class's
+    level-1 total effect (nested conservation, verified to 1e-9).
+
+    Accepts the same ledger shapes as brinson(). Returns
+    {ok, level1: [class rows], level2: {class: [sector rows]},
+    allocation, selection, interaction, total,
+    conservation_ok, conservation_error, level2_conservation_ok}.
+    """
+    base = brinson(portfolio_ledger, benchmark_ledger)
+    if not base.get("ok"):
+        return base
+    try:
+        p = _brinson_aggregate(portfolio_ledger)
+        b = _brinson_aggregate(benchmark_ledger)
+    except (ValueError, TypeError) as e:      # pragma: no cover
+        return {"ok": False, "error": str(e)}
+
+    # map level-2 sector groups -> level-1 classes
+    class_of_sector: dict[str, str] = {}
+    for g in set(p) | set(b):
+        class_of_sector[g] = _asset_class_of(g)
+
+    # roll sectors up to classes
+    def roll(exposure: dict[str, dict[str, float]]) -> dict[str, dict]:
+        out: dict[str, dict] = {}
+        for sector, spec in exposure.items():
+            cls = class_of_sector[sector]
+            w = float(spec.get("weight", 0.0))
+            r = float(spec.get("return", 0.0))
+            cur = out.setdefault(cls, {"weight": 0.0, "pnl": 0.0})
+            cur["weight"] += w
+            cur["pnl"] += w * r          # notional-weighted return mass
+        for cls, cur in out.items():
+            cur["return"] = cur["pnl"] / cur["weight"] \
+                if cur["weight"] > 1e-18 else 0.0
+        return out
+
+    pc = roll(p)
+    bc = roll(b)
+    classes = sorted(set(pc) | set(bc))
+    zero = {"weight": 0.0, "return": 0.0}
+    r_b_total = sum(bc.get(c, zero)["weight"] * bc.get(c, zero)["return"]
+                    for c in classes)
+    r_p_total = sum(pc.get(c, zero)["weight"] * pc.get(c, zero)["return"]
+                    for c in classes)
+
+    level1: list[dict] = []
+    l2: dict[str, list[dict]] = {}
+    l2_ok = True
+    for c in classes:
+        w_p = pc.get(c, zero)["weight"]
+        w_b = bc.get(c, zero)["weight"]
+        r_p = pc.get(c, zero)["return"]
+        r_b = bc.get(c, zero)["return"]
+        alloc = (w_p - w_b) * (r_b - r_b_total)
+        sel = w_b * (r_p - r_b)
+        inter = (w_p - w_b) * (r_p - r_b)
+        level1.append({
+            "class": c, "w_p": w_p, "w_b": w_b, "r_p": r_p, "r_b": r_b,
+            "allocation": alloc, "selection": sel, "interaction": inter,
+            "total": alloc + sel + inter,
+        })
+        # ---- level 2: sectors within this class (vs the class benchmark)
+        sectors = sorted(g for g in set(p) | set(b)
+                         if class_of_sector[g] == c)
+        rows: list[dict] = []
+        for g in sectors:
+            swp = p.get(g, zero)["weight"]
+            swb = b.get(g, zero)["weight"]
+            srp = p.get(g, zero)["return"]
+            srb = b.get(g, zero)["return"]
+            # Fachler reference is the GRAND benchmark total (not the
+            # class return) — this is what makes the level-2 rows nest
+            # EXACTLY into the level-1 row: the residual
+            # (w_p,c − w_b,c)(r_b,c − r_b_total) is precisely the class
+            # allocation effect already captured at level 1.
+            s_alloc = (swp - swb) * (srb - r_b_total)
+            s_sel = swb * (srp - srb)
+            s_inter = (swp - swb) * (srp - srb)
+            rows.append({
+                "class": c, "sector": g, "w_p": swp, "w_b": swb,
+                "r_p": srp, "r_b": srb,
+                "allocation": s_alloc, "selection": s_sel,
+                "interaction": s_inter,
+                "total": s_alloc + s_sel + s_inter,
+            })
+        l2[c] = rows
+        # nested conservation: level-2 rows sum to the class's level-1 total
+        l2_sum = sum(r["total"] for r in rows)
+        if abs(l2_sum - (alloc + sel + inter)) > 1e-9:
+            l2_ok = False
+
+    total_active = r_p_total - r_b_total
+    alloc_sum = sum(r["allocation"] for r in level1)
+    sel_sum = sum(r["selection"] for r in level1)
+    inter_sum = sum(r["interaction"] for r in level1)
+    return {
+        "ok": True,
+        "level1": level1,
+        "level2": l2,
+        "allocation": alloc_sum, "selection": sel_sum,
+        "interaction": inter_sum, "total": total_active,
+        "total_return_portfolio": r_p_total,
+        "total_return_benchmark": r_b_total,
+        "conservation_ok": abs(
+            alloc_sum + sel_sum + inter_sum - total_active) <= 1e-9,
+        "conservation_error": abs(
+            alloc_sum + sel_sum + inter_sum - total_active),
+        "level2_conservation_ok": l2_ok,
+    }

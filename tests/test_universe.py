@@ -453,3 +453,171 @@ def test_mv_fista_exact_vs_slsqp_at_k24():
                          options={"maxiter": 500, "ftol": 1e-14})
     rel = (res.fun * -1 - out["objective"]) / max(abs(res.fun), 1e-18)
     assert rel < 1e-6                                # SLSQP-level exact
+
+
+# --------------------- R4-5 verdict-round: covariance zoo + 2-level Brinson
+def test_oas_intensity_bounded_and_deterministic():
+    o1 = pf.oas_shrinkage(_factor_series(200, 5))
+    o2 = pf.oas_shrinkage(_factor_series(200, 5))
+    assert o1 == o2                                # deterministic
+    assert 0.0 <= o1["intensity"] <= 1.0
+
+
+def test_oas_shrink_grows_as_sample_shrinks():
+    """The OAS oracle shrinks harder toward the isotropic target as
+    observations get scarcer — intensity(n=10) > intensity(n=300)."""
+    small = pf.oas_shrinkage(_factor_series(10, 6, seed=9))
+    big = pf.oas_shrinkage(_factor_series(300, 6, seed=9))
+    assert small["intensity"] > big["intensity"]
+    assert small["intensity"] > 0.05               # and meaningfully > 0
+
+
+def test_oas_target_is_isotropic():
+    """OAS target = (tr(S)/k)·I — diagonal-only, so the shrunk matrix
+    keeps off-diagonal structure only from the (1−α) sample part."""
+    cols = _factor_series(300, 4, seed=5)
+    o = pf.oas_shrinkage(cols)
+    k = 4
+    a = o["intensity"]
+    S = pf._cov_matrix(cols)
+    mu = sum(S[i][i] for i in range(k)) / k
+    for i in range(k):
+        assert o["cov"][i][i] == pytest.approx(
+            (1 - a) * S[i][i] + a * mu, abs=1e-15)
+        for j in range(k):
+            if i != j:
+                assert o["cov"][i][j] == pytest.approx(
+                    (1 - a) * S[i][j], abs=1e-15)
+
+
+def test_exponential_covariance_recency_weighted():
+    """A crash in the LAST observation must move EWMA covariance more
+    than the same crash in the FIRST observation."""
+    rng = random.Random(3)
+    base = [[rng.gauss(0, 0.01) for _ in range(100)] for _ in range(3)]
+    late = [row[:] for row in base]
+    late[0][-1] = -0.30                            # crash at the END
+    early = [row[:] for row in base]
+    early[0][0] = -0.30                            # same crash at the START
+    var_late = pf.exponential_covariance(late, halflife=10)[0][0]
+    var_early = pf.exponential_covariance(early, halflife=10)[0][0]
+    assert var_late > var_early * 2                # recency honored
+
+
+def test_exponential_covariance_halflife_zero_is_sample():
+    cols = _factor_series(150, 3, seed=4)
+    exp0 = pf.exponential_covariance(cols, halflife=0)
+    assert exp0 == pf._cov_matrix(cols)
+
+
+def test_semi_covariance_ignores_upside():
+    """Only returns below target contribute — replacing a positive
+    return with a LARGER positive return leaves Σ- unchanged."""
+    rng = random.Random(6)
+    cols = [[rng.gauss(0, 0.01) for _ in range(120)] for _ in range(3)]
+    bumped = [row[:] for row in cols]
+    bumped[0][0] = abs(bumped[0][0]) + 0.05        # a positive return
+    a = pf.semi_covariance(cols)
+    b = pf.semi_covariance(bumped)
+    assert a[0][0] == pytest.approx(b[0][0], abs=1e-18)
+
+
+def test_semi_covariance_downside_only_positive():
+    """All-positive returns → the downside semi-covariance is exactly 0."""
+    cols = [[0.01 + 0.001 * i for _ in range(50)] for i in range(3)]
+    s = pf.semi_covariance(cols)
+    assert all(s[i][j] == 0.0 for i in range(3) for j in range(3))
+
+
+def test_covariance_zoo_all_methods_all_optimizers():
+    ret = {f"A{i}": _factor_series(200, 1, seed=20 + i)[0]
+           for i in range(6)}
+    for cov in ("sample", "ledoit_wolf", "oas", "exp", "semi"):
+        for method in ("mv", "rp", "hrp"):
+            out = pf.optimize(ret, method, cov_method=cov,
+                              max_weight=0.4)
+            assert out["ok"] is True, (cov, method, out.get("error"))
+            assert out["cov_method"] == cov
+            assert sum(out["weights"].values()) == pytest.approx(
+                1.0, abs=1e-9)
+
+
+def test_covariance_zoo_oas_matches_sklearn_reference():
+    """sklearn.covariance.ledoit_wolf vs OAS are DIFFERENT estimators;
+    but sklearn also ships OLS... this checks our OAS against the
+    published closed form computed via numpy on the same data."""
+    numpy = pytest.importorskip("numpy")
+    rng = numpy.random.default_rng(11)
+    x = rng.normal(0, 0.02, size=(120, 4))
+    cols = [list(x[:, i]) for i in range(4)]
+    S = numpy.cov(x, rowvar=False, ddof=1)
+    k, n = 4, 120
+    tr_S = numpy.trace(S)
+    tr_S2 = numpy.sum(S * S)
+    num = (1 - 2 / k) * tr_S2 + tr_S ** 2
+    den = (n + 1 - 2 / k) * (tr_S2 - tr_S ** 2 / k)
+    alpha = min(1.0, max(0.0, num / den))
+    mu = tr_S / k
+    ref = (1 - alpha) * S + alpha * mu * numpy.eye(k)
+    ours = pf.oas_shrinkage(cols)
+    assert ours["intensity"] == pytest.approx(float(alpha), abs=1e-12)
+    got = numpy.array(ours["cov"])
+    assert numpy.allclose(got, ref, atol=1e-14)
+
+
+# ------------------------------ two-level Brinson
+def _brinson_ledger(rows):
+    return [{"symbol": s, "side": "long", "qty": 1, "entry": e,
+             "exit": x, "timestamp": "2026-01-05T10:00:00Z",
+             "setup_tag": "t"} for s, e, x in rows]
+
+
+def test_brinson_two_level_conservation_both_levels():
+    from gold_desk.risk.attribution import brinson_two_level
+    pf_l = _brinson_ledger([("GC=F", 100, 102), ("SI=F", 100, 101),
+                            ("BTC-USD", 100, 103), ("ES=F", 100, 101)])
+    bf_l = _brinson_ledger([("GC=F", 100, 101), ("SI=F", 100, 100),
+                            ("BTC-USD", 100, 102), ("ES=F", 100, 101),
+                            ("CL=F", 100, 99)])
+    out = brinson_two_level(pf_l, bf_l)
+    assert out["ok"] is True
+    assert out["conservation_ok"] is True          # level 1
+    assert out["level2_conservation_ok"] is True   # nested level 2
+
+
+def test_brinson_two_level_hand_case_exact():
+    """Level-1 + level-2 on the 2-class hand case — every row's total is
+    the group contribution difference w_p·r_p − w_b·r_b minus the
+    allocation reference term; verified by direct construction."""
+    from gold_desk.risk.attribution import brinson_two_level
+    pf_l = _brinson_ledger([("GC=F", 100, 102), ("BTC-USD", 100, 103)])
+    bf_l = _brinson_ledger([("GC=F", 100, 101), ("SI=F", 100, 100),
+                            ("BTC-USD", 100, 102)])
+    out = brinson_two_level(pf_l, bf_l)
+    assert out["ok"] is True
+    # by notional: portfolio = 49.76% commodities @+2% / 50.24% crypto
+    # @+3% → R_p ≈ 2.50%; benchmark = 66.34% commodities @+0.5025%
+    # / 33.66% crypto @+2% → R_b ≈ 1.007% → active ≈ +1.5%
+    assert out["total"] == pytest.approx(0.015, abs=1e-9)
+    # level-2 exists for both classes
+    assert set(out["level2"]) == {"commodities", "crypto"}
+
+
+def test_brinson_two_level_single_group_degenerates():
+    from gold_desk.risk.attribution import brinson_two_level
+    pf_l = _brinson_ledger([("GC=F", 100, 102)])
+    bf_l = _brinson_ledger([("GC=F", 100, 101)])
+    out = brinson_two_level(pf_l, bf_l)
+    assert out["ok"] is True
+    assert out["allocation"] == pytest.approx(0.0, abs=1e-12)
+    assert out["selection"] == pytest.approx(0.01, abs=1e-9)
+
+
+def test_brinson_two_level_same_ledger_zero_active():
+    from gold_desk.risk.attribution import brinson_two_level
+    pf_l = _brinson_ledger([("GC=F", 100, 102), ("BTC-USD", 100, 103)])
+    out = brinson_two_level(pf_l, pf_l)
+    assert out["ok"] is True
+    assert out["total"] == pytest.approx(0.0, abs=1e-12)
+    assert out["conservation_ok"] is True
+    assert out["level2_conservation_ok"] is True
