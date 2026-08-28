@@ -307,3 +307,36 @@ Round log:
 - bb74690 — R2-1 fix (fundamentalist prompt trim + OCF/FCF) — R2-1 CLOSED WON, 354 tests
 - 8f6c58e — R2-2 builder (quant toolkit + verified snapshot + claim-conflict journaling), 407 tests
 - GAUNTLET2-R2-CRITIC verdict: PICK BAR — 7 defects reproduced (D1-D7). Resume: see worklog.md entry GAUNTLET2-R2-RESUME-HANDOFF for the R2-2 fix dispatch brief.
+
+## Round 3 progress (live commits) — DESK LIVE
+- 0642b93 — R3-1 builder (8-asset monitor + Alpaca paper execution)
+- 205d003 — R3-1 fix (D1-D6: WS auth, date-aligned correlation w/ BTC sign-flip fixed)
+- b2000ae — R3-2 builder (news NLP sentiment + VaR/ES/stress risk engine + backtest), 765 tests
+- f24c07a — R3-3 builder (MV/RP/HRP portfolio + P&L attribution + critic gap-fixes), 856 tests
+- R3 EXIT vs OpenBB + Alpaca + Refinitiv: EXIT_WON 6/6 sub-rounds, 8/12 dimensions — SHIP
+
+## Round 4 progress (live commits) — DESK AUTONOMY
+- 65ceace — R4-1 builder (autonomous watch loop + alert engine + Telegram), 933 tests
+- b52400f — R4-2 builder (24-instrument UNIVERSE + Ledoit-Wolf + exact projected-gradient MV), 964 tests
+- 34b3517 — R4-3 builder (semantic news intelligence + historical stress replay + Brinson-Fachler), 1021 tests
+- c1a0f5b — R4 exit-fix (D1-D8: FLAT_ASSETS whitelist, FISTA MV 1.5e-15, :3000 sync, rule-symbol sweep, domain synonyms, taxonomy arbitration)
+- 73a4987 — D5/D6 close (entity-substitution synonyms + crypto taxonomy markers)
+- 45c224e — R4-5 (covariance estimator zoo OAS/EWMA/semi + two-level Brinson w/ exact nesting), 1042 tests
+- R4 FINAL GATE: EXIT_WON 9/12 — SHIP (trajectory 5/12 → 7/12 → 9/12; the gate HELD twice before shipping)
+
+## Round 5 progress (live commits) — SELF-EVOLVING DESK
+- Deep research (user-found Apodex.ai + the field): 11 primary sources — Reflexion,
+  Darwin Gödel Machine, AlphaEvolve, ADAS, Gödel Agent, Zep/Graphiti, AgentEvolver,
+  surveys 2507.21046/2505.22954/2506.13131/2408.08435/2501.13956/2303.11366;
+  synthesized in docs/SELF_EVOLUTION_RESEARCH.md (the fundamental pattern: variation →
+  evaluation → selection → archive; the evaluator is the whole game)
+- 80e9211 — R5-1 builder (evolve/ package: genome + walkforward gate + engine w/ lineage
+  archive + temporal lessons + rule tuner; CLI evolve-run/evolve-status/lessons/tune-rule;
+  EvolutionPanel + 2 read-only API routes live on :3000), 61 new tests (1103 total)
+- 934bd2e — R5 critic-fix D1 (archive self-describing: reject reasons persisted), 2
+  regression tests (1105 total both repos, byte-identical)
+- R5 CRITIC: WON 12/12 — 8 independent probe suites incl. the lookahead killer (test-tail
+  mutation leaves every IS record byte-stable) and live-claim reproduction from the archive
+- Headline: the 1y live run's champion WON in-sample (+0.244 vs −1.970) and LOST
+  out-of-sample (0.677 vs 1.872) → the gate said KEEP_INCUMBENT. The system's most
+  important output is a refusal.
