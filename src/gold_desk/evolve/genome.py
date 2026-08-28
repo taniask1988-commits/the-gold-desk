@@ -244,6 +244,9 @@ class Individual:
     generation: int = 0
     birth_op: str = "seed"                # seed | mutation op | crossover
     is_fitness: float | None = None       # walk-forward in-sample score
+    is_reject_reason: str = ""            # why retired at birth (min-activity
+                                          # gate etc.) — the archive must be
+                                          # self-describing
     oos_fitness: float | None = None      # held-out score (the truth)
     is_trades: int = 0
     oos_trades: int = 0
@@ -260,7 +263,9 @@ class Individual:
             "ident": self.ident, "genome": {k: self.genome[k] for k in GENE_NAMES},
             "parent": self.parent, "second_parent": self.second_parent,
             "generation": self.generation, "birth_op": self.birth_op,
-            "is_fitness": self.is_fitness, "oos_fitness": self.oos_fitness,
+            "is_fitness": self.is_fitness,
+            "is_reject_reason": self.is_reject_reason,
+            "oos_fitness": self.oos_fitness,
             "is_trades": self.is_trades, "oos_trades": self.oos_trades,
             "status": self.status, "overfit_gap": self.overfit_gap,
             "notes": self.notes,
@@ -273,6 +278,7 @@ class Individual:
                    generation=d.get("generation", 0),
                    birth_op=d.get("birth_op", "seed"),
                    is_fitness=d.get("is_fitness"),
+                   is_reject_reason=d.get("is_reject_reason", ""),
                    oos_fitness=d.get("oos_fitness"),
                    is_trades=d.get("is_trades", 0),
                    oos_trades=d.get("oos_trades", 0),

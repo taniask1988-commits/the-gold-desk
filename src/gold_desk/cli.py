@@ -1738,7 +1738,9 @@ def cmd_evolve_status(args) -> int:
         "lineage_tail": [
             {"ident": i.ident, "generation": i.generation,
              "birth_op": i.birth_op, "parent": i.parent,
-             "is_fitness": i.is_fitness, "oos_fitness": i.oos_fitness,
+             "is_fitness": i.is_fitness,
+             "is_reject_reason": i.is_reject_reason,
+             "oos_fitness": i.oos_fitness,
              "is_trades": i.is_trades, "status": i.status}
             for i in inds[-12:]
         ],

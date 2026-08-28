@@ -897,3 +897,43 @@ class TestEvolveCLI:
         out = json.loads(capsys.readouterr().out)
         assert rc == 1 and out["ok"] is False
         assert "network down" in out["error"]
+
+
+class TestCriticFoundDefects:
+    """Regressions for defects the R5 adversarial critic round found."""
+
+    def test_retired_individuals_carry_reject_reason(self, tmp_path):
+        """CRITIC D1: rejected genomes must persist WHY they retired —
+        the archive is the audit trail; 'retired' without a reason is
+        an unexplained verdict."""
+        from gold_desk.evolve.engine import load_archive
+        # flat series rejects everyone; the engine must still record why
+        bars = [b for d in range(20)
+                for b in _flat_day(MONDAY + timedelta(days=d), 100.0)]
+        path = tmp_path / "why.jsonl"
+        res = EvolutionEngine(bars, seed=7, population=6, generations=2,
+                              min_trades=3).run(archive_path=path)
+        assert res["verdict"] == "NO_VIABLE_CANDIDATE"
+        inds, _ = load_archive(path)
+        retired = [i for i in inds if i.status == "retired"]
+        assert retired, "flat series should retire genomes at birth"
+        for ind in retired:
+            assert ind.is_reject_reason, \
+                f"retired {ind.ident} lost its reject reason"
+            assert "min_trades" in ind.is_reject_reason
+
+    def test_archive_self_describing_round_trip(self, tmp_path):
+        """Every persisted individual round-trips with its full audit
+        record: measured fitness OR reject reason, never neither."""
+        from gold_desk.evolve.engine import load_archive
+        bars = _series(24)
+        path = tmp_path / "selfdesc.jsonl"
+        EvolutionEngine(bars, seed=7, population=6, generations=2,
+                        min_trades=3).run(archive_path=path)
+        inds, _ = load_archive(path)
+        for ind in inds:
+            measured = (ind.is_fitness is not None
+                        or ind.is_reject_reason != "")
+            assert measured, \
+                f"{ind.ident}: neither a measurement nor a rejection — " \
+                f"the archive must be self-describing"

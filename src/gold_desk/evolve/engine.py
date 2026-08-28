@@ -113,8 +113,10 @@ class EvolutionEngine:
         # backfill the measured record onto the individual so the
         # PERSISTED archive carries what each genome measured (the
         # population DB must be self-contained evidence, not a name
-        # list). Rejected genomes retire at birth (stillborn).
+        # list). Rejected genomes retire at birth (stillborn) WITH the
+        # reject reason — the archive must say WHY, not just that.
         ind.is_fitness = fit.fitness
+        ind.is_reject_reason = fit.reject_reason
         ind.is_trades = fit.n_trades_total
         ind.overfit_gap = None          # OOS measured for finalists only
         if fit.rejected:
