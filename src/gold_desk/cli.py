@@ -106,6 +106,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 from .constitution import load_constitution, validation_report
@@ -1645,6 +1646,242 @@ def cmd_backtest(args) -> int:
 PORTFOLIO_SYMBOLS = ["SPY", "GC=F", "BTC-USD"]
 
 
+# ------------------------------------------------------------------- R5 ---
+def cmd_evolve_run(args) -> int:
+    """evolve-run — R5: self-evolving strategy parameters. Runs the
+    deterministic evolution engine (population + walk-forward
+    evaluation + champion/challenger promotion gate) over keyless
+    hourly bars. Writes the JSONL archive (full lineage) and prints the
+    head-to-head verdict vs the shipped GUESS incumbent. The engine
+    NEVER writes the live spec — promotion is an operator decision.
+    """
+    from .evolve.engine import EvolutionEngine
+    from .risk.backtest import fetch_hourly_bars
+    try:
+        bars = fetch_hourly_bars(args.symbol, args.bars,
+                                 data_root=args.data_root)
+    except Exception as e:  # noqa: BLE001 — surface fetch failure honestly
+        msg = f"bar fetch failed for {args.symbol} ({args.bars}): {e}"
+        print(json.dumps({"ok": False, "error": msg}) if args.json else msg)
+        return 1
+    archive = args.archive or str(Path(args.data_root) / "evolve_archive.jsonl")
+    eng = EvolutionEngine(bars, seed=args.seed, population=args.population,
+                          generations=args.generations,
+                          min_trades=args.min_trades,
+                          promotion_margin=args.margin,
+                          max_overfit_gap=args.max_gap)
+    out = eng.run(archive_path=archive)
+    out["symbol"] = args.symbol
+    out["range"] = args.bars
+    out["archive_path"] = archive
+    if args.json:
+        print(json.dumps(out, sort_keys=True, default=str))
+        return 0 if out.get("ok") else 1
+    if not out.get("ok"):
+        print(f"EVOLVE — {out.get('error')}: {out.get('note', '')}")
+        return 1
+    ch, inc = out.get("champion") or {}, out["incumbent"]
+    print(f"EVOLVE — {args.symbol} {args.bars} · seed {out['seed']} · "
+          f"population {out['config']['population']} × "
+          f"{out['config']['generations']} generations (R5)")
+    print("=" * 64)
+    print(f"bars        : {out['n_bars']} "
+          f"(train {out['train_bars']} / test {out['test_bars']}, "
+          f"day-aligned, test never seen during selection)")
+    print(f"archive     : {out['archive_size']} individuals · "
+          f"full lineage at {archive}")
+    print(f"incumbent   : IS {_fmt(inc.get('is_fitness'))}  "
+          f"OOS {_fmt(inc.get('oos_fitness'))}  "
+          f"({inc.get('is_trades', 0)}+{inc.get('oos_trades', 0)} trades)")
+    if ch:
+        print(f"champion    : IS {_fmt(ch.get('is_fitness'))}  "
+              f"OOS {_fmt(ch.get('oos_fitness'))}  "
+              f"({ch.get('is_trades', 0)}+{ch.get('oos_trades', 0)} trades)  "
+              f"born by {ch.get('birth_op')}")
+        gap = out.get("overfit_gap")
+        print(f"overfit gap : {_fmt(gap)} "
+              f"(IS − OOS; larger = more overfit)")
+    print(f"VERDICT     : {out['verdict']} — {out['verdict_reason']}")
+    if out.get("verdict") == "PROMOTE":
+        print("             (the engine NEVER writes the live spec — "
+              "review the champion genome and promote by hand)")
+    return 0
+
+
+def cmd_evolve_status(args) -> int:
+    """evolve-status — R5: read the evolution archive (lineage + last
+    verdict). The archive is the population DB: every individual ever
+    born, with parents, birth operator and both fitnesses."""
+    from .evolve.engine import load_archive
+    archive = args.archive or str(Path(args.data_root) / "evolve_archive.jsonl")
+    inds, result = load_archive(archive)
+    if not inds and result is None:
+        msg = f"no archive at {archive} (run evolve-run first)"
+        print(json.dumps({"ok": False, "error": msg}) if args.json else msg)
+        return 1
+    by_status: dict[str, int] = {}
+    ops: dict[str, int] = {}
+    gens: set[int] = set()
+    for ind in inds:
+        by_status[ind.status] = by_status.get(ind.status, 0) + 1
+        ops[ind.birth_op] = ops.get(ind.birth_op, 0) + 1
+        gens.add(ind.generation)
+    out = {
+        "ok": True, "archive_path": archive,
+        "n_individuals": len(inds),
+        "n_generations": len(gens),
+        "statuses": by_status, "birth_ops": ops,
+        "last_verdict": (result or {}).get("verdict"),
+        "last_verdict_reason": (result or {}).get("verdict_reason"),
+        "last_champion": (result or {}).get("champion"),
+        "last_incumbent": (result or {}).get("incumbent"),
+        "lineage_tail": [
+            {"ident": i.ident, "generation": i.generation,
+             "birth_op": i.birth_op, "parent": i.parent,
+             "is_fitness": i.is_fitness, "oos_fitness": i.oos_fitness,
+             "is_trades": i.is_trades, "status": i.status}
+            for i in inds[-12:]
+        ],
+    }
+    if args.json:
+        print(json.dumps(out, sort_keys=True, default=str))
+        return 0
+    print(f"EVOLVE STATUS — {archive}")
+    print("=" * 64)
+    print(f"individuals : {len(inds)} across {len(gens)} generations")
+    print(f"statuses    : {by_status}")
+    print(f"birth ops   : {ops}")
+    if result:
+        print(f"last verdict: {result.get('verdict')} — "
+              f"{result.get('verdict_reason')}")
+        ch = result.get("champion") or {}
+        if ch:
+            print(f"champion    : {ch.get('ident')} "
+                  f"IS {_fmt(ch.get('is_fitness'))} "
+                  f"OOS {_fmt(ch.get('oos_fitness'))}")
+    print("lineage tail:")
+    for ind in inds[-8:]:
+        print(f"  {ind.ident}  gen{ind.generation:<3d} "
+              f"{ind.birth_op:<15s} "
+              f"IS {_fmt(ind.is_fitness)} OOS {_fmt(ind.oos_fitness)} "
+              f"[{ind.status}]")
+    return 0
+
+
+def cmd_lessons(args) -> int:
+    """lessons — R5: the temporal lesson store (Zep/Graphiti-style
+    validity windows + evidence counters + contradiction retirement).
+    Subcommands: list / add / evidence / retire."""
+    from .evolve.lessons import TemporalLessonStore
+    path = args.store or str(Path(args.data_root) / "lessons.jsonl")
+    if args.lessons_cmd == "add" and not args.text:
+        msg = "lessons add requires --text"
+        print(json.dumps({"ok": False, "error": msg}) if args.json else msg)
+        return 1
+    if args.lessons_cmd == "evidence" and (not args.lesson_id
+                                            or not args.outcome):
+        msg = "lessons evidence requires --lesson-id and --outcome"
+        print(json.dumps({"ok": False, "error": msg}) if args.json else msg)
+        return 1
+    if args.lessons_cmd == "retire" and not args.lesson_id:
+        msg = "lessons retire requires --lesson-id"
+        print(json.dumps({"ok": False, "error": msg}) if args.json else msg)
+        return 1
+    store = TemporalLessonStore.load(path)
+    now = time.time()
+    out: dict = {"ok": True, "store_path": path}
+    if args.lessons_cmd == "add":
+        rec = store.add_lesson(args.text, args.symbol, now,
+                               regime=args.regime,
+                               halflife_days=args.halflife,
+                               max_age_days=args.max_age)
+        out.update(action="add", lesson=rec.to_dict())
+        store.save(path)
+    elif args.lessons_cmd == "evidence":
+        t = store.add_evidence(args.lesson_id, args.outcome, now)
+        out.update(action="evidence", transition=t)
+        store.save(path)
+        if not t.get("ok"):
+            out["ok"] = False
+    elif args.lessons_cmd == "retire":
+        t = store.retire(args.lesson_id, now)
+        out.update(action="retire", transition=t)
+        store.save(path)
+        if not t.get("ok"):
+            out["ok"] = False
+    else:  # list
+        sym_filter = None if args.symbol in (None, "all") else args.symbol
+        reg_filter = None if args.regime in (None, "all") else args.regime
+        rows = store.active_lessons(now, symbol=sym_filter,
+                                    regime=reg_filter)
+        out.update(action="list", active=rows,
+                   n_total=len(store.all_lessons()))
+    if args.json:
+        print(json.dumps(out, sort_keys=True, default=str))
+        return 0 if out.get("ok") else 1
+    print(f"LESSONS — {path}")
+    print("=" * 64)
+    if out.get("action") == "list":
+        rows = out.get("active") or []
+        print(f"active: {len(rows)} of {out.get('n_total', 0)} total")
+        for r in rows[:20]:
+            print(f"  [{r['confidence']:+.3f}] {r['symbol']:<6s} "
+                  f"{r['regime']:<12s} {r['text'][:44]} "
+                  f"(s{r['support']}/c{r['contradict']}, "
+                  f"{r['age_days']:.0f}d)")
+    else:
+        print(json.dumps(out, sort_keys=True, default=str, indent=2))
+    return 0 if out.get("ok") else 1
+
+
+def cmd_tune_rule(args) -> int:
+    """tune-rule — R5: champion/challenger threshold tuning for a
+    watch rule (pct_move or atr_spike). The score is information
+    content: does firing at θ predict elevated follow-through movement?
+    The incumbent always wins ties; a dormant rule is never force-tuned.
+    """
+    from .evolve.rule_tuner import (TuneConfig, atr_spike_score_fn,
+                                    pct_move_score_fn, tune_threshold)
+    from .risk.backtest import fetch_hourly_bars
+    try:
+        bars = fetch_hourly_bars(args.symbol, args.bars,
+                                 data_root=args.data_root)
+    except Exception as e:  # noqa: BLE001 — fail-soft with a real message
+        msg = f"bar fetch failed for {args.symbol} ({args.bars}): {e}"
+        print(json.dumps({"ok": False, "error": msg}) if args.json else msg)
+        return 1
+    closes = [b.close for b in bars]
+    if len(closes) < args.window + 5:
+        msg = (f"not enough bars for {args.symbol} ({len(closes)} closes; "
+               f"need > {args.window + 5})")
+        print(json.dumps({"ok": False, "error": msg}) if args.json else msg)
+        return 1
+    if args.rule == "pct_move":
+        score_fn = pct_move_score_fn(closes, args.window)
+    else:
+        # ATR proxy from closes: |close-to-close| change series
+        atrs = [abs(closes[i] - closes[i - 1]) for i in range(1, len(closes))]
+        score_fn = atr_spike_score_fn(atrs, 20)
+    cfg = TuneConfig(lo=args.lo, hi=args.hi, min_fires=args.min_fires,
+                     margin=args.margin, grain=args.grain)
+    res = tune_threshold(score_fn, args.incumbent, cfg, seed=args.seed)
+    res.update({"ok": True, "rule": args.rule, "symbol": args.symbol,
+                "n_closes": len(closes)})
+    if args.json:
+        print(json.dumps(res, sort_keys=True, default=str))
+        return 0 if res.get("verdict") in ("PROMOTE", "KEEP_INCUMBENT") else 1
+    print(f"TUNE RULE — {args.rule} on {args.symbol} · {len(closes)} closes (R5)")
+    print("=" * 64)
+    print(f"champion    : {res['champion_value']} "
+          f"(score {_fmt(res['champion_score'])}, "
+          f"{res['champion_fires']} fires)")
+    print(f"best probe  : {res['best_value']} "
+          f"(score {_fmt(res['best_score'])}) over {res['n_probes']} probes")
+    print(f"VERDICT     : {res['verdict']} — {res['reason']}")
+    return 0 if res.get("verdict") in ("PROMOTE", "KEEP_INCUMBENT") else 1
+
+
+
 def _parse_lookback(raw: str) -> int:
     """'90d' / '90' → 90 return observations (tail of the aligned window)."""
     text = str(raw).strip().lower().rstrip("d")
@@ -2693,6 +2930,110 @@ def main(argv=None) -> int:
     p_alr.add_argument("--json", action="store_true")
     p_alr.add_argument("--data-root", default=str(REPO_ROOT / "data"))
     p_alr.set_defaults(func=cmd_alerts_rm)
+
+    # --- R5 self-evolving desk ---
+    p_evr = sub.add_parser("evolve-run",
+                            help="R5: evolve GUESS strategy parameters — "
+                                 "population + walk-forward evaluation + "
+                                 "champion/challenger promotion gate vs "
+                                 "the shipped incumbent (never writes the "
+                                 "live spec)")
+    p_evr.add_argument("--symbol", default="GC=F",
+                        help="Yahoo symbol for the bars (default GC=F)")
+    p_evr.add_argument("--bars", default="1y",
+                        choices=["1mo", "3mo", "6mo", "1y", "2y"],
+                        help="bar range (default 1y)")
+    p_evr.add_argument("--seed", type=int, default=7,
+                        help="determinism seed (pins the whole run)")
+    p_evr.add_argument("--population", type=int, default=10,
+                        help="individuals per generation (default 10)")
+    p_evr.add_argument("--generations", type=int, default=6,
+                        help="selection→variation rounds (default 6)")
+    p_evr.add_argument("--min-trades", type=int, default=8, dest="min_trades",
+                        help="min total train trades (anti-inactivity gate, "
+                             "default 8)")
+    p_evr.add_argument("--margin", type=float, default=0.05,
+                        help="promotion margin on OOS fitness (default 0.05)")
+    p_evr.add_argument("--max-gap", type=float, default=1.0, dest="max_gap",
+                        help="max overfit gap IS−OOS (default 1.0)")
+    p_evr.add_argument("--archive", default=None,
+                        help="archive JSONL path (default "
+                             "<data-root>/evolve_archive.jsonl)")
+    p_evr.add_argument("--json", action="store_true")
+    p_evr.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_evr.set_defaults(func=cmd_evolve_run)
+
+    p_evs = sub.add_parser("evolve-status",
+                            help="R5: evolution archive status — lineage, "
+                                 "birth ops, last verdict")
+    p_evs.add_argument("--archive", default=None,
+                        help="archive JSONL path (default "
+                             "<data-root>/evolve_archive.jsonl)")
+    p_evs.add_argument("--json", action="store_true")
+    p_evs.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_evs.set_defaults(func=cmd_evolve_status)
+
+    p_les = sub.add_parser("lessons",
+                            help="R5: temporal lesson store — validity "
+                                 "windows, evidence counters, contradiction "
+                                 "retirement (list/add/evidence/retire)")
+    p_les.add_argument("lessons_cmd", nargs="?", default="list",
+                        choices=["list", "add", "evidence", "retire"])
+    p_les.add_argument("--text", default=None,
+                        help="lesson text (for add)")
+    p_les.add_argument("--symbol", default="GC=F",
+                        help="lesson symbol (default GC=F; 'all' or --regime "
+                             "'all' disable list filters)")
+    p_les.add_argument("--regime", default="all",
+                        help="regime tag (default 'all' = no filter for "
+                             "list; used as tag for add)")
+    p_les.add_argument("--lesson-id", default=None, dest="lesson_id",
+                        help="lesson id (for evidence/retire)")
+    p_les.add_argument("--outcome", default=None,
+                        choices=["support", "contradict"],
+                        help="evidence outcome (for evidence)")
+    p_les.add_argument("--halflife", type=float, default=90.0,
+                        help="confidence halflife in days (default 90)")
+    p_les.add_argument("--max-age", type=float, default=365.0, dest="max_age",
+                        help="max lesson age in days (default 365)")
+    p_les.add_argument("--store", default=None,
+                        help="store JSONL path (default "
+                             "<data-root>/lessons.jsonl)")
+    p_les.add_argument("--json", action="store_true")
+    p_les.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_les.set_defaults(func=cmd_lessons)
+
+    p_tr = sub.add_parser("tune-rule",
+                           help="R5: champion/challenger threshold tuning "
+                                "for pct_move/atr_spike watch rules — "
+                                "information-content score, min-fire gate, "
+                                "incumbent wins ties")
+    p_tr.add_argument("--rule", default="pct_move",
+                       choices=["pct_move", "atr_spike"],
+                       help="rule kind to tune (default pct_move)")
+    p_tr.add_argument("--symbol", default="GC=F",
+                       help="Yahoo symbol for bars (default GC=F)")
+    p_tr.add_argument("--bars", default="1y",
+                       choices=["1mo", "3mo", "6mo", "1y", "2y"],
+                       help="bar range (default 1y)")
+    p_tr.add_argument("--window", type=int, default=1,
+                       help="pct_move window bars (default 1)")
+    p_tr.add_argument("--incumbent", type=float, default=0.005,
+                       help="current threshold value (default 0.005)")
+    p_tr.add_argument("--lo", type=float, default=0.001,
+                       help="search bound low (default 0.001)")
+    p_tr.add_argument("--hi", type=float, default=0.03,
+                       help="search bound high (default 0.03)")
+    p_tr.add_argument("--min-fires", type=int, default=5, dest="min_fires",
+                       help="min fires per threshold (default 5)")
+    p_tr.add_argument("--margin", type=float, default=0.005,
+                       help="promotion margin (default 0.005)")
+    p_tr.add_argument("--grain", type=float, default=0.001,
+                       help="snap thresholds to this step (default 0.001)")
+    p_tr.add_argument("--seed", type=int, default=7)
+    p_tr.add_argument("--json", action="store_true")
+    p_tr.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_tr.set_defaults(func=cmd_tune_rule)
 
     args = parser.parse_args(argv)
     return args.func(args)

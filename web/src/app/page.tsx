@@ -11,6 +11,8 @@ import { PortfolioPanel } from "@/components/desk/PortfolioPanel";
 import { AttributionPanel } from "@/components/desk/AttributionPanel";
 // R4-1 panels (autonomous watch loop + alert engine)
 import { AlertsPanel } from "@/components/desk/AlertsPanel";
+// R5 panels (self-evolving desk: parameter evolution + temporal lessons)
+import { EvolutionPanel } from "@/components/desk/EvolutionPanel";
 
 export default function Home() {
   return (
@@ -33,6 +35,8 @@ export default function Home() {
         <AttributionPanel />
         {/* R4-1 Row 8: autonomous watch loop (alert rules + fired feed + ack) */}
         <AlertsPanel />
+        {/* R5 Row 9: self-evolving desk (evolution verdict + lineage + temporal lessons) */}
+        <EvolutionPanel />
       </div>
     </>
   );
