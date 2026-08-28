@@ -179,3 +179,50 @@ def pytest_configure(config):
             if mod.split(".")[0] in ("scipy", "numpy"):
                 del sys.modules[mod]
         sys.meta_path.insert(0, _ScipyBlocker())
+
+
+# ===========================================================================
+# R6-0 — DEVICE-PORTABLE SYNC ROOTS
+#
+# FUNDAMENTAL: a frozen test matrix is an installer's verification
+# function — its verdict must be a function of the REPO CONTENTS, never
+# of the machine it runs on. The 3-way sync guards (R2 memo/evidence,
+# R4-D5 web routes) compare the repo against EXTERNAL deployment roots
+# (the download mirror and the live :3000 runtime tree) that exist ONLY
+# on the build machine. On any other device those roots cannot exist,
+# so the guard's correct verdict there is "not applicable" (SKIP), not
+# "failed". Where a root DOES exist the guard stays a HARD failure —
+# drift between repo and a present deployment copy must never pass.
+#
+# Env overrides (GOLD_DESK_MIRROR_ROOT / GOLD_DESK_RUNTIME_WEB_ROOT)
+# exist so the skip path itself is testable on any machine — see
+# tests/test_portability.py, which re-runs the guards in a subprocess
+# with absent roots and asserts they all SKIP (the fresh-device
+# contract the installer depends on).
+# ===========================================================================
+DEFAULT_MIRROR_ROOT = "/home/z/my-project/download/gold_desk_v1"
+DEFAULT_RUNTIME_WEB_ROOT = "/home/z/my-project/src/app"
+
+
+@pytest.fixture(scope="session")
+def mirror_root() -> Path:
+    """The download-mirror deployment root, if this device has one."""
+    import os
+    root = Path(os.environ.get("GOLD_DESK_MIRROR_ROOT",
+                               DEFAULT_MIRROR_ROOT))
+    if not root.is_dir():
+        pytest.skip(f"mirror root not present on this device "
+                    f"({root}) — sync guard is a build-machine check")
+    return root
+
+
+@pytest.fixture(scope="session")
+def runtime_web_root() -> Path:
+    """The live Next.js src/app tree, if this device has one."""
+    import os
+    root = Path(os.environ.get("GOLD_DESK_RUNTIME_WEB_ROOT",
+                               DEFAULT_RUNTIME_WEB_ROOT))
+    if not root.is_dir():
+        pytest.skip(f"runtime web root not present on this device "
+                    f"({root}) — sync guard is a build-machine check")
+    return root

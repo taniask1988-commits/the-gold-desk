@@ -691,13 +691,13 @@ def test_run_desk_evidence_report_zero_fabrication_when_no_mismatches(
 
 # ============================================================ 3-way sync
 
-def test_memo_evidence_files_3way_byte_identical_repo_stage_vs_gold_desk_v1():
+def test_memo_evidence_files_3way_byte_identical_repo_stage_vs_gold_desk_v1(
+        mirror_root):
     """3-way sync: src/gold_desk/agent/{memo,evidence_checker}.py and
-    tests/test_memo_evidence.py must be byte-identical between
-    /home/z/my-project/scripts/repo_stage/ and
-    /home/z/my-project/download/gold_desk_v1/."""
-    stage = Path("/home/z/my-project/scripts/repo_stage")
-    mirror = Path("/home/z/my-project/download/gold_desk_v1")
+    tests/test_memo_evidence.py must be byte-identical between this repo
+    (resolved from the test file's own location — portable, R6-0) and
+    the download mirror (skips on devices without it)."""
+    stage = Path(__file__).resolve().parents[1]
     files = [
         "src/gold_desk/agent/memo.py",
         "src/gold_desk/agent/evidence_checker.py",
@@ -706,8 +706,8 @@ def test_memo_evidence_files_3way_byte_identical_repo_stage_vs_gold_desk_v1():
     ]
     for rel in files:
         a = stage / rel
-        b = mirror / rel
+        b = mirror_root / rel
         if not a.exists() or not b.exists():
             pytest.fail(f"file missing: {rel}")
         assert a.read_bytes() == b.read_bytes(), (
-            f"{rel}: byte-diff between repo_stage and gold_desk_v1")
+            f"{rel}: byte-diff between repo and mirror")

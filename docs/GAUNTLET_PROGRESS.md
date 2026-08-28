@@ -340,3 +340,22 @@ Round log:
 - Headline: the 1y live run's champion WON in-sample (+0.244 vs −1.970) and LOST
   out-of-sample (0.677 vs 1.872) → the gate said KEEP_INCUMBENT. The system's most
   important output is a refusal.
+
+## Round 6 progress (live commits) — EVERYWHERE DESK (device portability)
+- Trigger: owner installs on a second device — install.sh step 4 (frozen
+  matrix, fail-closed) refused: 7 sync-guard tests hard-coded the build
+  machine's absolute deployment roots (/home/z/my-project/...) →
+  FileNotFoundError on any other machine → installer blocked.
+- Root cause class: a verification gate whose verdict depends on WHICH
+  machine runs it is an environment probe, not a gate.
+- Fix (R6-0): conftest mirror_root / runtime_web_root session fixtures —
+  env-overridable (GOLD_DESK_MIRROR_ROOT / GOLD_DESK_RUNTIME_WEB_ROOT),
+  SKIP when the root is absent on this device, HARD-fail when present
+  (anti-drift discipline unchanged); all 7 guards rewritten onto them;
+  repo root always derived from the test file itself; tests/test_portability.py
+  (3 new guards): repo-root derivation, META-GUARD forbidding absolute host
+  paths in test sources (conftest DEFAULT_* constants the only sanctioned
+  exceptions), and the fresh-device contract — all 7 guards re-run in a
+  subprocess with absent roots must SKIP, never fail.
+- 1108/1108 both repos (1105 + 3). Build machine: guards run HARD. Fresh
+  device: guards skip, 1101 pass — the installer proceeds.

@@ -1105,56 +1105,57 @@ def test_d5_snapshot_route_in_repo_stage_web():
     assert p.exists(), f"missing route: {p}"
 
 
-def test_d5_quant_route_in_download_runtime_mirror():
-    """D5 — the /api/desk/quant route exists in download runtime mirror."""
+def test_d5_quant_route_in_download_runtime_mirror(mirror_root):
+    """D5 — the /api/desk/quant route exists in download runtime mirror
+    (skips on devices without the build-machine mirror — R6-0)."""
     from pathlib import Path
-    p = Path("/home/z/my-project/download/gold_desk_v1/web/src"
-             "/app/api/desk/quant/route.ts")
+    p = mirror_root / "web/src/app/api/desk/quant/route.ts"
     assert p.exists(), f"missing route: {p}"
 
 
-def test_d5_snapshot_route_in_download_runtime_mirror():
-    """D5 — the /api/desk/snapshot route exists in download runtime mirror."""
+def test_d5_snapshot_route_in_download_runtime_mirror(mirror_root):
+    """D5 — the /api/desk/snapshot route exists in download runtime mirror
+    (skips on devices without the build-machine mirror — R6-0)."""
     from pathlib import Path
-    p = Path("/home/z/my-project/download/gold_desk_v1/web/src"
-             "/app/api/desk/snapshot/route.ts")
+    p = mirror_root / "web/src/app/api/desk/snapshot/route.ts"
     assert p.exists(), f"missing route: {p}"
 
 
-def test_d5_quant_route_in_live_web_root():
+def test_d5_quant_route_in_live_web_root(runtime_web_root):
     """D5 — the /api/desk/quant route exists in the live web root
-    (/home/z/my-project/src/app/api/desk/quant/route.ts)."""
+    (skips on devices without the live :3000 tree — R6-0)."""
     from pathlib import Path
-    p = Path("/home/z/my-project/src/app/api/desk/quant/route.ts")
+    p = runtime_web_root / "api/desk/quant/route.ts"
     assert p.exists(), f"missing route: {p}"
 
 
-def test_d5_snapshot_route_in_live_web_root():
-    """D5 — the /api/desk/snapshot route exists in the live web root."""
+def test_d5_snapshot_route_in_live_web_root(runtime_web_root):
+    """D5 — the /api/desk/snapshot route exists in the live web root
+    (skips on devices without the live :3000 tree — R6-0)."""
     from pathlib import Path
-    p = Path("/home/z/my-project/src/app/api/desk/snapshot/route.ts")
+    p = runtime_web_root / "api/desk/snapshot/route.ts"
     assert p.exists(), f"missing route: {p}"
 
 
-def test_d5_3way_byte_identical_quant_route():
-    """D5 — the quant route is byte-identical across the 3 roots."""
+def test_d5_3way_byte_identical_quant_route(mirror_root, runtime_web_root):
+    """D5 — the quant route is byte-identical across the 3 roots
+    (external roots resolved device-portably — R6-0)."""
     from pathlib import Path
     repo = (Path(__file__).resolve().parents[1]
             / "web/src/app/api/desk/quant/route.ts")
-    dl = Path("/home/z/my-project/download/gold_desk_v1/web/src"
-              "/app/api/desk/quant/route.ts")
-    lv = Path("/home/z/my-project/src/app/api/desk/quant/route.ts")
+    dl = mirror_root / "web/src/app/api/desk/quant/route.ts"
+    lv = runtime_web_root / "api/desk/quant/route.ts"
     assert repo.read_bytes() == dl.read_bytes() == lv.read_bytes()
 
 
-def test_d5_3way_byte_identical_snapshot_route():
-    """D5 — the snapshot route is byte-identical across the 3 roots."""
+def test_d5_3way_byte_identical_snapshot_route(mirror_root, runtime_web_root):
+    """D5 — the snapshot route is byte-identical across the 3 roots
+    (external roots resolved device-portably — R6-0)."""
     from pathlib import Path
     repo = (Path(__file__).resolve().parents[1]
             / "web/src/app/api/desk/snapshot/route.ts")
-    dl = Path("/home/z/my-project/download/gold_desk_v1/web/src"
-              "/app/api/desk/snapshot/route.ts")
-    lv = Path("/home/z/my-project/src/app/api/desk/snapshot/route.ts")
+    dl = mirror_root / "web/src/app/api/desk/snapshot/route.ts"
+    lv = runtime_web_root / "api/desk/snapshot/route.ts"
     assert repo.read_bytes() == dl.read_bytes() == lv.read_bytes()
 
 
