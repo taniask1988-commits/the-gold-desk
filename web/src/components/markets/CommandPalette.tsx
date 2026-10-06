@@ -180,6 +180,25 @@ function PaletteBody({
         run: () => goDrillDown(searchM[1].trim()),
       });
     }
+    // GAUNTLET 7 Piece 7: export <kind> — canonical CSV straight from
+    // the same CLI output the tables render (byte-identical by build)
+    const exportM = /^export\s+(journal|screener|pair|macro)\s*$/i.exec(
+      query
+    );
+    if (exportM) {
+      const kind = exportM[1].toLowerCase();
+      out.push({
+        id: "cmd-export-kind",
+        kind: "command",
+        label: `EXPORT CSV — ${kind.toUpperCase()}`,
+        hint: "byte-identical to the rendered table",
+        score: 2000,
+        run: () => {
+          window.open(`/api/desk/export?kind=${kind}`, "_blank");
+          onClose();
+        },
+      });
+    }
 
     // ---- plain commands, fuzzy-matched
     const commands: Array<{
@@ -286,6 +305,79 @@ function PaletteBody({
           // monitor manager, a copy-paste bug). "run desk <sym>" is
           // the prefix command above; "mon" still opens monitors.
           setDeskHint(true);
+        },
+      },
+      // ---- GAUNTLET 7 destinations (screener / macro / pair /
+      //      options / copilot) + CSV export — palette reaches every
+      //      new feature (BAR-WORKFLOW completeness)
+      {
+        id: "screener",
+        label: "SCREENER — TECHNICAL + FUNDAMENTAL",
+        hint: "filter the 67-symbol registry (RSI, SMA, margins…)",
+        kw: "screener scan filter technical fundamental rsi sp500 registry",
+        run: () => {
+          router.push("/screener");
+          onClose();
+        },
+      },
+      {
+        id: "macro",
+        label: "MACRO — RATES, CPI, DOLLAR, VIX",
+        hint: "macro plane + Treasury curve history on the deck",
+        kw: "macro rates cpi dollar vix curve fred treasury yields",
+        run: () => {
+          router.push("/#macro");
+          onClose();
+          setTimeout(() => {
+            document
+              .getElementById("macro")
+              ?.scrollIntoView({ behavior: "smooth", block: "start" });
+          }, 120);
+        },
+      },
+      {
+        id: "copilot",
+        label: "COPILOT — RECEIPTS-BACKED AI",
+        hint: "ask anything; every number cited to a command receipt",
+        kw: "copilot ai ask receipts evidence question assistant",
+        run: () => {
+          router.push("/#copilot");
+          onClose();
+          setTimeout(() => {
+            document
+              .getElementById("copilot")
+              ?.scrollIntoView({ behavior: "smooth", block: "start" });
+          }, 120);
+        },
+      },
+      {
+        id: "pair",
+        label: "PAIR — GOLD VS SILVER ANALYTICS",
+        hint: "spread z-score, ±2σ bands, cointegration",
+        kw: "pair spread ratio zscore cointegration silver relative value",
+        run: () => {
+          router.push("/markets/GC%3DF#pair");
+          onClose();
+        },
+      },
+      {
+        id: "options",
+        label: "OPTIONS — GREEKS, IV SKEW, MAX PAIN",
+        hint: "options analytics on the symbol drill-down",
+        kw: "options greeks iv skew max pain open interest put call",
+        run: () => {
+          router.push("/markets/GLD");
+          onClose();
+        },
+      },
+      {
+        id: "export",
+        label: "EXPORT — CSV (JOURNAL)",
+        hint: "export <journal|screener|pair|macro> · byte-identical CSV",
+        kw: "export csv download journal screener pair macro table",
+        run: () => {
+          window.open("/api/desk/export?kind=journal", "_blank");
+          onClose();
         },
       },
     ];

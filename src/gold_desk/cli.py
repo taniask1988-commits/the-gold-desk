@@ -170,6 +170,15 @@ def cmd_replay(args) -> int:
 
 def cmd_eod(args) -> int:
     from .eod import eod_summary
+    from .replay import replay_day
+    if getattr(args, "json", False):
+        report = replay_day(args.data_root, args.date)
+        print(json.dumps({"ok": True, "date": args.date,
+                          "bars": report.get("bars", []),
+                          "histogram": report.get("histogram", {}),
+                          "tickets": report.get("tickets", [])},
+                         sort_keys=True, default=str))
+        return 0
     print(eod_summary(args.data_root, args.date))
     return 0
 
@@ -264,6 +273,71 @@ def cmd_news(args) -> int:
     for i, item in enumerate(news.get("items", []), 1):
         print(f"{i:2d}. {item['title']}")
         print(f"    {item['published']}  {item['link'][:80]}")
+    return 0
+
+
+def cmd_export_csv(args) -> int:
+    """GAUNTLET 7 Piece 7 — canonical CSV export (byte-identical to the
+    rendered tables: same command output feeds both)."""
+    from .export_csv import export_csv, rows_to_csv
+    kw: dict = {}
+    if args.kind == "journal":
+        kw["limit"] = args.limit
+    elif args.kind == "screener":
+        kw["where"] = args.where
+        kw["universe"] = args.universe
+        kw["technical_only"] = args.technical_only
+        kw["limit"] = args.limit
+    elif args.kind == "pair":
+        kw.update(a=args.a, b=args.b, window=args.window, mode=args.mode)
+    elif args.kind == "options":
+        kw["symbol"] = args.symbol
+    out = export_csv(args.kind, args.data_root, **kw)
+    if not out.get("ok"):
+        print("export failed:", "; ".join(out.get("errors") or ["unknown"]),
+              file=sys.stderr)
+        return 1
+    csv_text = rows_to_csv(out["columns"], out["rows"], source=out["source"])
+    if args.out:
+        Path(args.out).write_text(csv_text, encoding="utf-8")
+        print(f"wrote {args.out} ({len(out['rows'])} rows)")
+    else:
+        sys.stdout.write(csv_text)
+    return 0
+
+
+def cmd_eod_report(args) -> int:
+    """GAUNTLET 7 Piece 7 — branded EOD report (markdown, from journal)."""
+    from .eod_report import eod_report_md
+    md = eod_report_md(args.data_root, args.date)
+    if args.out:
+        Path(args.out).write_text(md, encoding="utf-8")
+        print(f"wrote {args.out}")
+    else:
+        print(md, end="")
+    return 0
+
+
+def cmd_copilot(args) -> int:
+    """GAUNTLET 7 Piece 6 — receipts-backed AI copilot.
+
+    NL question → read-only desk commands → answer where EVERY number is
+    mechanically cited to a receipt and evidence-gated (zero-fabrication).
+    """
+    from .agent.copilot import ask as copilot_ask
+    out = copilot_ask(args.question, data_root=args.data_root,
+                      max_commands=args.max_commands,
+                      timeout=args.timeout)
+    if args.json:
+        print(json.dumps(out, sort_keys=True, default=str))
+        return 0 if out.get("published") else 1
+    print(out.get("answer_md") or "")
+    gate = out.get("evidence") or {}
+    if not gate.get("ok"):
+        print("\n[EVIDENCE GATE] UNPUBLISHED — untraceable numbers:")
+        for u in gate.get("untraceable") or []:
+            print(f"  {u.get('value')}  {u.get('context')}")
+        return 1
     return 0
 
 
@@ -394,6 +468,238 @@ def _fmt_price(v, symbol: str | None = None, derived: bool = False) -> str:
     if symbol and str(symbol).upper().endswith("=X"):
         return f"{v:,.5f}" if abs(v) < 10 else f"{v:,.3f}"
     return f"{v:,.4f}" if abs(v) < 1 else f"{v:,.2f}"
+
+
+def cmd_pair(args) -> int:
+    """GAUNTLET 7 Piece 5 — pair spread/ratio + z-score + cointegration."""
+    from .markets.pairs import pair_analytics
+    out = pair_analytics(args.a, args.b, window=args.window,
+                         data_root=args.data_root, mode=args.mode)
+    if args.json:
+        print(json.dumps(out, sort_keys=True))
+        return 0 if out.get("ok") else 1
+    if not out.get("ok"):
+        print("pair analytics failed:", "; ".join(out.get("errors") or []))
+        return 1
+    eg = out.get("cointegration") or {}
+    print(f"PAIR {out['a']} / {out['b']} — {out['spread_label']} "
+          f"({out['n_days']} aligned days, window={out['window']})")
+    print("=" * 60)
+    print(f"z-score now : {out['zscore_now']} (bands ±{out['band']}σ)")
+    print(f"hedge OLS   : β={out['hedge']['beta']} α={out['hedge']['alpha']}")
+    print(f"cointegration: ADF t={eg.get('adf_t_stat')} "
+          f"({eg.get('verdict')}) [exploratory]")
+    return 0
+
+
+def cmd_macro_series(args) -> int:
+    """GAUNTLET 7 Piece 4 — FRED series (key path or keyless fallback)."""
+    from .macro.fred import fetch_series
+    ids = [i.strip().upper() for i in args.ids.split(",") if i.strip()]
+    out = {sid: fetch_series(sid, args.data_root) for sid in ids}
+    if args.json:
+        print(json.dumps(out, sort_keys=True))
+        return 0 if any(v.get("ok") for v in out.values()) else 1
+    any_ok = False
+    for sid, v in out.items():
+        if v.get("ok"):
+            any_ok = True
+            obs = v.get("observations") or []
+            last = obs[-1] if obs else {}
+            print(f"{sid:<10} {v.get('source'):<9} last={last.get('value')} "
+                  f"@ {last.get('date')}  ({len(obs)} obs, "
+                  f"{v.get('label', '')})")
+        else:
+            print(f"{sid:<10} FAILED: {v.get('errors')}")
+    return 0 if any_ok else 1
+
+
+def cmd_macro_dashboard(args) -> int:
+    """GAUNTLET 7 Piece 4 — the macro dashboard aggregate."""
+    from .macro.fred import macro_dashboard
+    out = macro_dashboard(args.data_root)
+    if args.json:
+        print(json.dumps(out, sort_keys=True))
+        return 0 if out.get("ok") else 1
+    print("MACRO DASHBOARD — "
+          f"{out.get('n_series_ok')}/{out.get('n_series')} FRED series ok")
+    print("=" * 60)
+    for sid, lv in (out.get("snapshot") or {}).items():
+        print(f"  {sid:<10} {lv['value'] if lv else '—':>10}  "
+              f"@ {lv['date'] if lv else '—'}")
+    cpi = out.get("cpi_yoy") or {}
+    if cpi.get("latest"):
+        print(f"  CPI YoY    {cpi['latest']['value']}% "
+              f"@ {cpi['latest']['date']}")
+    gvr = out.get("gold_vs_real") or {}
+    if gvr.get("ok"):
+        print(f"  gold↔real-yield corr({gvr.get('rolling_correlation_window')}d): "
+              f"{gvr.get('rolling_correlation')}")
+    if out.get("series_errors"):
+        print(f"  series errors (fail-soft): {out['series_errors']}")
+    return 0
+
+
+def cmd_curve_history(args) -> int:
+    """GAUNTLET 7 Piece 4 — Treasury curve history matrix (keyless)."""
+    from .macro.fred import curve_history
+    out = curve_history(args.data_root, years=args.years)
+    if args.json:
+        print(json.dumps(out, sort_keys=True))
+        return 0 if out.get("ok") else 1
+    if not out.get("ok"):
+        print("curve history failed:", out.get("errors"))
+        return 1
+    m = out.get("matrix") or []
+    print(f"TREASURY CURVE HISTORY — {len(m)} days x "
+          f"{len(out.get('tenors') or [])} tenors (source={out.get('source')})")
+    print("=" * 60)
+    for row in m[-5:]:
+        print(f"  {row['date']}  " + "  ".join(
+            f"{t}={row.get(t)}" for t in out["tenors"]))
+    return 0
+
+
+def cmd_screen(args) -> int:
+    """GAUNTLET 7 Piece 3 — technical + fundamental screener."""
+    from .markets.screener import screen
+    try:
+        out = screen(args.where, args.universe, args.data_root,
+                     with_fundamentals=not args.technical_only,
+                     limit=args.limit)
+    except ValueError as exc:
+        if args.json:
+            print(json.dumps({"ok": False, "errors": [str(exc)]}))
+        else:
+            print("screen failed:", exc)
+        return 1
+    if args.json:
+        print(json.dumps(out, sort_keys=True))
+        return 0 if out.get("ok") else 1
+    if not out.get("ok"):
+        print("screen failed:", "; ".join(out.get("errors") or ["unknown"]))
+        return 1
+    print(f"SCREEN [{out['universe']}] — {out['n_symbols']} symbols, "
+          f"{out['n_matched']} matched  where: {out['where']}")
+    print("=" * 64)
+    for r in out.get("rows") or []:
+        f = r.get("fields") or {}
+        rsi = f.get("rsi")
+        price = f.get("price")
+        rg = f.get("revenue_growth")
+        print(f"  {r['symbol']:<12} price={price} rsi="
+              f"{f'{rsi:.1f}' if isinstance(rsi, (int, float)) else '—'} "
+              f"chg30d={f.get('change_30d')}% "
+              f"rev_g={f'{rg:.1f}%' if isinstance(rg, (int, float)) else '—'}")
+    if out.get("n_errors"):
+        print(f"({out['n_errors']} symbols errored fail-soft, "
+              f"sample: {out['errors_sample'][:3]})")
+    return 0
+
+
+def cmd_options_chain(args) -> int:
+    """GAUNTLET 7 Piece 2 — raw keyless option chain (yahoo/deribit/cboe)."""
+    from .markets.options import fetch_chain
+    out = fetch_chain(args.symbol, args.provider, args.data_root)
+    if args.json:
+        print(json.dumps(out, sort_keys=True))
+        return 0 if out.get("ok") else 1
+    if not out.get("ok"):
+        print("options chain failed:",
+              "; ".join(out.get("errors") or ["unknown"]))
+        return 1
+    chain = out.get("chain") or []
+    print(f"{out.get('underlying') or args.symbol} — {len(chain)} contracts "
+          f"via {out.get('source')} ({out.get('data_delay', '')})")
+    exps = sorted({c["expiry"] for c in chain})
+    print(f"expiries   : {len(exps)} ({exps[0]} … {exps[-1]})" if exps
+          else "expiries   : none")
+    ivs = [c["implied_vol"] for c in chain if c.get("implied_vol")]
+    if ivs:
+        print(f"iv range   : {min(ivs):.4f} .. {max(ivs):.4f}")
+    return 0
+
+
+def cmd_options_analytics(args) -> int:
+    """GAUNTLET 7 Piece 2 — Greeks + IV surface + max pain + PCR + OI wall."""
+    from .markets.options import analytics
+    out = analytics(args.symbol, args.provider, args.data_root,
+                    expiries_limit=args.expiries)
+    if args.json:
+        print(json.dumps(out, sort_keys=True))
+        return 0 if out.get("ok") else 1
+    if not out.get("ok"):
+        print("options analytics failed:",
+              "; ".join(out.get("errors") or ["unknown"]))
+        return 1
+    print(f"{out['symbol']} OPTIONS ANALYTICS — via {out['provider']} "
+          f"({out['data_delay']}, {out['contracts']} contracts)")
+    print("=" * 60)
+    print(f"spot       : {out['spot']}"
+          f"{' (derived — no feed quote)' if out['spot_derived'] else ''}")
+    mp = out.get("max_pain") or {}
+    print(f"max pain   : {mp.get('max_pain')}")
+    pcv = out.get("put_call_ratio_volume") or {}
+    pco = out.get("put_call_ratio_oi") or {}
+    print(f"put/call   : vol {pcv.get('put_call_ratio')} · "
+          f"OI {pco.get('put_call_ratio')}")
+    s = out.get("skew") or {}
+    if s:
+        print(f"skew       : ATM IV {s.get('atm_iv')} · "
+              f"RR25d {s.get('risk_reversal_25d')} · "
+              f"fly25d {s.get('butterfly_25d')}")
+    ivr = out.get("iv_rank") or {}
+    if ivr:
+        print(f"iv rank    : {ivr.get('iv_rank')} "
+              f"({ivr.get('basis', '')})")
+    surf = out.get("iv_surface") or {}
+    print(f"surface    : {len(surf.get('expiries') or [])} expiries, "
+          f"{len(out.get('greeks_grid') or [])} greeks rows, "
+          f"{len(out.get('oi_wall') or [])} OI strikes")
+    return 0
+
+
+def cmd_markets_chart(args) -> int:
+    """GAUNTLET 7 Piece 1 — chart bars + indicator series for lightweight-charts."""
+    from .markets import chart as chart_mod
+    from .markets.board import _adhoc_candidate
+    from .markets.registry import normalize
+
+    # registry alias first; unknown input falls back to the same ad-hoc
+    # guard fetch_detail uses (charset/length-checked), else fail closed
+    symbol = normalize(args.symbol) or _adhoc_candidate(args.symbol)
+    if not symbol:
+        print("chart failed: symbol not resolvable and not ad-hoc safe")
+        return 1
+    indicators = ([i.strip() for i in args.indicators.split(",") if i.strip()]
+                  if args.indicators else None)
+    out = chart_mod.fetch_chart(symbol, args.timeframe, args.data_root,
+                                indicators)
+    if args.json:
+        print(json.dumps(out, sort_keys=True))
+        return 0 if out.get("ok") else 1
+    if not out.get("ok"):
+        print("chart failed:", "; ".join(out.get("errors") or ["unknown"]))
+        return 1
+    bars = out.get("bars") or []
+    print(f"{out['symbol']} — {len(bars)} x {out['timeframe']} bars "
+          f"(range={out['range']}, {out.get('data_delay', '')}, "
+          f"source={out.get('source', '')})")
+    print("=" * 60)
+    if bars:
+        import datetime as _dt
+        last = bars[-1]
+        when = _dt.datetime.fromtimestamp(last["t"] / 1000,
+                                          tz=_dt.timezone.utc)
+        print(f"last bar   : {when:%Y-%m-%d %H:%M} UTC  "
+              f"o={last['o']} h={last['h']} l={last['l']} c={last['c']}")
+    for ser in out.get("indicator_series") or []:
+        pts = ser.get("points") or []
+        tail = pts[-1] if pts else {}
+        print(f"  {ser['name']:<8}: {len(pts)} points, last={tail.get('v')}")
+    if out.get("stale_error"):
+        print(f"  (stale cache served: {out.get('stale_reason')})")
+    return 0
 
 
 def cmd_markets(args) -> int:
@@ -2460,6 +2766,7 @@ def main(argv=None) -> int:
 
     p_eod = sub.add_parser("eod", help="end-of-day summary")
     p_eod.add_argument("--date", required=True)
+    p_eod.add_argument("--json", action="store_true")
     p_eod.add_argument("--data-root", default=str(REPO_ROOT / "data"))
     p_eod.set_defaults(func=cmd_eod)
 
@@ -2502,6 +2809,54 @@ def main(argv=None) -> int:
     p_news.add_argument("--data-root", default=str(REPO_ROOT / "data"))
     p_news.set_defaults(func=cmd_news)
 
+    # --- GAUNTLET 7 Piece 6: receipts-backed copilot ---
+    p_cop = sub.add_parser("copilot",
+                           help="receipts-backed AI copilot: NL → read-only "
+                                "desk commands → evidence-gated answer "
+                                "(every number cited to a receipt)")
+    p_cop.add_argument("question", help="natural-language question")
+    p_cop.add_argument("--json", action="store_true")
+    p_cop.add_argument("--max-commands", type=int, default=4,
+                       dest="max_commands")
+    p_cop.add_argument("--timeout", type=float, default=60.0)
+    p_cop.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_cop.set_defaults(func=cmd_copilot)
+
+    # --- GAUNTLET 7 Piece 7: workflow glue (CSV export + EOD report) ---
+    p_exp = sub.add_parser("export-csv",
+                           help="canonical CSV export (byte-identical to "
+                                "the rendered tables): journal | screener | "
+                                "pair | macro")
+    p_exp.add_argument("kind", choices=["journal", "screener", "pair",
+                                        "macro", "options"])
+    p_exp.add_argument("--symbol", default="GLD",
+                       help="options kind: underlying symbol")
+    p_exp.add_argument("--where", default="rsi < 70",
+                       help="screener filter DSL (screener kind)")
+    p_exp.add_argument("--universe", default="registry",
+                       choices=["registry", "universe", "sp500"])
+    p_exp.add_argument("--technical-only", action="store_true",
+                       dest="technical_only")
+    p_exp.add_argument("--limit", type=int, default=500)
+    p_exp.add_argument("--a", default="GC=F", help="pair first symbol")
+    p_exp.add_argument("--b", default="SLV", help="pair second symbol")
+    p_exp.add_argument("--window", type=int, default=60)
+    p_exp.add_argument("--mode", default="ratio",
+                       choices=["ratio", "spread"])
+    p_exp.add_argument("--out", default=None,
+                       help="write to file instead of stdout")
+    p_exp.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_exp.set_defaults(func=cmd_export_csv)
+
+    p_er = sub.add_parser("eod-report",
+                          help="branded EOD report (markdown) from the "
+                               "journal alone")
+    p_er.add_argument("--date", required=True)
+    p_er.add_argument("--out", default=None,
+                      help="write to file instead of stdout")
+    p_er.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_er.set_defaults(func=cmd_eod_report)
+
     p_chat = sub.add_parser("chat", help="chat with The Desk expert")
     p_chat.add_argument("--json", action="store_true",
                         help="machine mode (used by the web deck)")
@@ -2540,6 +2895,95 @@ def main(argv=None) -> int:
     p_mk.add_argument("--json", action="store_true")
     p_mk.add_argument("--data-root", default=str(REPO_ROOT / "data"))
     p_mk.set_defaults(func=cmd_markets)
+
+    p_chart = sub.add_parser("markets-chart",
+                             help="chart bars + indicator series "
+                                  "(15m/1h/1d, lightweight-charts feed)")
+    p_chart.add_argument("symbol", help="any alias or Yahoo symbol "
+                                        "(gold, btc, aapl, GC=F ...)")
+    p_chart.add_argument("--timeframe", default="1h",
+                         choices=["15m", "1h", "1d"])
+    p_chart.add_argument("--indicators", default=None,
+                         help="comma list from: sma20,sma50,ema20,ema50,"
+                              "rsi14,bb20,atr14 (default sma20,sma50,rsi14)")
+    p_chart.add_argument("--json", action="store_true")
+    p_chart.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_chart.set_defaults(func=cmd_markets_chart)
+
+    p_oc = sub.add_parser("options-chain",
+                          help="keyless option chain (yahoo/deribit/cboe)")
+    p_oc.add_argument("symbol")
+    p_oc.add_argument("--provider", default="auto",
+                      choices=["auto", "yahoo", "deribit", "cboe"])
+    p_oc.add_argument("--json", action="store_true")
+    p_oc.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_oc.set_defaults(func=cmd_options_chain)
+
+    p_scr = sub.add_parser("screen",
+                           help="screener: technical + fundamental filters "
+                                "over the registry (or S&P 500)")
+    p_scr.add_argument("--where", required=True,
+                       help='filter DSL, e.g. "rsi < 30 and '
+                            'price > sma200 and revenue_growth > 10" — '
+                            "fields: price rsi sma20 sma50 sma200 atr_pct "
+                            "change_30d realized_vol above_sma200 "
+                            "revenue_growth net_income_margin fcf_margin "
+                            "quarters")
+    p_scr.add_argument("--universe", default="registry",
+                       choices=["registry", "universe", "sp500"])
+    p_scr.add_argument("--technical-only", action="store_true",
+                       help="skip the fundamentals plane (faster)")
+    p_scr.add_argument("--limit", type=int, default=100)
+    p_scr.add_argument("--json", action="store_true")
+    p_scr.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_scr.set_defaults(func=cmd_screen)
+
+    p_ms = sub.add_parser("macro-series",
+                          help="FRED series (FRED_API_KEY or keyless CSV "
+                               "fallback)")
+    p_ms.add_argument("--ids", default="DGS10,DFII10",
+                      help="comma list of FRED series ids")
+    p_ms.add_argument("--json", action="store_true")
+    p_ms.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_ms.set_defaults(func=cmd_macro_series)
+
+    p_md = sub.add_parser("macro-dashboard",
+                          help="macro aggregate: rates, dollar, VIX, CPI, "
+                               "gold-vs-real-yields")
+    p_md.add_argument("--json", action="store_true")
+    p_md.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_md.set_defaults(func=cmd_macro_dashboard)
+
+    p_ch = sub.add_parser("curve-history",
+                          help="Treasury curve history matrix (keyless, "
+                               "tenors x dates)")
+    p_ch.add_argument("--years", type=int, default=2)
+    p_ch.add_argument("--json", action="store_true")
+    p_ch.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_ch.set_defaults(func=cmd_curve_history)
+
+    p_pair = sub.add_parser("pair",
+                            help="pair analytics: spread/ratio + rolling "
+                                 "z-score bands + cointegration (exploratory)")
+    p_pair.add_argument("a", help="first symbol (gold, GLD, btc ...)")
+    p_pair.add_argument("b", help="second symbol (silver, SLV ...)")
+    p_pair.add_argument("--window", type=int, default=60)
+    p_pair.add_argument("--mode", default="ratio", choices=["ratio", "spread"])
+    p_pair.add_argument("--json", action="store_true")
+    p_pair.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_pair.set_defaults(func=cmd_pair)
+
+    p_oa = sub.add_parser("options-analytics",
+                          help="Greeks + IV surface + max pain + PCR "
+                               "+ OI wall (computed, keyless)")
+    p_oa.add_argument("symbol")
+    p_oa.add_argument("--provider", default="auto",
+                      choices=["auto", "yahoo", "deribit", "cboe"])
+    p_oa.add_argument("--expiries", type=int, default=6,
+                      help="max expiries in the surface/grid")
+    p_oa.add_argument("--json", action="store_true")
+    p_oa.add_argument("--data-root", default=str(REPO_ROOT / "data"))
+    p_oa.set_defaults(func=cmd_options_analytics)
 
     p_ask = sub.add_parser("ask", help="agent loop: desk + web tools, $0")
     p_ask.add_argument("question")
@@ -2661,7 +3105,7 @@ def main(argv=None) -> int:
     # --- R2-2 quant toolkit + deterministic verified snapshot ---
     p_quant = sub.add_parser("markets-quant",
                               help="numpy-free indicator battery for a symbol "
-                                   "(RSI14, MACD, BBands, ATR/ATR%, realized "
+                                   "(RSI14, MACD, BBands, ATR/ATR%%, realized "
                                    "vol 20d + vol regime, SMA{20,50,200}, "
                                    "EMA{12,26}, ADX14, Stoch, CCI20, OBV)")
     p_quant.add_argument("symbol",
@@ -2710,7 +3154,7 @@ def main(argv=None) -> int:
     p_mam = sub.add_parser("markets-multi",
                             help="R3-1: 8-instrument multi-asset monitor "
                                  "(gold, ES, ^TNX, DXY, BTC, VIX, WTI, "
-                                 "EUR/USD) — live session VWAP + relative % "
+                                 "EUR/USD) — live session VWAP + relative %% "
                                  "(R4-2: --all = 24-instrument universe, "
                                  "--symbols=A,B = any subset)")
     p_mam.add_argument("--json", action="store_true")
@@ -2865,7 +3309,7 @@ def main(argv=None) -> int:
     # --- R4-1 autonomous watch loop + alert engine ---
     p_wl = sub.add_parser("watch-loop",
                           help="R4-1: autonomous alert sweep — price "
-                               "levels, % moves, ATR/volume spikes, "
+                               "levels, %% moves, ATR/volume spikes, "
                                "correlation flips over the 8 keyless "
                                "instruments (session-gated polling, "
                                "cooldown dedup, journal + Telegram)")

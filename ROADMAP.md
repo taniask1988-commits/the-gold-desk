@@ -52,6 +52,25 @@ Multi-symbol, locked-cBot parameter filling — only after the process has
 weeks of journaled paper behavior you actually read. Each extension is a
 constitution commit, hashed, never a runtime mutation.
 
+### Rung 6 — The Bloomberg Wedge (GAUNTLET 7)
+Bloomberg-grade *surfaces* over the free keyless stack: pro charting
+(lightweight-charts), options analytics (closed-form Black-Scholes), a
+screener, macro/fixed-income depth, pair analytics, a receipts-backed AI
+copilot, and workflow glue — all observation/intelligence-layer, all
+read-only consumers of the journal. The deterministic live desk is
+untouched (architecture law, AST-tested).
+
+**Sanctioned key exception — FRED.** The free-stack constitution is
+keyless by default. The ONE exception: FRED (Federal Reserve Economic
+Data, ~800k series) may use a free instant key because it unlocks the
+macro depth no other keyless source matches. Rules, all pinned by
+tests: (a) the key lives ONLY in the `FRED_API_KEY` env var — never in
+code, never committed; (b) fail-closed: without the key the plane
+degrades to keyless fallbacks (fredgraph public CSV, Treasury.gov daily
+yield XML the desk already parses) and still works — FRED failure is
+surfaced in `errors[]`, never a crash; (c) this note IS the sanctioned
+exception record.
+
 ## What stays dead forever (not "later")
 
 - LLM proposing or editing entries/stops/targets/sizes

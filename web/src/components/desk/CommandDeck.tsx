@@ -5,6 +5,9 @@ import { useDeskData } from "./useDeskData";
 import { HeaderBar } from "./HeaderBar";
 import { TickerStrip } from "./TickerStrip";
 import { PriceChart } from "./PriceChart";
+import { ProChart } from "./ProChart";
+import { MacroPanel } from "./MacroPanel";
+import { CopilotPanel } from "./CopilotPanel";
 import { DriverBoard } from "./DriverBoard";
 import { FeedTerminal } from "./FeedTerminal";
 import { ReasonHistogram } from "./ReasonHistogram";
@@ -63,6 +66,18 @@ export function CommandDeck() {
               setScope={setScope}
             />
           </div>
+
+          {/* Row 1.5 (GAUNTLET 7 Piece 1): live pro chart —
+              lightweight-charts, 15m/1h/1d, indicator overlays */}
+          <ProChart symbol="GC=F" height={430} />
+
+          {/* Row 1.7 (GAUNTLET 7 Piece 4): macro plane — rates complex,
+              CPI, dollar, VIX + Treasury curve-history heatmap */}
+          <MacroPanel />
+
+          {/* Row 1.85 (GAUNTLET 7 Piece 6): receipts-backed copilot —
+              NL → read-only CLI commands → evidence-gated answer */}
+          <CopilotPanel />
 
           {/* Row 2: drivers + wire */}
           <div className="grid gap-4 lg:grid-cols-[1.35fr_1fr]">

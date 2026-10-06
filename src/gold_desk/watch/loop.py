@@ -396,6 +396,19 @@ class WatchLoop:
     def _channel(self) -> str:
         return "telegram" if telegram_configured(self.telegram) else "none"
 
+    @staticmethod
+    def _deep_link(symbol: str) -> str:
+        """GAUNTLET 7 Piece 7 — Telegram deep-link to the web drill-down.
+
+        GOLD_DESK_DECK_URL env overrides the base (default the local
+        deck). Mirrors the web deck's symbolHref: path segments
+        URL-encoded (GC=F → GC%3DF)."""
+        import os
+        from urllib.parse import quote
+        base = (os.environ.get("GOLD_DESK_DECK_URL") or
+                "http://localhost:3000").rstrip("/")
+        return f"{base}/markets/{quote(str(symbol), safe='')}"
+
     def _deliver(self, ev: AlertEvent) -> str:
         """Push one fired alert. No Telegram config → skipped silently
         (no console spam, no journal noise — the fired log + journal
@@ -403,7 +416,9 @@ class WatchLoop:
         if not telegram_configured(self.telegram):
             return "skipped"
         try:
-            return self.telegram.send_message(ev.message) or "telegram"
+            return self.telegram.send_message(
+                f"{ev.message}\n{self._deep_link(ev.symbol)}"
+            ) or "telegram"
         except Exception as e:  # noqa: BLE001 — delivery is best-effort
             self.logger(f"watch: telegram delivery failed: {e}")
             return "failed"

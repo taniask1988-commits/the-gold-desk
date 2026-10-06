@@ -8,6 +8,9 @@ import { MarketFooter } from "../MarketFooter";
 import { AnalystDesk } from "./AnalystDesk";
 import { CandleChart } from "./CandleChart";
 import { NewsCard } from "./NewsCard";
+import { OptionsPanel } from "@/components/desk/OptionsPanel";
+import { PairPanel } from "@/components/desk/PairPanel";
+import { ProChart } from "@/components/desk/ProChart";
 import { SectorStrip } from "./SectorStrip";
 import {
   chgColor,
@@ -466,6 +469,20 @@ export function MarketDetail({ symbol }: { symbol: string }) {
                 </div>
                 <CandleChart bars={detail.bars ?? []} symbol={sym} derived={derived} />
               </section>
+
+              {/* GAUNTLET 7 Piece 1 — pro chart: lightweight-charts,
+                  15m/1h/1d switching, SMA/BB/RSI overlays (own pane) */}
+              <section aria-label="Pro chart" className="px-1 sm:px-2">
+                <ProChart symbol={sym} height={420} />
+              </section>
+
+              {/* GAUNTLET 7 Piece 2 — options analytics (Greeks, IV skew,
+                  OI wall, max pain, PCR, IV rank) — keyless, computed */}
+              <OptionsPanel symbol={sym} />
+
+              {/* GAUNTLET 7 Piece 5 — pair analytics vs a chosen partner */}
+              <PairPanel defaultA={sym}
+                        defaultB={sym === "GC=F" ? "SLV" : "GC=F"} />
 
               {/* stats row (py-3, was py-4 — P10 fold tightening) */}
               <section className="gdc-panel flex flex-wrap gap-y-3 px-4 py-3 sm:px-6" aria-label="Key stats">

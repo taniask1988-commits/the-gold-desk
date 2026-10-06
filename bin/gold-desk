@@ -20,6 +20,12 @@
 set -euo pipefail
 
 GOLD_DESK_ROOT="__GOLD_DESK_ROOT__"   # replaced at install time
+if [ "$GOLD_DESK_ROOT" = "__GOLD_DESK_ROOT__" ]; then
+  # Running from a source clone (not installer-substituted): derive the
+  # root from this script's own location — R6 device-portability
+  # discipline (a launcher must not depend on which machine installed it).
+  GOLD_DESK_ROOT="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/.." && pwd)"
+fi
 VENV_PY="$GOLD_DESK_ROOT/.venv/bin/python"
 DATA_DIR="$GOLD_DESK_ROOT/data"
 PORT="${GOLD_DESK_PORT:-3000}"

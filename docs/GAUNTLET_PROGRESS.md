@@ -359,3 +359,94 @@ Round log:
   subprocess with absent roots must SKIP, never fail.
 - 1108/1108 both repos (1105 + 3). Build machine: guards run HARD. Fresh
   device: guards skip, 1101 pass — the installer proceeds.
+
+## Round 7 progress (live commits) — THE BLOOMBERG WEDGE
+Mission: Bloomberg-grade surfaces on the 100% free/keyless stack — pro
+charting, options analytics, screener, macro/FRED depth, pair analytics,
+a receipts-backed AI copilot, workflow glue — fused into the observation
+layer while the deterministic live desk stayed byte-for-byte untouched.
+
+- Piece 0 — bars captured to docs/screenshots/bars/ (TradingView GC1! +
+  lightweight-charts gallery, Hull worked example, CBOE GLD chain, Finviz/
+  stockanalysis/TradingView/Yahoo screeners, FRED DGS10 + curve history,
+  TradingView GLD/SLV, Bloomberg command markdown). Bar-artifact honesty
+  noted by the critic: the lightweight-charts capture was a 404, two
+  screeners were Cloudflare challenges, and the Hull doc's own printed
+  Greeks are arithmetically wrong against its own formulas (its prices
+  4.76/0.81 are not — those bind).
+- Piece 1 — ProChart (lightweight-charts v5.2.1, MIT) on the home deck +
+  symbol drill-down: 15m/1h/1d switching, SMA20/50 + BB + RSI14 own pane,
+  volume, sourced footer, no blur/backdrop-filter. tests/test_chart.py.
+- Piece 2 — options plane: closed-form Black-Scholes Greeks in pure
+  stdlib (src/gold_desk/risk/options.py) + chain fetcher (Yahoo options,
+  Deribit for crypto; fail-soft + stale-serve) + IV surface/skew, OI
+  wall, max pain, put/call (volume + OI), IV rank honestly labeled
+  "this-chain basis". Math oracle: 0.0 deviation vs closed form on the
+  critic's grid; Hull S=42/K=40/r=10%/sigma=20%/T=0.5 -> c=4.759422,
+  p=0.808599. tests/test_options.py.
+- Piece 3 — screener: safe expression DSL over technical + SEC-XBRL
+  fundamental fields, registry/universe/sp500 universes, presets, TTL
+  cache; verified live `rsi < 65 and revenue_growth > 0` -> AAPL rev_g
+  16.4% keyless. /screener page + cli screen. tests/test_screener.py.
+- Piece 4 — macro plane (src/gold_desk/macro/fred.py): FRED key path +
+  keyless fredgraph.csv fallback + Treasury.gov keyless everything-else;
+  curve history heatmap, macro dashboard, gold-vs-real-yields rolling
+  correlation. ROADMAP.md carries the sanctioned FRED-key exception note
+  (env var only, fail-closed to keyless). tests/test_macro.py.
+- Piece 5 — pair plane (markets/pairs.py): spread/ratio, rolling
+  z-score +/-2sigma bands, Engle-Granger 2-step zero-lag ADF (exploratory,
+  never a gate). PairPanel on the drill-down with a non-identical default
+  leg + identical-pair guard. tests/test_pairs.py.
+- Piece 6 — receipts-backed copilot (agent/copilot.py + cli copilot +
+  /api/desk/copilot + CopilotPanel): deterministic planner executes the
+  desk's own READ-ONLY CLI subcommands (allowlist AST/test-pinned, no
+  mutator reachable), every number [R#]-cited to a receipt, mechanical
+  evidence gate (half-last-decimal tolerance, Q-echo excluded, negative
+  numbers included). Probes: BAR question -> 28 checked / 0 untraceable /
+  published; critic's own probe caught a question-echo number and
+  refused to publish BEFORE the gate-scope fix (fail-closed proven).
+  tests/test_copilot.py (25).
+- Piece 7 — workflow glue: canonical CSV builder (export_csv.py,
+  RFC-4180 round-trip pinned) + cli export-csv (journal/screener/pair/
+  macro/options) + /api/desk/export + ExportCsvButton on every G7 table;
+  command palette reaches SCREENER/MACRO/COPILOT/PAIR/OPTIONS/EXPORT
+  (+ export <kind> prefix); branded EOD report (eod_report.py, cli
+  eod-report) from the journal alone; Telegram alerts deep-link the
+  drill-down (GOLD_DESK_DECK_URL override, symbolHref-encoded).
+  tests/test_workflow_glue.py (12).
+- Piece 8 — E2E: 1206 passed / 21 skipped (baseline 1087/21 this device;
+  same 21 device-portability skips; +119 new tests); doctor healthy
+  (venv/PyYAML/code/journal/zen/feeds/bun/web-deps all ok after the
+  launcher learned to self-derive GOLD_DESK_ROOT on unsubstituted
+  clones); demo --days 30 on a clean root: clean, synthetic-feed
+  disclaimer intact.
+- Bonus fixes swept in: argparse %-format crashes that killed root
+  --help since R2 (ATR/ATR%%, %% moves, relative %%), eod --json for
+  receipts, harness .venv symlink robustness via explicit env launch.
+
+## Round 7 critic verdicts
+- FINAL CRITIC (fresh context, blind, both orders, vs captured bars):
+  PIECE1 OURS 8.0 vs 9.0 (ours literally wraps the bar's own engine,
+  keyless) | PIECE2 OURS 7.7 vs 8.3 (math oracle exact; deeper analytics
+  than the CBOE bar's own surface) | PIECE3 OURS 7.7 vs 6.7 (bar
+  artifacts were 3/4 challenge pages) | PIECE4 BAR 7.0 vs 8.7 (D3:
+  gold-vs-real failed keyless) | PIECE5 BAR 3.3 vs 7.7 (D1: self-pair
+  GC=F/GC=F default) | PIECE6 OURS 8.3 (fail-closed proven twice) |
+  PIECE7 OURS 7.0 vs 9.7 (D2: palette not evidenced in artifact) |
+  BAR-E2E GREEN (1206/21, doctor, demo). DEFECTS D1-D7.
+  PICK_OVERALL: OURS (SHIP-CONDITIONAL).
+- Fix loop: D1 non-identical default leg + identical-pair guard;
+  D2 palette artifact captured with G7 commands; D3 keyless Treasury
+  real-yield fallback (190 aligned days, degraded-labeled) + latent
+  b["t"]->b["ts"] fix; D4 commit (this push); D5 rate_assumption
+  disclosed in payload + UI; D6 stale `next dev` killed, prod standalone
+  serves, dev badge gone; D7 gate excludes question echo + one indicator
+  leg per mentioned symbol (multi-symbol probes now covered).
+- RE-CRITIC (fresh context, mechanical, three-way verification:
+  source + live execution + OCR'd artifacts): D1 FIXED, D2 FIXED,
+  D3 FIXED, D5 FIXED, D6 FIXED, D7 FIXED. PIECE4 REVERSED TO OURS,
+  PIECE5 REVERSED TO OURS, PIECE7 HELD OURS. Residuals: one minor
+  labeling drop in the dashboard projection (closed in this push),
+  palette artifact filters MACRO/COPILOT out of frame (code-verified),
+  GC=F futures honestly have no Yahoo options group (disclosed).
+  PICK_OVERALL: OURS — 7/7 pieces. EXIT.
