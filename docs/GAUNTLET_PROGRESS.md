@@ -450,3 +450,86 @@ layer while the deterministic live desk stayed byte-for-byte untouched.
   palette artifact filters MACRO/COPILOT out of frame (code-verified),
   GC=F futures honestly have no Yahoo options group (disclosed).
   PICK_OVERALL: OURS — 7/7 pieces. EXIT.
+
+## Round 8 progress (live commits) — THE CRITIC'S LEDGER
+
+Mission: clear the external audit — 3 CRITICAL, 7 MAJOR, 7 MINOR defects
+(D-001…D-017) — without regressing the frozen matrix or the 15 Design
+Laws. Five mechanical bars: BAR-INSTALL, BAR-HERMETIC, BAR-INTEGRITY,
+BAR-PORTABILITY, BAR-POLISH. Each piece shipped only after a
+fresh-context harsh critic re-verified the bar by execution.
+
+Round log:
+
+- Baseline (fresh clone @ gauntlet7, Sunday): 4 failed / 1202 passed /
+  21 skipped — the 4 = D-002 reproducing live on a weekend run.
+- Piece 1 (D-001, D-003, D-016): the installer's `sed g` rewrote the
+  launcher's OWN substituted? comparison → self-satisfying if → every
+  installed launcher re-derived its root from ~/.local/bin (proven by
+  rendering + doctor). Fix: sed-immune prefix-strip check; the exit
+  critic then caught the same g-flag re-writing `do_update`'s sed
+  pattern into a no-op that bricked `gold-desk update` — split-sentinel
+  literal + behavioral update test. allowedDevOrigins
+  (localhost/127.0.0.1/0.0.0.0); launcher serves the production
+  standalone build by default (GOLD_DESK_DEV=1 escape); `npm start`
+  falls back to node when bun is absent. Render→doctor contract pinned
+  in tests/test_launcher_portability.py.
+- Piece 2 (D-002): injectable `now` threaded through run_daemon (frozen
+  datetime OR per-tick callable) and watch_status; 4 tests frozen to
+  WED 15:00 UTC; TestHermeticity META-GUARDs: source scan (any
+  `.now(/.utcnow(/.today(/time.time(/utc_now(` shape — alias-dodge
+  hardened after the P1+P2 critic), hostile-clock tripwire (utc_now
+  monkeypatched to RAISE — injected now must drive everything),
+  signature introspection, verbatim Sunday-03:00 sweep. Full matrix
+  green ON A LIVE SUNDAY (critic re-ran: 1238 results, exit 0, and
+  re-introduced a wall read to prove the tripwire trips).
+- Piece 3 (D-004…D-007, D-009): sidecar journal stamps the REAL
+  constitution content hash (same loader as demo/validate; existing
+  root hash preserved; missing YAML → honest non-hex marker) and the
+  overview hash now comes from the constitution loader, never the last
+  event; macro live DXY/VIX read dv["live"]["D2"]/["D10"] (verified
+  live: 102.23 / 14.84 keyless); FRED: no-key fail-fast (no wasted API
+  attempt), 4s keyless CSV timeout, 10-min NEGATIVE cache tombstones,
+  gold_vs_real parallelized — dashboard warm 0.54–0.65s (was ~17s),
+  cold bounded ~4.9s; screener sp500 parse tolerant to the LIVE Parsoid
+  markup (ticker = anchor TEXT; validated against the real page: 503
+  symbols, real fixture committed) + cmd_screen fail-closed (403
+  bot-wall renders clean {ok:false}, zero traceback); fetch_daily_bars:
+  bounded retry (2 retries), no-bars vs fetch-failed distinction via
+  fetch_daily_bars_ex, stale-serve, negative tombstones.
+- Piece 4 (D-008, D-010, D-014): ONE shared portable resolver
+  (web/src/lib/desk/resolve.ts) replaces 39 duplicated route-local
+  copies + portable journal data-root — /home/z/ hits in web/src+bin
+  now ZERO; R6 META-GUARD extended to scan web/src/** (all source
+  shapes, after the critic flagged .js/.jsx/.mjs + bin-subdir holes)
+  and bin/**; desk engine flips an all-personas-abstain run to
+  ok:false + reason "provider unavailable" (+ hint naming
+  GOLD_DESK_LLM_BASE_URL; UI surfaces it; CLI exits 1 — proven
+  end-to-end against a dead endpoint); ignoreBuildErrors:false —
+  tsc --noEmit + next build green (one pruned type import fixed).
+- Piece 5 (D-011…D-013, D-015, D-017): demo counts DISTINCT ticket ids
+  (8) with the lifecycle-event count disclosed (24) + a live
+  PENDING_SEND snapshot line; eod market_time epoch → ISO-8601 UTC
+  (seconds and ms); README status table carries R3–R8 with real counts
+  (1,269 collected / 1,248 passing / 21 device skips · 45 routes · 5
+  pages) re-pinned after the critic caught 4-test drift; --font-sans
+  wired to Inter (the old value pointed at an undefined variable —
+  computed body font now Inter, verified live); "real-time-ish" hedge
+  replaced by honest "delayed (intraday)" badges; 390px overflow fixed
+  at the component (responsive polarity gauge, wrapping ProChart
+  toolbar) — measured 0 on /, /markets, /screener AND /chat.
+- Final E2E: matrix 1269 tests → 1248 passed / 21 skipped / 0 failed;
+  tsc --noEmit clean; next build green with the types gate live;
+  clean-room install.sh (skip-web for speed; the web-inclusive path
+  was proven in Piece 1) → doctor green, launcher substitution
+  verified.
+
+Per-piece critic verdicts (fresh context, blind vs the bar):
+  P1+P2 (BAR-INSTALL + BAR-HERMETIC): PICK OURS (carry-forward:
+    update self-corruption — fixed same round; alias-dodge — fixed).
+  P3 (BAR-INTEGRITY): PICK OURS (carry-forward: gold_vs_real honest
+    failure labels + stale docstring — fixed same round).
+  P4 (BAR-PORTABILITY): PICK OURS (carry-forward: META-GUARD scope —
+    widened same round).
+  P5 (BAR-POLISH): PICK OURS (carry-forward: README count re-pin +
+    launcher help staleness — fixed same round).
