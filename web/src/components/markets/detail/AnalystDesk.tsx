@@ -169,8 +169,15 @@ function AnalystDeskImpl({ symbol, autoRun = false }: { symbol: string; autoRun?
         .catch(() => null);
       if (r && r.ok) {
         setReport(r as DeskReport);
+      } else if (r && r.reason === "provider unavailable") {
+        // D-010 — the engine says the LLM provider is unreachable; say
+        // that (with the fix hint) instead of a generic "unavailable".
+        setError(
+          `provider unavailable — ${r.provider_hint ||
+            "set GOLD_DESK_LLM_BASE_URL to a reachable OpenAI-compatible endpoint"}`,
+        );
       } else {
-        setError((r && r.error) || "desk unavailable — try again");
+        setError((r && (r.error || r.reason)) || "desk unavailable — try again");
       }
     } finally {
       setRunning(false);

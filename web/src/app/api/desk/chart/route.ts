@@ -1,40 +1,11 @@
 import { NextResponse } from "next/server";
-import { execFile, execFileSync } from "child_process";
-import { existsSync } from "fs";
+import { execFile } from "child_process";
 import path from "path";
+import { resolveHarness, resolvePython } from "@/lib/desk/resolve";
 
 export const dynamic = "force-dynamic";
 
-function resolveHarness(): string {
-  const candidates = [
-    process.env.GOLD_DESK_ROOT,
-    path.resolve(process.cwd(), ".."),
-    "/home/z/my-project/download/gold_desk_v1",
-  ].filter(Boolean) as string[];
-  for (const c of candidates) {
-    if (existsSync(path.join(c, "src", "gold_desk", "cli.py"))) return c;
-  }
-  return candidates[candidates.length - 1];
-}
 
-function resolvePython(harness: string): { py: string; err: string | null } {
-  const candidates = [
-    process.env.GOLD_DESK_PYTHON,
-    "/home/z/.venv/bin/python3",
-    path.join(harness, ".venv", "bin", "python3"),
-    "python3",
-  ].filter(Boolean) as string[];
-  for (const c of candidates) {
-    if (c !== "python3" && !existsSync(c)) continue;
-    try {
-      execFileSync(c, ["-c", "import yaml"], { stdio: "ignore", timeout: 5_000 });
-      return { py: c, err: null };
-    } catch {
-      /* probe failed — try the next candidate */
-    }
-  }
-  return { py: "", err: "no python candidate has PyYAML installed (set GOLD_DESK_PYTHON or run: pip install pyyaml)" };
-}
 
 /**
  * GAUNTLET 7 Piece 1 — pro charting data plane.

@@ -1,24 +1,37 @@
 import { existsSync, promises as fs } from "fs";
 import path from "path";
 
-// Data root resolution (portable):
+// Data root resolution (portable — D-008, GAUNTLET 8; the old third
+// candidate was a sandbox-absolute path):
 //   1. GOLD_DESK_DATA env var
-//   2. ../data relative to the web app cwd (repo layout: web/ + harness data/)
-//   3. sandbox fallback
+//   2. ../data relative to the web app cwd (repo layout: web/ + data/)
+//   3. ./data relative to the server cwd
+//   4. walk UP from cwd (≤4 levels) looking for a data/events dir
 function resolveDataRoot(): string {
   const candidates = [
     process.env.GOLD_DESK_DATA,
     path.join(process.cwd(), "..", "data"),
-    "/home/z/my-project/download/gold_desk_v1/data",
+    path.join(process.cwd(), "data"),
   ].filter(Boolean) as string[];
-  for (const c of candidates) {
+  const probe = (c: string) => {
     try {
-      if (existsSync(path.join(c, "events"))) return c;
+      return existsSync(path.join(c, "events"));
     } catch {
-      /* next candidate */
+      return false;
     }
+  };
+  for (const c of candidates) {
+    if (probe(c)) return c;
   }
-  return candidates[candidates.length - 1];
+  let dir = process.cwd();
+  for (let i = 0; i < 4; i++) {
+    const c = path.join(dir, "data");
+    if (probe(c)) return c;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return candidates[0] as string;
 }
 
 export const DATA_ROOT = resolveDataRoot();

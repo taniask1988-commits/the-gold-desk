@@ -82,6 +82,33 @@ def test_no_hardcoded_machine_paths_in_tests():
         + "\n  ".join(offenders))
 
 
+def test_no_hardcoded_machine_paths_in_web_and_bin():
+    """GAUNTLET 8 META-GUARD (D-008) — the R6 guard covered test sources
+    only; the WEB layer shipped 79 sandbox-absolute paths across 39 API
+    routes. Extend the contract to everything the web deck and the
+    launcher ship: no /home/<user>/, /Users/ or C:\\ absolute host path
+    may appear in web/src/**/*.{ts,tsx} or bin/*. (Device-dependence in
+    the shipped layer breaks every install that is not the build box.)"""
+    offenders: list[str] = []
+    targets: list[Path] = []
+    targets += sorted((REPO / "web" / "src").rglob("*.ts"))
+    targets += sorted((REPO / "web" / "src").rglob("*.tsx"))
+    targets += sorted((REPO / "bin").glob("*"))
+    for p in targets:
+        if not p.is_file():
+            continue
+        text = p.read_text(encoding="utf-8", errors="replace")
+        for i, line in enumerate(text.splitlines(), 1):
+            if ("/home/" in line or "/Users/" in line
+                    or "C:\\" in line):
+                offenders.append(
+                    f"{p.relative_to(REPO)}:{i}: {line.strip()[:90]}")
+    assert not offenders, (
+        "hardcoded host paths in the shipped web/launcher sources "
+        "(D-008 — the deck breaks on every other machine):\n  "
+        + "\n  ".join(offenders))
+
+
 def test_sync_guards_skip_on_fresh_device(tmp_path):
     """THE FRESH-DEVICE CONTRACT — with both external deployment roots
     pointed at nonexistent paths (exactly what a fresh clone sees),
