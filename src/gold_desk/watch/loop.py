@@ -194,9 +194,8 @@ def telegram_configured(telegram) -> bool:
 def _watch_journal(data_root: Path):
     """Journal that PRESERVES the data root's existing constitution
     hash (the desk's own stamp when any validate/demo run happened
-    there); a fresh root gets the agent-sidecar marker hash (same
-    pattern as agent/journal_util — the journal format is identical,
-    only the provenance stamp differs)."""
+    there); a fresh root gets the REAL constitution content hash via
+    agent/journal_util (D-005 — never a provenance marker)."""
     from ..events import Journal
     hash_path = data_root / "hashes" / "constitution.sha256"
     if hash_path.exists():

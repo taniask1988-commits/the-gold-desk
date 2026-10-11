@@ -312,11 +312,19 @@ def gold_vs_real(data_root=None, lookback: int = 63) -> dict:
       1. FRED DFII10 (key or fredgraph keyless CSV)
       2. Treasury.gov daily real-yield-curve CSV — keyless, current year
     """
-    gold_bars = fetch_daily_bars("GC=F", "1y", data_root or "data")
+    from ..markets.board import fetch_daily_bars_ex
+    gold_x = fetch_daily_bars_ex("GC=F", "1y", data_root or "data")
+    gold_bars = (gold_x.get("bars") or []) if gold_x.get("ok") else []
     real = fetch_series("DFII10", data_root)
     fallback_note = None
     if not gold_bars:
-        return {"ok": False, "errors": ["no gold daily bars"]}
+        # D-009 honesty: distinguish "feed failed" from "no bars"
+        if gold_x.get("no_bars"):
+            return {"ok": False, "errors": ["no gold daily bars"]}
+        return {"ok": False, "errors": [
+            "gold daily bars fetch failed: "
+            f"{gold_x.get('error') or gold_x.get('stale_error') or 'unknown'}"
+            " (no cache to stale-serve)"]}
     if real.get("ok"):
         real_map = {r["date"]: r["value"] for r in real["observations"]}
         real_source = real.get("source", "fred")
