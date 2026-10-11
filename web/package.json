@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/",
-    "start": "NODE_ENV=production bun .next/standalone/server.js 2>&1 | tee server.log",
+    "start": "NODE_ENV=production sh -c 'if command -v bun >/dev/null 2>&1; then exec bun .next/standalone/server.js; else exec node .next/standalone/server.js; fi' 2>&1 | tee server.log",
     "lint": "eslint .",
     "db:push": "prisma db push --accept-data-loss",
     "db:generate": "prisma generate",

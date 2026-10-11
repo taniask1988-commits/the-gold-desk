@@ -147,9 +147,20 @@ fi
 # ---------------------------------------------------------------- 7. launcher
 say "Installing the gold-desk command…"
 mkdir -p "$BIN_DIR"
+# D-001 — the `g`-flag rewrites EVERY sentinel occurrence, including the
+# launcher's own "am I substituted?" check. bin/gold-desk guards against
+# that with a prefix-strip comparison (see the D-001 comment there); this
+# step substitutes, then mechanically verifies the result kept the right
+# root (the full render→doctor contract is pinned in
+# tests/test_launcher_portability.py).
 sed "s|__GOLD_DESK_ROOT__|$INSTALL_DIR|g" "$INSTALL_DIR/bin/gold-desk" > "$BIN_DIR/gold-desk"
 chmod +x "$BIN_DIR/gold-desk"
-ok "launcher at $BIN_DIR/gold-desk"
+if grep -qF "GOLD_DESK_ROOT=\"$INSTALL_DIR\"" "$BIN_DIR/gold-desk" \
+   && ! grep -qF 'GOLD_DESK_ROOT="__GOLD_DESK_ROOT__"' "$BIN_DIR/gold-desk"; then
+  ok "launcher at $BIN_DIR/gold-desk (substitution verified)"
+else
+  warn "launcher substitution could not be verified — run: gold-desk doctor"
+fi
 
 # ---------------------------------------------------------------- 8. PATH
 case ":$PATH:" in

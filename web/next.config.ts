@@ -34,8 +34,17 @@ function findWorkspaceRoot(): string {
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  // D-003 — Next 16 dev servers refuse to hydrate a page opened on a
+  // host outside this list (cross-origin /_next/* asset requests are
+  // blocked, the page renders but stays a dead shell). Cover every
+  // spelling a local launch can produce; the production standalone
+  // build the launcher serves by default is unaffected either way.
+  allowedDevOrigins: ["localhost", "127.0.0.1", "0.0.0.0"],
   typescript: {
-    ignoreBuildErrors: true,
+    // D-014 — build must FAIL on type errors (was `true`, which let
+    // broken types ship silently; `tsc --noEmit` + `next build` are
+    // now hard gates).
+    ignoreBuildErrors: false,
   },
   reactStrictMode: false,
   turbopack: {

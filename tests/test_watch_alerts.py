@@ -592,6 +592,10 @@ class TestWatchLoop:
 
 # ============================================================== daemon
 class TestDaemon:
+    # D-002 / BAR-HERMETIC — every daemon sweep is pinned to WED 15:00 UTC
+    # (GC=F's COMEX session is open there). No test may observe the wall
+    # clock: on a Sunday 03:00 UTC matrix run these sweeps would gate every
+    # session closed, fire nothing and fail. See TestHermeticity below.
     def test_two_ticks_max_ticks_exits_cleanly(self, tmp_path):
         rules = [AlertRule("gc-up", "GC=F", "pct_move",
                            {"threshold": 1.5, "window_bars": 1},
@@ -600,10 +604,11 @@ class TestDaemon:
         loop, _ = make_loop(tmp_path, rules,
                             {"GC=F": quote(2032.0, 2000.0)},
                             sleeper=sleeps.append)
-        fired = loop.run_daemon(interval_seconds=300, max_ticks=2)
+        fired = loop.run_daemon(interval_seconds=300, max_ticks=2, now=WED)
         assert loop.ticks == 2
         assert sleeps == [300.0]      # sleeps between ticks, not after
         assert len(fired) == 2        # cooldown 0 → both ticks fire
+        assert loop.last_sweep_at == "2026-01-07T15:00:00Z"  # frozen clock
 
     def test_daemon_cooldown_suppresses_second_tick(self, tmp_path):
         rules = [AlertRule("gc-up", "GC=F", "pct_move",
@@ -612,7 +617,7 @@ class TestDaemon:
         loop, _ = make_loop(tmp_path, rules,
                             {"GC=F": quote(2032.0, 2000.0)},
                             sleeper=lambda s: None)
-        fired = loop.run_daemon(interval_seconds=60, max_ticks=2)
+        fired = loop.run_daemon(interval_seconds=60, max_ticks=2, now=WED)
         assert loop.ticks == 2 and len(fired) == 1
 
     def test_daemon_keyboard_interrupt_clean_exit(self, tmp_path):
@@ -625,8 +630,117 @@ class TestDaemon:
         loop, _ = make_loop(tmp_path, rules,
                             {"GC=F": quote(2032.0, 2000.0)},
                             sleeper=sleeper)
-        fired = loop.run_daemon(interval_seconds=300)   # no max_ticks
+        fired = loop.run_daemon(interval_seconds=300, now=WED)  # no max_ticks
         assert loop.ticks == 1 and len(fired) == 1      # exited after 1st
+
+
+# ======================================================== hermeticity
+class TestHermeticity:
+    """D-002 META-GUARD — the watch matrix must never observe the wall
+    clock. BAR-HERMETIC: `pytest` at 03:00 UTC on a Sunday must pass
+    exactly like any other instant of the week."""
+
+    def test_meta_guard_no_raw_wall_clock_in_watch_tests(self):
+        """No test in this file may READ the real clock — every sweep is
+        pinned to an explicit datetime (WED/SAT/SUN3/SUN23). A call to
+        utc_now, datetime.now, time.time or date.today inside a TEST is
+        a hermeticity bug: the assertion's verdict would change with the
+        machine's wall clock and the installer's self-verification gate
+        (install.sh step 4) would flap by weekday."""
+        import re
+        src = Path(__file__).read_text(encoding="utf-8")
+        banned = [
+            r"\bdatetime\.now\(",
+            r"\bdatetime\.utcnow\(",
+            r"\btime\.time\(",
+            r"\bdate\.today\(",
+            r"\butc_now\(",
+        ]
+        offenders: list[str] = []
+        for i, line in enumerate(src.splitlines(), 1):
+            s = line.strip()
+            if not s or s.startswith("#") or s.startswith("*"):
+                continue
+            for pat in banned:
+                if re.search(pat, line):
+                    offenders.append(f"{i}: {s.strip()[:80]}")
+        assert not offenders, (
+            "watch tests read the wall clock (hermeticity violation):\n  "
+            + "\n  ".join(offenders))
+
+    def test_clock_is_injectable_everywhere(self):
+        """The sweep clock must be injectable at every entry point the
+        daemon and the status surface use (D-002 contract)."""
+        import inspect
+        from gold_desk.watch.loop import WatchLoop, watch_status
+        assert "now" in inspect.signature(WatchLoop.run_daemon).parameters
+        assert "now" in inspect.signature(WatchLoop.run_once).parameters
+        assert "now" in inspect.signature(watch_status).parameters
+
+    def test_injected_clock_beats_hostile_wall_clock(self, tmp_path,
+                                                     monkeypatch):
+        """Even with the loop's clock weaponized (utc_now raises), the
+        injected `now` drives everything: daemon sweeps, session gates,
+        cooldowns and the status surface never touch the wall clock."""
+        import gold_desk.watch.loop as loop_mod
+
+        def _boom():
+            raise AssertionError("wall clock observed (utc_now called)")
+
+        monkeypatch.setattr(loop_mod, "utc_now", _boom)
+        loop, _ = make_loop(
+            tmp_path,
+            [AlertRule("gc-up", "GC=F", "pct_move",
+                       {"threshold": 1.5, "window_bars": 1},
+                       cooldown_minutes=0)],
+            {"GC=F": quote(2032.0, 2000.0)})
+        fired = loop.run_daemon(interval_seconds=60, max_ticks=2, now=WED)
+        assert loop.ticks == 2 and len(fired) == 2
+        st = watch_status(tmp_path, now=WED)
+        assert st["sessions"]["GC=F"] is True
+        assert st["as_of"] == "2026-01-07T15:00:00Z"
+
+    def test_callable_clock_advances_cooldowns(self, tmp_path):
+        """`now` also accepts a per-tick clock callable — cooldowns must
+        respect the ADVANCED time, not the tick count."""
+        loop, _ = make_loop(
+            tmp_path,
+            [AlertRule("gc-up", "GC=F", "pct_move",
+                       {"threshold": 1.5, "window_bars": 1},
+                       cooldown_minutes=60)],
+            {"GC=F": quote(2032.0, 2000.0)},
+            sleeper=lambda s: None)
+        times = [WED, WED + timedelta(minutes=30),
+                 WED + timedelta(minutes=61)]
+        state = {"i": -1}
+
+        def fake_clock():
+            state["i"] += 1
+            return times[min(state["i"], len(times) - 1)]
+
+        fired = loop.run_daemon(interval_seconds=60, max_ticks=3,
+                                now=fake_clock)
+        # t0 fires; t0+30m within the 60m cooldown → suppressed;
+        # t0+61m past the boundary → re-fires
+        assert loop.ticks == 3 and len(fired) == 2
+        assert loop.last_sweep_at == "2026-01-07T16:01:00Z"
+
+    def test_sunday_0300_sweep_is_a_clean_no_fire(self, tmp_path):
+        """BAR-HERMETIC scenario verbatim: a sweep at Sunday 03:00 UTC.
+        COMEX is closed → nothing polled, nothing fired, nothing
+        crashed, state stamped cleanly (the old matrix failed exactly
+        here because run_daemon read the wall clock)."""
+        loop, fetcher = make_loop(
+            tmp_path,
+            [AlertRule("gc-up", "GC=F", "pct_move",
+                       {"threshold": 1.5, "window_bars": 1})],
+            {"GC=F": quote(2032.0, 2000.0)})
+        fired = loop.run_once(now=SUN3)
+        assert fired == []
+        assert loop.ticks == 1 and loop.last_error is None
+        assert loop.last_sweep_at == "2026-01-11T03:00:00Z"
+        # the gate never polled the closed COMEX tape
+        assert all("GC=F" not in c for c in fetcher.calls)
 
 
 # ================================================================ store
@@ -718,7 +832,7 @@ class TestDefaultsAndStatus:
         loop, _ = make_loop(tmp_path, rules,
                             {"GC=F": quote(2032.0, 2000.0)})
         loop.run_once(now=WED)
-        st = watch_status(tmp_path)
+        st = watch_status(tmp_path, now=WED)   # D-002: frozen clock
         assert st["running"] is True
         assert st["last_sweep"] == "2026-01-07T15:00:00Z"
         assert st["next_sweep"] == "2026-01-07T15:05:00Z"  # +300s default

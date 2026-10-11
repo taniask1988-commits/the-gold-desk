@@ -20,10 +20,21 @@
 set -euo pipefail
 
 GOLD_DESK_ROOT="__GOLD_DESK_ROOT__"   # replaced at install time
-if [ "$GOLD_DESK_ROOT" = "__GOLD_DESK_ROOT__" ]; then
-  # Running from a source clone (not installer-substituted): derive the
-  # root from this script's own location — R6 device-portability
-  # discipline (a launcher must not depend on which machine installed it).
+# D-001 — the substitution check must NOT compare against the same sentinel
+# the installer's sed replaces. install.sh runs sed with the `g` flag, so a
+# comparison literal equal to the assignment sentinel gets substituted too:
+# [ "$GOLD_DESK_ROOT" = "<installdir>" ] then self-satisfies on every
+# installed machine, the launcher re-derives the root from its own location
+# (~/.local/bin → ~/.local) and doctor/venv resolution breaks everywhere.
+# The prefix-strip pattern below is a STRICT PREFIX of the sentinel (no
+# trailing "__"), so sed cannot rewrite it: on a substituted launcher the
+# strip is a no-op (equal → keep the install dir); on a source clone the
+# sentinel still carries the prefix (unequal → derive from script location).
+if [ "${GOLD_DESK_ROOT#__GOLD_DESK_ROOT}" != "$GOLD_DESK_ROOT" ]; then
+  # Unsubstituted sentinel → running from a source clone (not
+  # installer-substituted): derive the root from this script's own
+  # location — R6 device-portability discipline (a launcher must not
+  # depend on which machine installed it).
   GOLD_DESK_ROOT="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/.." && pwd)"
 fi
 VENV_PY="$GOLD_DESK_ROOT/.venv/bin/python"
@@ -93,9 +104,10 @@ launch_web() {
     printf "  ${GOLD}!${OFF}      the repo's next.config.ts already pins turbopack.root as a safety net\n"
   fi
 
-  local PM PMRUN
-  if command -v bun >/dev/null 2>&1; then PM="bun"; PMRUN="bun run dev";
-  elif command -v npm >/dev/null 2>&1; then PM="npm"; PMRUN="npm run dev";
+  local PM
+  if command -v bun >/dev/null 2>&1; then PM="bun";
+  elif command -v npm >/dev/null 2>&1; then PM="npm";
+  elif command -v node >/dev/null 2>&1; then PM="node";
   else
     err "Node.js or bun is required for the web deck."
     say "Install Node from https://nodejs.org — or use the TUI instead:"
@@ -103,7 +115,7 @@ launch_web() {
     exit 1
   fi
 
-  if [ ! -d node_modules ]; then
+  if [ "$PM" != "node" ] && [ ! -d node_modules ]; then
     say "Installing web deck dependencies ($PM)…"
     if [ "$PM" = "bun" ]; then bun install >/dev/null 2>&1 || { err "bun install failed"; exit 1; }
     else npm install --no-fund --no-audit >/dev/null 2>&1 || { err "npm install failed"; exit 1; }
@@ -111,6 +123,40 @@ launch_web() {
   fi
 
   local P; P="$(find_port)"
+
+  # D-003 — serve the PRODUCTION standalone build by default, not
+  # `next dev`. Dev mode recompiles on demand (slow first paint) and
+  # in Next 16 refuses to hydrate when the page is opened on any host
+  # outside allowedDevOrigins (next.config.ts covers localhost,
+  # 127.0.0.1, 0.0.0.0); the standalone build has neither problem and
+  # is what `npm start` serves. Escape hatch: GOLD_DESK_DEV=1.
+  local STANDALONE="web/.next/standalone/server.js"
+  if [ "${GOLD_DESK_DEV:-0}" != "1" ]; then
+    if [ ! -f "$GOLD_DESK_ROOT/$STANDALONE" ]; then
+      say "Building the production deck (first run — one-time)…"
+      if [ "$PM" = "bun" ]; then bun run build >/dev/null 2>&1 || true
+      elif [ "$PM" = "npm" ]; then npm run build >/dev/null 2>&1 || true
+      fi
+    fi
+    if [ -f "$GOLD_DESK_ROOT/$STANDALONE" ]; then
+      printf "\n${GOLD}${BOLD}  G O L D   D E S K   C O M M A N D${OFF}\n"
+      printf "  ${DIM}frosted-glass telemetry over the journaled desk${OFF}\n\n"
+      printf "  URL      : ${BOLD}http://localhost:$P${OFF}\n"
+      printf "  Journal  : %s\n" "$DATA_DIR"
+      printf "  Mode     : production (standalone) — GOLD_DESK_DEV=1 for dev\n"
+      printf "  Stop     : Ctrl+C\n\n"
+      (
+        for _ in $(seq 1 60); do
+          if ! port_free "$P"; then open_browser "http://localhost:$P"; exit 0; fi
+          sleep 1
+        done
+      ) &
+      export GOLD_DESK_DATA="$DATA_DIR"
+      export PORT="$P" HOSTNAME="127.0.0.1" NODE_ENV=production
+      exec node "$GOLD_DESK_ROOT/$STANDALONE"
+    fi
+    warn "production build unavailable — falling back to dev mode"
+  fi
 
   printf "\n${GOLD}${BOLD}  G O L D   D E S K   C O M M A N D${OFF}\n"
   printf "  ${DIM}frosted-glass telemetry over the journaled desk${OFF}\n\n"
@@ -127,7 +173,10 @@ launch_web() {
   ) &
 
   export GOLD_DESK_DATA="$DATA_DIR"
-  exec $PMRUN -- -p "$P"
+  if [ "$PM" = "bun" ]; then exec bun run dev -- -p "$P";
+  elif [ "$PM" = "npm" ]; then exec npm run dev -- -p "$P";
+  else exec node node_modules/next/dist/bin/next dev -p "$P";
+  fi
 }
 
 # ------------------------------------------------------------------ tui

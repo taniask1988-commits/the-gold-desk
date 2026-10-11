@@ -31,9 +31,15 @@ watch).
     US BOND/ICE/CBOE NY day session: Mon-Fri 14:00-21:00 UTC
     unknown         Mon-Fri 00:00-24:00 (conservative default)
 
-`run_daemon(interval_seconds, max_ticks)` — stdlib scheduler: sleep
+`run_daemon(interval_seconds, max_ticks, now)` — stdlib scheduler: sleep
 between sweeps (injectable sleeper for tests), KeyboardInterrupt exits
-cleanly, max_ticks bounds the loop for tests/dry-runs.
+cleanly, max_ticks bounds the loop for tests/dry-runs. D-002 (GAUNTLET
+8): the sweep clock is injectable too — `now` accepts a frozen
+`datetime` (every tick sweeps at that instant) or a zero-arg callable
+(per-tick clock, e.g. an advancing fake). When it is None the daemon
+reads the wall clock via utc_now(), as before. A daemon whose sweeps
+depend on which weekday the machine booted on is not testable — the
+frozen matrix (BAR-HERMETIC) runs at 03:00 UTC on Sundays.
 """
 from __future__ import annotations
 
@@ -442,15 +448,30 @@ class WatchLoop:
         self.store.save_last_fired(self.engine.to_dict())
 
     # ----------------------------------------------------------- daemon
+    @staticmethod
+    def _resolve_now(now) -> datetime:
+        """D-002 — injectable sweep clock. None → wall clock (utc_now); a
+        datetime → frozen instant; a zero-arg callable → per-tick clock.
+        Everything downstream (session gates, cooldowns, stamps) reads
+        only what this returns, so a test can pin the whole daemon to a
+        Wednesday afternoon or a Sunday 03:00 UTC."""
+        if now is None:
+            return utc_now()
+        return now() if callable(now) else now
+
     def run_daemon(self, interval_seconds: int = 300,
-                   max_ticks: int | None = None) -> list[AlertEvent]:
+                   max_ticks: int | None = None,
+                   now: datetime | Callable[[], datetime] | None = None
+                   ) -> list[AlertEvent]:
         """Sweep forever (or until max_ticks / KeyboardInterrupt).
-        Returns every event that fired across all ticks."""
+        Returns every event that fired across all ticks. `now` is the
+        injectable sweep clock (see _resolve_now) — tests freeze it so
+        the matrix never depends on the wall clock (D-002/BAR-HERMETIC)."""
         self.interval_seconds = int(interval_seconds)
         all_fired: list[AlertEvent] = []
         try:
             while True:
-                all_fired.extend(self.run_once())
+                all_fired.extend(self.run_once(now=self._resolve_now(now)))
                 if max_ticks is not None and self.ticks >= max_ticks:
                     break
                 self.sleeper(float(interval_seconds))
@@ -460,15 +481,18 @@ class WatchLoop:
 
 
 # ---------------------------------------------------------------- status
-def watch_status(data_root: str | Path = "data") -> dict:
+def watch_status(data_root: str | Path = "data",
+                 now: datetime | None = None) -> dict:
     """Loop status for GET /api/desk/watch/status: last/next sweep,
     rules count, per-instrument session open/closed. Reads the state
     the loop persists (a stopped loop reports its last sweep — the
-    field names make that honest)."""
+    field names make that honest). `now` is injectable (D-002): the
+    session map and as_of default to the wall clock, tests freeze them
+    so the session columns never depend on which day the matrix runs."""
     store = AlertStore(data_root)
     rules = store.load_rules() or default_rules()
     state = store.load_state()
-    now = utc_now()
+    now = now or utc_now()
     sessions = session_map(now)
     running = bool(state.get("last_sweep"))
     return {
