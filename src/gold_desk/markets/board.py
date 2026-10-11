@@ -223,7 +223,37 @@ def fetch_daily_bars(symbol: str, range_: str = "1y",
     keyless path for daily-resolution bars; cached under
     <data_root>/cache/daily_<SYMBOL>.json with a 30-min TTL (the
     brief's mandated TTL).
-    """
+
+    D-009 (GAUNTLET 8): bounded retry (2 retries with a short backoff)
+    rides out transient feed failures, a short-lived negative tombstone
+    stops a dead endpoint being re-polled on every call, and a stale
+    cache still serves (upstream payloads carry source + timestamp —
+    the UI labels them). "Fetch failed" vs "no bars" is distinguishable
+    via fetch_daily_bars_ex, which returns the full payload."""
+    ex_ = fetch_daily_bars_ex(symbol, range_, data_root)
+    if ex_.get("ok") and ex_.get("bars"):
+        return ex_["bars"]
+    return []
+
+
+# D-009 — bounded retry: 1 live attempt + 2 retries, linear backoff.
+DAILY_BAR_ATTEMPTS = 3
+DAILY_BAR_RETRY_PAUSE_S = 0.5
+DAILY_BAR_NEG_TTL_S = 120  # tombstone: a dead endpoint is re-polled at
+                           # most once every 2 minutes, not every call
+
+
+class _NoBarsError(RuntimeError):
+    """The chart endpoint answered but carried no usable bars —
+    deterministic (bad symbol / empty range), never retried."""
+
+
+def fetch_daily_bars_ex(symbol: str, range_: str = "1y",
+                        data_root: str | Path = "data") -> dict:
+    """fetch_daily_bars with the full verdict payload: {ok, bars,
+    stale_error, negative, error, cache_hit} — so a caller can
+    distinguish "the feed failed" (ok False / stale_error / negative)
+    from "the feed answered but returned no bars" (ok True, bars [])."""
     def _build() -> dict:
         r = _fetch_chart(symbol, range_, "1d")
         ts_arr = r.get("timestamp") or []
@@ -250,15 +280,32 @@ def fetch_daily_bars(symbol: str, range_: str = "1y",
                          "v": float(v) if isinstance(v, (int, float))
                          else 0.0})
         if not bars:
-            raise RuntimeError(f"no daily bars for {symbol}")
+            # "feed answered, zero bars" — a distinct, honest failure
+            raise _NoBarsError(f"no daily bars for {symbol}")
         return {"ok": True, "symbol": symbol, "range": range_,
                 "interval": "1d", "bars": bars}
 
+    def _build_with_retry() -> dict:
+        last: Exception = RuntimeError("unreachable")
+        for attempt in range(DAILY_BAR_ATTEMPTS):
+            try:
+                return _build()
+            except _NoBarsError:
+                # deterministic: the feed ANSWERED and there are simply
+                # no bars — a valid empty answer, cached like success
+                # and visibly distinct from a transport failure
+                return {"ok": True, "symbol": symbol, "range": range_,
+                        "interval": "1d", "bars": [], "no_bars": True}
+            except Exception as exc:  # noqa: BLE001 — transient retry
+                last = exc
+                if attempt < DAILY_BAR_ATTEMPTS - 1:
+                    time.sleep(DAILY_BAR_RETRY_PAUSE_S * (attempt + 1))
+        raise last
+
     cached = _cached_fetch(data_root, f"daily_{symbol.upper()}", 1800,
-                            _build)
-    if not cached.get("ok"):
-        return []
-    return cached.get("bars") or []
+                           _build_with_retry, neg_ttl=DAILY_BAR_NEG_TTL_S)
+    cached.setdefault("symbol", symbol)
+    return cached
 
 
 def _row_from_chart(entry: dict, r: dict) -> dict:
@@ -341,9 +388,16 @@ def _cache_path(data_root: str | Path, name: str) -> Path:
 
 
 def _cached_fetch(data_root: str | Path, name: str, ttl: int,
-                  fetch) -> dict:
+                  fetch, neg_ttl: int | None = None) -> dict:
     """Cache-through fetch (feeds.py pattern) under <data_root>/cache/:
-    fresh within TTL → fetch → stale-serve on error."""
+    fresh within TTL → fetch → stale-serve on error.
+
+    D-009 (GAUNTLET 8): `neg_ttl` opts into NEGATIVE caching — a failed
+    fetch with nothing stale to serve writes a short-lived {ok: False}
+    tombstone so a dead endpoint is not re-polled on every request
+    (bounded retry inside `fetch` handles the transient case; the
+    tombstone handles the persistent one). Default None keeps the
+    legacy behavior for every existing caller."""
     path = _cache_path(data_root, name)
     cached: dict = {}
     if path.exists():
@@ -351,9 +405,16 @@ def _cached_fetch(data_root: str | Path, name: str, ttl: int,
             cached = json.loads(path.read_text())
         except json.JSONDecodeError:
             cached = {}
-    if cached.get("fetched_at") and time.time() - cached["fetched_at"] < ttl:
-        cached["cache_hit"] = True
-        return cached
+    if cached.get("fetched_at"):
+        age = time.time() - cached["fetched_at"]
+        if cached.get("negative"):
+            if age < (neg_ttl if neg_ttl is not None else ttl):
+                out = dict(cached)
+                out["cache_hit"] = True
+                return out
+        elif age < ttl:
+            cached["cache_hit"] = True
+            return cached
     try:
         fresh = fetch()
         fresh["fetched_at"] = time.time()
@@ -361,10 +422,19 @@ def _cached_fetch(data_root: str | Path, name: str, ttl: int,
         path.write_text(json.dumps(fresh))
         return fresh
     except Exception as e:  # noqa: BLE001 — display telemetry fails soft
-        if cached:
+        if cached and not cached.get("negative"):
             cached["cache_hit"] = True
             cached["stale_error"] = f"{type(e).__name__}"
             return cached
+        if neg_ttl is not None:
+            tomb = {"ok": False, "negative": True,
+                    "error": f"{type(e).__name__}: {e}",
+                    "fetched_at": time.time(), "cache_hit": False}
+            try:
+                path.write_text(json.dumps(tomb))
+            except OSError:
+                pass
+            return tomb
         return {"ok": False, "error": f"{type(e).__name__}: {e}",
                 "fetched_at": time.time(), "cache_hit": False}
 

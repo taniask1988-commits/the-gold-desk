@@ -561,17 +561,30 @@ def cmd_curve_history(args) -> int:
 
 
 def cmd_screen(args) -> int:
-    """GAUNTLET 7 Piece 3 — technical + fundamental screener."""
+    """GAUNTLET 7 Piece 3 — technical + fundamental screener.
+
+    D-004 (GAUNTLET 8): fail-CLOSED at the command boundary — ANY
+    unexpected exception (dead network, alien Wikipedia markup, a bug)
+    exits with a clean {ok: false, errors: [...]} payload / one-line
+    message and exit code 1. A raw traceback must never reach the web
+    client or the terminal."""
     from .markets.screener import screen
     try:
         out = screen(args.where, args.universe, args.data_root,
                      with_fundamentals=not args.technical_only,
                      limit=args.limit)
-    except ValueError as exc:
+    except ValueError as exc:      # bad filter DSL — clean, expected
         if args.json:
             print(json.dumps({"ok": False, "errors": [str(exc)]}))
         else:
             print("screen failed:", exc)
+        return 1
+    except Exception as exc:       # noqa: BLE001 — fail closed, stay clean
+        msg = f"{type(exc).__name__}: {exc}"
+        if args.json:
+            print(json.dumps({"ok": False, "errors": [msg]}))
+        else:
+            print("screen failed:", msg)
         return 1
     if args.json:
         print(json.dumps(out, sort_keys=True))

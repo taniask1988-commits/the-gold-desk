@@ -28,6 +28,13 @@ FRED_API_URL = ("https://api.stlouisfed.org/fred/series/observations"
                 "?series_id={sid}&api_key={key}&file_type=json")
 FRED_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}"
 SERIES_TTL_S = 3600
+# D-007 (GAUNTLET 8): failures are NEGATIVELY cached for 10 minutes —
+# a bot-walled fredgraph.csv or a missing key must not cost every
+# dashboard call its full network timeout; the tombstone makes every
+# retry within the window instant. Keyless CSV attempts get a tight
+# timeout so even a COLD call stays bounded (~4s worst case).
+NEG_TTL_S = 600
+FRED_CSV_TIMEOUT_S = 4.0
 
 # the dashboard catalog (all keyless-downloadable, all daily/monthly)
 SERIES_CATALOG = {
@@ -48,7 +55,15 @@ def _cache_path(data_root, name: str) -> Path:
     return d / "cache" / name
 
 
-def _cached_fetch(data_root, name: str, ttl: int, fetch) -> dict:
+def _cached_fetch(data_root, name: str, ttl: int, fetch,
+                  neg_ttl: int | None = None) -> dict:
+    """Cache-through fetch under <data_root>/cache/: fresh within TTL →
+    fetch → stale-serve on error.
+
+    D-007 (GAUNTLET 8): `neg_ttl` opts into NEGATIVE caching — a failed
+    fetch with nothing stale to serve writes a short-lived {ok: False}
+    tombstone so a persistently dead endpoint is not re-timed-out on
+    every call. Default None keeps the legacy behavior."""
     path = _cache_path(data_root, name)
     cached: dict = {}
     if path.exists():
@@ -56,9 +71,16 @@ def _cached_fetch(data_root, name: str, ttl: int, fetch) -> dict:
             cached = json.loads(path.read_text())
         except (json.JSONDecodeError, OSError):
             cached = {}
-    if cached.get("fetched_at") and time.time() - cached["fetched_at"] < ttl:
-        cached["cached"] = True
-        return cached
+    if cached.get("fetched_at"):
+        age = time.time() - cached["fetched_at"]
+        if cached.get("negative"):
+            if age < (neg_ttl if neg_ttl is not None else ttl):
+                out = dict(cached)
+                out["cached"] = True
+                return out
+        elif age < ttl:
+            cached["cached"] = True
+            return cached
     try:
         fresh = fetch()
         fresh["fetched_at"] = time.time()
@@ -66,12 +88,21 @@ def _cached_fetch(data_root, name: str, ttl: int, fetch) -> dict:
         path.write_text(json.dumps(fresh))
         return fresh
     except Exception as exc:  # noqa: BLE001 — stale-serve
-        if cached:
+        if cached and not cached.get("negative"):
             out = dict(cached)
             out["cached"] = False
             out["stale_error"] = True
             out["stale_reason"] = f"{type(exc).__name__}: {exc}"
             return out
+        if neg_ttl is not None:
+            tomb = {"ok": False, "negative": True,
+                    "errors": [f"{type(exc).__name__}: {exc}"],
+                    "fetched_at": time.time(), "stale_error": False}
+            try:
+                path.write_text(json.dumps(tomb))
+            except OSError:
+                pass
+            return tomb
         return {"ok": False, "errors": [f"{type(exc).__name__}: {exc}"],
                 "fetched_at": time.time(), "stale_error": False}
 
@@ -126,7 +157,13 @@ def parse_fred_json(payload: dict) -> list[dict]:
 
 # -------------------------------------------------------------- fetch
 def fetch_series(series_id: str, data_root=None) -> dict:
-    """One FRED series. FRED_API_KEY path first, keyless CSV fallback."""
+    """One FRED series. FRED_API_KEY path first, keyless CSV fallback.
+
+    D-007 (GAUNTLET 8): without a key the API attempt is SKIPPED, not
+    tried-and-raised (fail-fast), the keyless CSV gets a tight timeout,
+    and failures are negatively cached (NEG_TTL_S) so a bot-walled
+    CSV endpoint costs one bounded attempt per window instead of one
+    full timeout per dashboard call."""
     sid = str(series_id or "").strip().upper()
     if not sid or not sid.replace("_", "").isalnum():
         return {"ok": False, "series_id": sid,
@@ -145,16 +182,26 @@ def fetch_series(series_id: str, data_root=None) -> dict:
 
     def _via_csv() -> dict:
         text = _http_get(FRED_CSV_URL.format(
-            sid=urllib.parse.quote(sid)))
+            sid=urllib.parse.quote(sid)), timeout=FRED_CSV_TIMEOUT_S)
         obs = parse_fred_csv(text)
         if not obs:
             raise RuntimeError("fred csv returned no usable rows")
         return {"ok": True, "series_id": sid, "source": "fred_csv",
                 "observations": obs}
 
+    def _attempts() -> list:
+        # D-007 fail-fast: no key → no wasted API attempt. The keyless
+        # CSV path stays (it is the sanctioned keyless fallback).
+        att = []
+        if os.environ.get("FRED_API_KEY", "").strip():
+            att.append(_via_api)
+        att.append(_via_csv)
+        return att
+
     out = _cached_fetch(data_root or "data", f"fred_{sid}.json",
                         SERIES_TTL_S,
-                        lambda: _try_in_order([_via_api, _via_csv]))
+                        lambda: _try_in_order(_attempts()),
+                        neg_ttl=NEG_TTL_S)
     out.setdefault("series_id", sid)
     out.setdefault("label", SERIES_CATALOG.get(sid, sid))
     return out
@@ -334,8 +381,11 @@ def macro_dashboard(data_root=None) -> dict:
     wanted = ("DGS10", "DFII10", "T10YIE", "FEDFUNDS", "CPIAUCSL",
               "VIXCLS", "DTWEXBGS")
     series_out: dict[str, dict] = {}
-    with ex.ThreadPoolExecutor(max_workers=7) as pool:
+    with ex.ThreadPoolExecutor(max_workers=8) as pool:
         futs = {pool.submit(fetch_series, sid, dr): sid for sid in wanted}
+        # D-007 — gold_vs_real runs CONCURRENTLY with the series fetches
+        # (it used to serialize after them, doubling the cold-call cost).
+        gvr_fut = pool.submit(gold_vs_real, dr)
         for fut in futs:
             sid = futs[fut]
             try:
@@ -343,20 +393,31 @@ def macro_dashboard(data_root=None) -> dict:
             except Exception as exc:  # noqa: BLE001 — fail-soft per series
                 series_out[sid] = {"ok": False,
                                    "errors": [f"{type(exc).__name__}: {exc}"]}
+        try:
+            gvr = gvr_fut.result(timeout=60)
+        except Exception as exc:  # noqa: BLE001 — fail-soft
+            gvr = {"ok": False,
+                   "errors": [f"gold_vs_real: {type(exc).__name__}: {exc}"]}
 
     # live DXY/VIX from the existing keyless driver feeds (verified live)
     live = {}
     try:
         from ..data.driver_feeds import fetch_driver_values
         dv = fetch_driver_values(dr)
-        for k in ("dxy", "vix"):
-            v = (dv or {}).get("drivers", {}).get(k) or (dv or {}).get(k)
+        # D-006 (GAUNTLET 8) — the driver payload is {"live": {"D2": …,
+        # "D10": …}} keyed by driver ID (D2 = DXY via DX-Y.NYB, D10 = VIX
+        # via ^VIX). The old lookup probed dv["drivers"]["dxy"]/["vix"] —
+        # keys that do not exist — so live_drivers was always empty and
+        # the UI showed no dollar/VIX row.
+        live_map = (dv or {}).get("live") or {}
+        for k, did in (("dxy", "D2"), ("vix", "D10")):
+            v = live_map.get(did)
             if v:
                 live[k] = v
+        if not live and dv and not dv.get("ok"):
+            live["error"] = "driver feeds unavailable"
     except Exception as exc:  # noqa: BLE001 — fail-soft
         live["error"] = f"{type(exc).__name__}"
-
-    gvr = gold_vs_real(dr)
     cpi = series_out.get("CPIAUCSL") or {}
     cpi_series = cpi_yoy(cpi.get("observations") or []) \
         if cpi.get("ok") else []

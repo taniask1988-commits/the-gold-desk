@@ -172,8 +172,28 @@ def evaluate_where(where: str, fields: dict) -> tuple[bool, set[str]]:
 
 
 # ------------------------------------------------------------ universe
+# D-004 (GAUNTLET 8): Wikipedia's S&P 500 table markup changed out from
+# under the original regex (the ticker moved from the anchor's title
+# attribute to the anchor TEXT), so the old parse yielded ~0 symbols and
+# cmd_screen crashed with a raw traceback. The parse is now TOLERANT:
+# several markup shapes are tried, their hits merged, and the ≥400
+# sanity gate stays (fail loudly-but-cleanly on a genuinely alien page).
+_SP500_PATTERNS = [
+    # current Parsoid table (validated against the live page, Oct 2026):
+    # the first column cell is a SINGLE anchor whose TEXT is the ticker
+    # (<td id=…><a rel=… href=exchange … data-mw=…>MMM</a></td>) —
+    # attributes tolerated on both td and a
+    r"<td[^>]*>\s*<a[^>]*>([A-Z][A-Z0-9.\-]{0,14})</a>\s*</td>",
+    # legacy table: ticker lives in the anchor's title attribute
+    r"<td[^>]*><a[^>]*title=\"([A-Z.]+)\"[^>]*>.{0,40}?</a></td>",
+    # wikitable rows: first cell anywhere, link text all-caps
+    r"<tr[^>]*>\s*<td[^>]*>\s*<a[^>]*>([A-Z][A-Z0-9.\-]{0,14})</a>",
+]
+
+
 def _sp500_symbols_raw(data_root, min_count: int = 400) -> list[str]:
-    """S&P 500 constituents from Wikipedia (aggressively cached 7d)."""
+    """S&P 500 constituents from Wikipedia (aggressively cached 7d).
+    Tolerant multi-shape parse — see _SP500_PATTERNS (D-004)."""
     import json
     import re
     import time
@@ -184,7 +204,8 @@ def _sp500_symbols_raw(data_root, min_count: int = 400) -> list[str]:
     if cache.exists():
         try:
             blob = json.loads(cache.read_text())
-            if time.time() - blob.get("fetched_at", 0) < 7 * 86400:
+            if time.time() - blob.get("fetched_at", 0) < 7 * 86400 \
+                    and blob.get("symbols"):
                 return blob["symbols"]
         except (json.JSONDecodeError, OSError, KeyError):
             pass
@@ -193,11 +214,21 @@ def _sp500_symbols_raw(data_root, min_count: int = 400) -> list[str]:
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) gold-desk/1.0"})
     with urllib.request.urlopen(req, timeout=15) as resp:
         html = resp.read().decode("utf-8", "replace")
-    # first table row cells: ticker in the first column link
-    symbols = sorted(set(re.findall(
-        r"<td><a[^>]*title=\"([A-Z.]+)\"[^>]*>.{0,40}?</a></td>", html)))
+    symbols: set[str] = set()
+    for pat in _SP500_PATTERNS:
+        try:
+            hits = set(re.findall(pat, html))
+        except re.error:
+            continue
+        if len(hits) > len(symbols):
+            symbols = hits
+        if len(symbols) >= min_count:
+            break
     if len(symbols) < min_count:   # sanity: the real table has ~503 rows
-        raise RuntimeError(f"wikipedia parse yielded {len(symbols)} symbols")
+        raise RuntimeError(
+            f"wikipedia parse yielded {len(symbols)} symbols "
+            f"(needed {min_count}) — markup may have changed")
+    symbols = sorted(symbols)
     cache.write_text(json.dumps(
         {"fetched_at": time.time(), "symbols": symbols}))
     return symbols
