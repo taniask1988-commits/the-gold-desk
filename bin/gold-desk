@@ -257,7 +257,7 @@ $(printf "${GOLD}${BOLD}")  gold-desk$(printf "${OFF}") — the silent XAUUSD H1
   $(printf "${GOLD}")gold-desk$(printf "${OFF}")                    launch the web command deck
   $(printf "${GOLD}")gold-desk tui$(printf "${OFF}")                 launch the terminal UI
   $(printf "${GOLD}")gold-desk demo$(printf "${OFF}") [days] [seed]  regenerate the demo journal
-  $(printf "${GOLD}")gold-desk test$(printf "${OFF}")                run the test matrix (150 tests)
+  $(printf "${GOLD}")gold-desk test$(printf "${OFF}")                run the frozen test matrix (1,269 tests)
   $(printf "${GOLD}")gold-desk chat$(printf "${OFF}")              talk to The Desk expert (free models)
   $(printf "${GOLD}")gold-desk ask "…"$(printf "${OFF}")            research agent — desk + web tools, cited
   $(printf "${GOLD}")gold-desk research ASSET$(printf "${OFF}")     cited deep-research report (--depth N)

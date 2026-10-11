@@ -34,7 +34,7 @@ money is a property of a setup — after it survives the exam.
 | R8 | The critic's ledger: 17 audit defects (3 critical / 7 major / 7 minor) resolved | ✅ built |
 
 **Surface reality (verified on every install by `install.sh` step 4):**
-frozen matrix **1,244 passing** across **1,265 collected** tests (21
+frozen matrix **1,248 passing** across **1,269 collected** tests (21
 device-specific skips) · **45 API routes** · **5 pages**. The count is
 re-generated on every run — `gold-desk test` reports the truth, not this
 table.
@@ -75,7 +75,7 @@ the-gold-desk/
 ├── src/gold_desk/              # the deterministic desk (Python)
 ├── sim/  prompts/  config/     # Doc 1.5 exam, Doc 4 prompts, templates
 ├── tui/desk_tui.py             # terminal UI (pure stdlib curses)
-├── tests/                      # 1,265 tests = the §16 matrix + R1–R8 gauntlet suites
+├── tests/                      # 1,269 tests = the §16 matrix + R1–R8 gauntlet suites
 ├── web/                        # GOLD DESK COMMAND — frosted-glass web deck
 │   └── (Next.js 16 + TypeScript + Tailwind 4)
 └── docs/                       # market-driver research + verification screenshots
@@ -100,7 +100,7 @@ bun run dev          # http://localhost:3000
 | `gold-desk` | web command deck (auto port, opens browser) |
 | `gold-desk tui` | terminal UI |
 | `gold-desk demo [days] [seed]` | regenerate the demo journal |
-| `gold-desk test` | run the frozen test matrix (1,265 tests) |
+| `gold-desk test` | run the frozen test matrix (1,269 tests) |
 | `gold-desk zen` | sync free OpenCode Zen models |
 | `gold-desk doctor` | installation health check |
 | `gold-desk update` | pull latest + refresh launcher |
@@ -197,7 +197,7 @@ python -m gold_desk.cli validate          # what's BLOCKED and what to paste
 python -m gold_desk.cli demo --days 30    # synthetic end-to-end run
 python -m gold_desk.cli replay --date 2026-06-10
 python -m gold_desk.cli eod --date 2026-06-10
-python -m pytest                           # 1,265 tests, ~2 min
+python -m pytest                           # 1,269 tests, ~2 min
 ```
 
 (If you didn't install the package, prefix commands with
@@ -252,7 +252,7 @@ src/gold_desk/
   replay.py eod.py demo.py cli.py
 sim/contract.md runner.py report.py   # Doc 1.5 — the exam, offline, INCOMPLETE
 prompts/                       # empty until Phase 2 (law)
-tests/                         # 1,265 tests = §16 matrix + R1–R8 gauntlet suites
+tests/                         # 1,269 tests = §16 matrix + R1–R8 gauntlet suites
 data/                          # runtime journal (gitignored)
 ```
 
