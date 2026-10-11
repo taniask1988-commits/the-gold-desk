@@ -179,8 +179,8 @@ def test_gold_vs_real_join_and_correlation(monkeypatch, tmp_path):
     real = {"ok": True, "source": "fred_csv", "observations": [
         {"date": (base + _dt.timedelta(days=i)).strftime("%Y-%m-%d"),
          "value": 2.0 - i * 0.01} for i in range(30)]}    # yields down
-    monkeypatch.setattr(fred, "fetch_daily_bars",
-                        lambda s, r, dr: bars)
+    monkeypatch.setattr(fred, "fetch_daily_bars_ex",
+                        lambda s, r, dr: {"ok": True, "bars": bars})
     monkeypatch.setattr(fred, "fetch_series", lambda s, dr: real)
     out = fred.gold_vs_real(tmp_path, lookback=30)
     assert out["ok"] is True and out["n_days"] == 30
@@ -190,9 +190,10 @@ def test_gold_vs_real_join_and_correlation(monkeypatch, tmp_path):
 
 def test_gold_vs_real_fail_soft_when_no_real_yields(monkeypatch, tmp_path):
     """FRED dead AND the keyless Treasury fallback dead → honest errors."""
-    monkeypatch.setattr(fred, "fetch_daily_bars",
-                        lambda s, r, dr: [{"ts": 1700000000000,
-                                           "c": 4000.0}])
+    monkeypatch.setattr(
+        fred, "fetch_daily_bars_ex",
+        lambda s, r, dr: {"ok": True, "bars": [{"ts": 1700000000000,
+                                                "c": 4000.0}]})
     monkeypatch.setattr(fred, "fetch_series",
                         lambda s, dr: {"ok": False, "errors": ["fred down"]})
     import gold_desk.data.driver_feeds as df
@@ -250,7 +251,8 @@ def test_gold_vs_real_treasury_fallback_when_fred_dead(monkeypatch, tmp_path):
         bars.append({"ts": int(d.timestamp() * 1000),
                      "o": 4000, "h": 4010, "l": 3990,
                      "c": 4000.0 + i * 2.0, "v": 100})
-    monkeypatch.setattr(fred, "fetch_daily_bars", lambda s, r, dr: bars)
+    monkeypatch.setattr(fred, "fetch_daily_bars_ex",
+                        lambda s, r, dr: {"ok": True, "bars": bars})
     monkeypatch.setattr(fred, "fetch_series",
                         lambda s, dr: {"ok": False,
                                        "errors": ["fred unreachable"]})
@@ -272,8 +274,14 @@ def test_gold_vs_real_treasury_fallback_when_fred_dead(monkeypatch, tmp_path):
 
 def test_gold_vs_real_both_sources_dead_fail_soft(monkeypatch, tmp_path):
     import datetime as _dt
-    monkeypatch.setattr(fred, "fetch_daily_bars", lambda s, r, dr: [])
+    monkeypatch.setattr(
+        fred, "fetch_daily_bars_ex",
+        lambda s, r, dr: {"ok": False, "negative": True,
+                          "error": "RuntimeError: connection reset"})
     monkeypatch.setattr(fred, "fetch_series",
                         lambda s, dr: {"ok": False, "errors": ["x"]})
     out = fred.gold_vs_real(tmp_path)
     assert out["ok"] is False and out["errors"]
+    # D-009 honesty: a transport failure is NOT reported as "no bars"
+    assert "fetch failed" in out["errors"][0]
+    assert "connection reset" in out["errors"][0]

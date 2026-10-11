@@ -21,7 +21,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from ..markets.board import fetch_daily_bars
+from ..markets.board import fetch_daily_bars_ex
 
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) gold-desk/1.0"
 FRED_API_URL = ("https://api.stlouisfed.org/fred/series/observations"
@@ -312,7 +312,6 @@ def gold_vs_real(data_root=None, lookback: int = 63) -> dict:
       1. FRED DFII10 (key or fredgraph keyless CSV)
       2. Treasury.gov daily real-yield-curve CSV — keyless, current year
     """
-    from ..markets.board import fetch_daily_bars_ex
     gold_x = fetch_daily_bars_ex("GC=F", "1y", data_root or "data")
     gold_bars = (gold_x.get("bars") or []) if gold_x.get("ok") else []
     real = fetch_series("DFII10", data_root)
