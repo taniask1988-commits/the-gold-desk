@@ -170,7 +170,17 @@ case ":$PATH:" in
     [ -n "${ZSH_VERSION:-}" ] && RC_FILE="$HOME/.zshrc"
     MARKER="# Added by gold-desk installer"
     if ! grep -qs "$MARKER" "$RC_FILE" 2>/dev/null; then
-      printf '\n%s\nexport PATH="%s:\$PATH"\n' "$MARKER" "$BIN_DIR" >> "$RC_FILE"
+      printf '%s\n' "$MARKER" >> "$RC_FILE"
+      # Zero-Trust P0: $PATH must land in the rc file as a LITERAL variable
+      # reference, expanded by the user's login shell at runtime. The old
+      # printf format carried \$PATH, and printf wrote the backslash
+      # verbatim — inside double quotes \$ is a literal dollar, so the
+      # user's PATH became the un-evaluable string "<bin>:$PATH" and every
+      # system path (ls, grep, python3, git) vanished. The line below
+      # breaks out of single quotes ONLY around "$BIN_DIR"; '$PATH' stays
+      # single-quoted and is written to the rc file verbatim. Never
+      # backslash-escape it, never evaluate it at install time.
+      echo 'export PATH="'"$BIN_DIR"':$PATH"' >> "$RC_FILE"
     fi
     ok "PATH configured in $RC_FILE"
     ;;

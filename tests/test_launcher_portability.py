@@ -17,11 +17,15 @@ the contract end to end:
   4. the web deck is runnable without bun (D-016): `npm start` falls
      back to node, and the launcher prefers the standalone build;
   5. next.config.ts pins allowedDevOrigins + fail-on-type-errors
-     (D-003/D-014).
+     (D-003/D-014);
+  6. Zero-Trust P0: step 8 writes `export PATH="<bin>:$PATH"` into the
+     user's rc file with $PATH as a LITERAL reference — sourcing the rc
+     in a fresh shell must preserve every existing system path.
 """
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -162,6 +166,107 @@ def test_update_keeps_rendered_root(tmp_path):
     root = _doctor_root(launcher)
     assert root == str(clone), (
         f"after update doctor resolved {root!r}, expected {clone}")
+
+
+# ==================== Zero-Trust P0 — rc PATH injection (hotfix) =======
+
+_P0_HDR = "# ---------------------------------------------------------------- 8. PATH"
+_P0_TAIL = "# ---------------------------------------------------------------- done"
+
+
+def _step8_block() -> str:
+    """install.sh step 8, extracted VERBATIM — the tests execute the real
+    installer code, never a paraphrase of it."""
+    lines = (REPO / "install.sh").read_text().splitlines()
+    start = next(i for i, l in enumerate(lines) if l.startswith(_P0_HDR))
+    end = next(i for i, l in enumerate(lines)
+               if i > start and l.startswith(_P0_TAIL))
+    return "\n".join(lines[start:end])
+
+
+def _run_path_step(tmp_path: Path, bin_dir: Path, zsh: bool = False):
+    """Execute step 8 in a mock HOME under the installer's own strict
+    mode (set -euo pipefail); return (rc_path, rc_text)."""
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    script = "\n".join([
+        "set -euo pipefail",
+        f'HOME="{home}"',
+        f'BIN_DIR="{bin_dir}"',
+        'ok() { :; }',
+        'warn() { :; }',
+        _step8_block(),
+        "",
+    ])
+    env = dict(os.environ)
+    if zsh:
+        env["ZSH_VERSION"] = "5.9"
+    r = subprocess.run(["bash", "-c", script], capture_output=True,
+                       text=True, timeout=60, env=env)
+    assert r.returncode == 0, f"step 8 failed: {r.stderr[-800:]}"
+    rc = home / (".zshrc" if zsh else ".bashrc")
+    return rc, (rc.read_text() if rc.exists() else "")
+
+
+def test_rc_path_line_is_literal_dollar_path(tmp_path):
+    r"""Zero-Trust P0 — the rc file must receive
+        export PATH="<bin>:$PATH"
+    with $PATH as a LITERAL reference the user's login shell expands.
+    The old printf format carried \$PATH; printf wrote the backslash
+    verbatim and double quotes kept it a literal dollar, so the PATH
+    became the dead string "<bin>:$PATH" and ls/grep/python3/git all
+    vanished from every new terminal."""
+    bin_dir = tmp_path / "home" / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
+    rc, text = _run_path_step(tmp_path, bin_dir)
+    assert f'export PATH="{bin_dir}:$PATH"' in text, (
+        f"rc line missing the literal $PATH reference:\n{text}")
+    assert "\\$PATH" not in text, (
+        "escaped \\$PATH written — inside double quotes that is a "
+        "literal dollar and the login PATH stays bricked")
+    # the test process's real PATH contains /usr/bin — if the installer
+    # evaluated $PATH at install time, it would leak into the rc file
+    assert "/usr/bin" not in text, (
+        "install-time $PATH evaluation leaked a system path into the rc")
+
+
+def test_rc_source_preserves_system_paths(tmp_path):
+    """The kill shot: a fresh shell sourcing the rc must PREPEND the bin
+    dir and keep every existing system path. The pre-hotfix line produced
+    literally '<bin>:$PATH' with the sentinel system paths gone."""
+    bin_dir = tmp_path / "home" / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
+    rc, _ = _run_path_step(tmp_path, bin_dir)
+    r = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-c",
+         f'PATH=/sentinel/bin:/usr/bin; source "{rc}"; printf %s "$PATH"'],
+        capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr[-500:]
+    assert r.stdout == f"{bin_dir}:/sentinel/bin:/usr/bin", (
+        f"sourcing the rc yielded {r.stdout!r} — system paths not "
+        f"preserved (the P0 brick signature)")
+
+
+def test_rc_path_step_targets_zshrc_under_zsh(tmp_path):
+    """Under zsh the export must land in ~/.zshrc with the same literal
+    $PATH contract."""
+    bin_dir = tmp_path / "home" / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
+    rc, text = _run_path_step(tmp_path, bin_dir, zsh=True)
+    assert rc.name == ".zshrc" and rc.exists()
+    assert f'export PATH="{bin_dir}:$PATH"' in text, (
+        f"zshrc missing the literal $PATH line:\n{text}")
+
+
+def test_rc_path_step_is_idempotent(tmp_path):
+    """Re-running the installer must not stack duplicate export lines
+    (the marker dedup still holds after the hotfix)."""
+    bin_dir = tmp_path / "home" / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
+    _run_path_step(tmp_path, bin_dir)
+    _, text = _run_path_step(tmp_path, bin_dir)
+    assert text.count("export PATH=") == 1, (
+        "second install stacked a duplicate export line")
 
 
 # ============================== BAR-POLISH pins (GAUNTLET 8 Piece 5) ====
