@@ -125,3 +125,40 @@ def test_launcher_prefers_standalone_build():
     assert "GOLD_DESK_DEV" in src  # documented dev escape hatch
     # the standalone path must come BEFORE the dev path in launch_web
     assert src.index("standalone/server.js") < src.index("run dev")
+
+
+def test_update_sed_pattern_is_split_sentinel():
+    """GAUNTLET 8 exit-critic carry-forward (D-001 family): the launcher's
+    own update-time sed pattern must NOT contain the whole sentinel —
+    written whole, the installer's g-flag sed rewrites it into a no-op and
+    `gold-desk update` overwrites the launcher with the raw sentinel
+    (root falls back to ~/.local, doctor bricks). The source must carry it
+    SPLIT (adjacent string literals) so the file text never matches."""
+    src = LAUNCHER_SRC.read_text()
+    body = src.split("do_update() {", 1)[1].split("\n}", 1)[0]
+    assert "__GOLD_DESK_ROOT__" not in body, (
+        "do_update carries the whole sentinel — the installer's g-flag "
+        "sed rewrites it into a no-op and update bricks the install")
+    assert "GOLD_DESK_R''OOT__" in body  # the split literal
+
+
+def test_update_keeps_rendered_root(tmp_path):
+    """Behavioral: install → `gold-desk update` → the launcher must still
+    resolve the INSTALL root (not the sentinel fallback)."""
+    clone = tmp_path / "install"
+    subprocess.run(["git", "clone", "--quiet", "--no-hardlinks",
+                    str(REPO), str(clone)], check=True, timeout=180)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    launcher = _render(str(clone), bin_dir / "gold-desk")
+    r = subprocess.run(["bash", str(launcher), "update"],
+                       capture_output=True, text=True, timeout=300)
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out[-1500:]
+    assert "launcher refreshed" in out
+    after = launcher.read_text()
+    assert f'GOLD_DESK_ROOT="{clone}"' in after, (
+        "update lost the install root — sentinel came back unsubstituted")
+    root = _doctor_root(launcher)
+    assert root == str(clone), (
+        f"after update doctor resolved {root!r}, expected {clone}")

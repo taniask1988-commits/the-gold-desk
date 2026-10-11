@@ -649,11 +649,15 @@ class TestHermeticity:
         (install.sh step 4) would flap by weekday."""
         import re
         src = Path(__file__).read_text(encoding="utf-8")
+        # ANY-alias forms: `datetime.now(`, `import datetime as d; d.now(`,
+        # `getattr(datetime, "now")`-style dodges all reduce to `.now(` /
+        # `.utcnow(` / `.today(` on some object — ban the call shapes, not
+        # just the canonical spellings (GAUNTLET 8 exit-critic finding).
         banned = [
-            r"\bdatetime\.now\(",
-            r"\bdatetime\.utcnow\(",
+            r"\b[A-Za-z_]\w*\.now\(",
+            r"\b[A-Za-z_]\w*\.utcnow\(",
+            r"\b[A-Za-z_]\w*\.today\(",
             r"\btime\.time\(",
-            r"\bdate\.today\(",
             r"\butc_now\(",
         ]
         offenders: list[str] = []

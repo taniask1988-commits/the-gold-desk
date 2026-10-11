@@ -236,7 +236,14 @@ do_update() {
   local NEW; NEW="$(git -C "$GOLD_DESK_ROOT" rev-parse --short HEAD)"
   local SELF; SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
   if [ -f "$GOLD_DESK_ROOT/bin/gold-desk" ]; then
-    sed "s|__GOLD_DESK_ROOT__|$GOLD_DESK_ROOT|g" "$GOLD_DESK_ROOT/bin/gold-desk" > "$SELF"
+    # D-001-family (GAUNTLET 8 exit-critic): this sed pattern is written
+    # SPLIT so the installer's g-flag sed cannot rewrite it at install
+    # time. Written whole, the installed launcher would carry a no-op
+    # `s|<installdir>|$GOLD_DESK_ROOT|g` and `update` would overwrite
+    # itself with the raw sentinel — root falling back to ~/.local and
+    # doctor/venv resolution bricking on every installed machine.
+    local SENTINEL='__GOLD_DESK_R''OOT__'
+    sed "s|$SENTINEL|$GOLD_DESK_ROOT|g" "$GOLD_DESK_ROOT/bin/gold-desk" > "$SELF"
     chmod +x "$SELF"
   fi
   ok "updated to $NEW (launcher refreshed)"
