@@ -91,11 +91,15 @@ def test_no_hardcoded_machine_paths_in_web_and_bin():
     the shipped layer breaks every install that is not the build box.)"""
     offenders: list[str] = []
     targets: list[Path] = []
-    targets += sorted((REPO / "web" / "src").rglob("*.ts"))
-    targets += sorted((REPO / "web" / "src").rglob("*.tsx"))
-    targets += sorted((REPO / "bin").glob("*"))
+    # every source shape the web deck ships (exit-critic carry-forward:
+    # not just .ts/.tsx — .js/.jsx/.mjs and the web-root configs too)
+    for pat in ("*.ts", "*.tsx", "*.js", "*.jsx", "*.mjs"):
+        targets += sorted((REPO / "web" / "src").rglob(pat))
+    targets += sorted((REPO / "web").glob("*.ts"))      # next.config.ts …
+    targets += sorted((REPO / "web").glob("*.json"))
+    targets += sorted((REPO / "bin").rglob("*"))        # incl. subdirs
     for p in targets:
-        if not p.is_file():
+        if not p.is_file() or "node_modules" in p.parts:
             continue
         text = p.read_text(encoding="utf-8", errors="replace")
         for i, line in enumerate(text.splitlines(), 1):
