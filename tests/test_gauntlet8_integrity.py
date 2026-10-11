@@ -205,6 +205,75 @@ class TestNegativeCaching:
         assert urls and urls[0].startswith("https://api.stlouisfed.org")
 
 
+# ------------------------------------------------------------------ D-010
+class TestProviderOutageVerdict:
+    """D-010 — a desk run where EVERY persona abstained is a provider
+    outage wearing a 200: the top-level verdict flips to ok:false with a
+    machine-readable reason (and the base-URL override contract holds)."""
+
+    def test_all_abstain_flips_ok_false(self):
+        from gold_desk.agent.desk.engine import \
+            _apply_provider_outage_verdict
+        report = {"ok": True, "symbol": "GC=F", "abstained": 2}
+        personas = [
+            {"name": "a", "abstained": True,
+             "thesis": "abstained: LLMUnavailable: HTTP 403"},
+            {"name": "b", "abstained": True, "thesis": ""},
+        ]
+        _apply_provider_outage_verdict(report, personas)
+        assert report["ok"] is False
+        assert report["reason"] == "provider unavailable"
+        assert "GOLD_DESK_LLM_BASE_URL" in report["provider_hint"]
+        assert "403" in report["abstain_detail"]
+
+    def test_partial_abstain_keeps_ok_true(self):
+        from gold_desk.agent.desk.engine import \
+            _apply_provider_outage_verdict
+        report = {"ok": True, "symbol": "GC=F", "abstained": 1}
+        personas = [
+            {"name": "a", "abstained": True, "thesis": "abstained: x"},
+            {"name": "b", "abstained": False, "signal": "BULLISH"},
+        ]
+        _apply_provider_outage_verdict(report, personas)
+        assert report["ok"] is True
+        assert "reason" not in report
+
+    def test_no_personas_is_not_an_outage(self):
+        from gold_desk.agent.desk.engine import \
+            _apply_provider_outage_verdict
+        report = {"ok": True}
+        _apply_provider_outage_verdict(report, [])
+        assert report["ok"] is True
+
+    def test_zen_client_base_url_override(self, monkeypatch):
+        """D-010 first half — GOLD_DESK_LLM_BASE_URL is the generic alias
+        for any OpenAI-compatible endpoint (P0 §2.1 contract)."""
+        from gold_desk.llm import zen_client
+        monkeypatch.delenv("GOLD_DESK_LLM_BASE_URL", raising=False)
+        monkeypatch.delenv("OPENCODE_ZEN_BASE_URL", raising=False)
+        assert zen_client.base_url() == "https://opencode.ai/zen/v1"
+        monkeypatch.setenv("GOLD_DESK_LLM_BASE_URL",
+                           "http://127.0.0.1:9999/v1/")
+        assert zen_client.base_url() == "http://127.0.0.1:9999/v1"
+
+    def test_cli_desk_exit_code_nonzero_on_outage(self, monkeypatch,
+                                                  tmp_path, capsys):
+        """The CLI relays the verdict: ok:false → exit 1, clean JSON."""
+        from gold_desk.cli import main
+        import gold_desk.agent.desk as desk_pkg
+        monkeypatch.setattr(desk_pkg, "run_desk", lambda *a, **k: {
+            "ok": False, "symbol": "GC=F", "abstained": 5,
+            "reason": "provider unavailable",
+            "personas": [{"name": "a", "abstained": True}]})
+        rc = main(["desk", "GC=F", "--json", "--data-root",
+                   str(tmp_path)])
+        out = capsys.readouterr().out
+        assert rc == 1
+        payload = json.loads(out.strip().splitlines()[-1])
+        assert payload["ok"] is False
+        assert payload["reason"] == "provider unavailable"
+
+
 # ------------------------------------------------------------------ D-004
 class TestScreenerFailClosed:
     def test_parse_accepts_ticker_as_anchor_text(self, tmp_path):

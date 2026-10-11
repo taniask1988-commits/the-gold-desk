@@ -212,6 +212,30 @@ Return ONLY JSON: {"action": "BUY"|"SELL"|"HOLD"|"ABSTAIN",
 
 # ------------------------------------------------------------- entry point
 
+def _apply_provider_outage_verdict(report: dict,
+                                   personas_out: list[dict]) -> None:
+    """D-010 (GAUNTLET 8) — a run where EVERY persona abstained is a
+    provider outage wearing a 200. Flip the top-level verdict to
+    ok:false with a machine-readable reason so the web deck can say
+    "provider unavailable" instead of rendering six empty analyst
+    cards. Mutates `report` in place (called right after construction
+    in both the debate and legacy paths)."""
+    if not personas_out:
+        return
+    abstains = [r for r in personas_out if r.get("abstained")]
+    if len(abstains) != len(personas_out):
+        return
+    report["ok"] = False
+    report["reason"] = "provider unavailable"
+    report["provider_hint"] = (
+        "set GOLD_DESK_LLM_BASE_URL (any OpenAI-compatible endpoint) "
+        "and, if required, GOLD_DESK_LLM_API_KEY")
+    detail = next((str(r.get("thesis") or "") for r in abstains
+                   if r.get("thesis")), "")
+    if detail:
+        report["abstain_detail"] = detail[:200]
+
+
 def run_desk(
     symbol: str,
     *,
@@ -876,6 +900,7 @@ def run_desk(
             "run_id": run_id,
             "elapsed_ms": elapsed_ms,
         }
+        _apply_provider_outage_verdict(report, personas_out)
 
         jr.emit("DeskReport", {
             "run_id": run_id,
@@ -1012,6 +1037,7 @@ def run_desk(
         "run_id": run_id,
         "elapsed_ms": elapsed_ms,
     }
+    _apply_provider_outage_verdict(report, personas_out)
 
     jr.emit("DeskReport", {
         "run_id": run_id,
