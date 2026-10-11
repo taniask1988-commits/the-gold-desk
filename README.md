@@ -23,10 +23,21 @@ money is a property of a setup — after it survives the exam.
 | Phase | What | State |
 |---|---|---|
 | 0 | Constitution + simulator contract | ✅ built, numbers **BLOCKED** (yours to commit) |
-| 1 | Deterministic desk: pipeline, one GUESS setup, gate, journal, Telegram tickets, recovery, replay, EOD | ✅ built, 146 tests green |
+| 1 | Deterministic desk: pipeline, one GUESS setup, gate, journal, Telegram tickets, recovery, replay, EOD | ✅ built (R1–R2) |
 | 1.5 | Frozen simulator battery on the setup | 🔶 skeleton (`sim/`) — refuses verdicts while numbers are BLOCKED |
 | 2 | Single-shot context veto (LLM) | 🔒 stub only (raises); unlocks at `identity.phase: 2` |
-| 3+ | Not in this plan | — |
+| R3 | Live markets plane: keyless quotes/news/charts/drivers, expert chat, cited research agent | ✅ built |
+| R4 | Autonomous watch loop + alert engine (opt-in, journaled) | ✅ built |
+| R5 | Self-evolving desk: parameter genomes, walk-forward gate, temporal lessons | ✅ built (1y live run: champion honestly LOSES out-of-sample → KEEP_INCUMBENT) |
+| R6 | Device portability: the frozen matrix installs on any machine | ✅ built |
+| R7 | The Bloomberg wedge: pro charts, options math (Black-Scholes <1e-8 vs Hull), screener, macro plane, pairs, receipted copilot, workflow glue | ✅ built |
+| R8 | The critic's ledger: 17 audit defects (3 critical / 7 major / 7 minor) resolved | ✅ built |
+
+**Surface reality (verified on every install by `install.sh` step 4):**
+frozen matrix **1,244 passing** across **1,265 collected** tests (21
+device-specific skips) · **45 API routes** · **5 pages**. The count is
+re-generated on every run — `gold-desk test` reports the truth, not this
+table.
 
 The canonical `trading_constitution.yaml` is **fail-closed**: 30 numeric
 fields are `BLOCKED` pending your broker/limits answers, so every bar ends
@@ -51,8 +62,8 @@ gold-desk help     # every command
 ```
 
 The installer clones to `~/gold-desk`, creates an isolated venv, installs
-dependencies, **runs the 146-test matrix as self-verification**, generates the
-90-day demo journal, installs web-deck dependencies, and puts the global
+dependencies, **runs the frozen test matrix as self-verification**, generates
+the 90-day demo journal, installs web-deck dependencies, and puts the global
 `gold-desk` command on your PATH. No accounts, no keys, completely free.
 (Manual alternative: `git clone <repo> && cd ~/gold-desk && bash install.sh`)
 
@@ -64,7 +75,7 @@ the-gold-desk/
 ├── src/gold_desk/              # the deterministic desk (Python)
 ├── sim/  prompts/  config/     # Doc 1.5 exam, Doc 4 prompts, templates
 ├── tui/desk_tui.py             # terminal UI (pure stdlib curses)
-├── tests/                      # 146 tests = the §16 matrix + audit-fix suite
+├── tests/                      # 1,265 tests = the §16 matrix + R1–R8 gauntlet suites
 ├── web/                        # GOLD DESK COMMAND — frosted-glass web deck
 │   └── (Next.js 16 + TypeScript + Tailwind 4)
 └── docs/                       # market-driver research + verification screenshots
@@ -89,7 +100,7 @@ bun run dev          # http://localhost:3000
 | `gold-desk` | web command deck (auto port, opens browser) |
 | `gold-desk tui` | terminal UI |
 | `gold-desk demo [days] [seed]` | regenerate the demo journal |
-| `gold-desk test` | run the test matrix (146 tests) |
+| `gold-desk test` | run the frozen test matrix (1,265 tests) |
 | `gold-desk zen` | sync free OpenCode Zen models |
 | `gold-desk doctor` | installation health check |
 | `gold-desk update` | pull latest + refresh launcher |
@@ -145,15 +156,21 @@ Env overrides: `GOLD_DESK_PORT` (web port, default 3000), `GOLD_DESK_DATA` (jour
 
 #### `GOLD_DESK_PYTHON` — which Python the web deck shells out to
 
-The Next.js API routes (`/api/desk/{price,news,driver-values,chat,zen/veto-dry}`)
-shell out to a Python interpreter that must have **PyYAML** installed (the
-harness reads `trading_constitution.yaml` on every invocation). The route's
-`resolvePython()` probes candidates in this order:
+Every `/api/desk/*` route shells out to a Python interpreter that must have
+**PyYAML** installed (the harness reads `trading_constitution.yaml` on every
+invocation). Since R8 the resolvers live in ONE shared portable module —
+`web/src/lib/desk/resolve.ts` — instead of 39 per-route copies, and a
+META-GUARD test fails the matrix if an absolute host path ever re-enters
+`web/src/` or `bin/`. Resolution order:
 
 1. `process.env.GOLD_DESK_PYTHON` — explicit override (highest priority)
-2. `/home/z/.venv/bin/python3` — sandbox / installer venv
-3. `<HARNESS>/.venv/bin/python3` — repo-local venv (created by `install.sh`)
-4. `python3` — bare PATH fallback
+2. `<HARNESS>/.venv/bin/python3` then `.venv/bin/python` — repo-local venv
+   (created by `install.sh`)
+3. `python3` — bare PATH fallback
+
+The harness root itself resolves through `GOLD_DESK_ROOT` → the repo above
+`web/` → the server cwd → a bounded walk-up (proven by `src/gold_desk/cli.py`).
+No absolute user paths anywhere — the deck is device-portable by test.
 
 Each candidate is probed with `python -c 'import yaml'` before use. If no
 candidate has PyYAML, the route returns HTTP 500 with a clear error
@@ -180,7 +197,7 @@ python -m gold_desk.cli validate          # what's BLOCKED and what to paste
 python -m gold_desk.cli demo --days 30    # synthetic end-to-end run
 python -m gold_desk.cli replay --date 2026-06-10
 python -m gold_desk.cli eod --date 2026-06-10
-python -m pytest                           # 146 tests, <1s
+python -m pytest                           # 1,265 tests, ~2 min
 ```
 
 (If you didn't install the package, prefix commands with
@@ -235,7 +252,7 @@ src/gold_desk/
   replay.py eod.py demo.py cli.py
 sim/contract.md runner.py report.py   # Doc 1.5 — the exam, offline, INCOMPLETE
 prompts/                       # empty until Phase 2 (law)
-tests/                         # 146 tests = §16 matrix + loop invariants + audit-fix suite
+tests/                         # 1,265 tests = §16 matrix + R1–R8 gauntlet suites
 data/                          # runtime journal (gitignored)
 ```
 

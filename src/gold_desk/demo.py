@@ -12,6 +12,7 @@ Every event carries payload.demo=true and every ticket is watermarked.
 """
 from __future__ import annotations
 
+import json
 import random
 from datetime import timedelta
 from pathlib import Path
@@ -73,12 +74,33 @@ def run_demo(days: int = 30, seed: int = 7, data_root: Path | None = None,
     tickets = [e for e in all_events if e["kind"] == "TicketEvent"]
     fills = [e for e in all_events if e["kind"] == "Fill"]
 
+    # D-011 (GAUNTLET 8) — a ticket is journaled at EVERY lifecycle
+    # transition (8 distinct tickets → 24 TicketEvents: 8 PENDING_SEND +
+    # 8 SENT + 6 FILL + 2 TICKET_EXPIRED), so "tickets issued" as a raw
+    # TicketEvent count over-reports 3×. The honest metrics:
+    #   * issued       = DISTINCT ticket_ids journaled;
+    #   * pending send = tickets sitting in PENDING_SEND in the store
+    #     snapshot right now (what an operator must still act on).
+    ticket_ids = {(e["payload"] or {}).get("ticket_id") for e in tickets}
+    ticket_ids.discard(None)
+    issued = len(ticket_ids)
+    pending_send = 0
+    for p in orch.store.root.glob("*.json"):
+        try:
+            if json.loads(p.read_text()).get("status") == "PENDING_SEND":
+                pending_send += 1
+        except Exception:      # noqa: BLE001 — a torn snapshot counts as none
+            continue
+
     if not quiet:
         print("\n" + "=" * 72)
         print("DEMO RUN COMPLETE")
         print(f"bars processed      : {len(codes)}")
         print(f"terminal codes      : {len(set(t for _, t in codes))} distinct")
-        print(f"tickets issued      : {len(tickets)}")
+        print(f"tickets issued      : {issued} (distinct ids; "
+              f"{len(tickets)} lifecycle events journaled)")
+        print(f"tickets pending send: {pending_send} "
+              f"(store snapshot, awaiting Telegram delivery)")
         print(f"fill/resolution evts: {len(fills)}")
         print(f"paper balance       : {accounts.account.balance:.2f} "
               f"(start {constitution.firm.get('account_size')})")
@@ -95,7 +117,9 @@ def run_demo(days: int = 30, seed: int = 7, data_root: Path | None = None,
         "bars": len(codes),
         "codes": codes,
         "histogram": histogram,
-        "tickets": len(tickets),
+        "tickets": issued,
+        "ticket_events": len(tickets),
+        "pending_send": pending_send,
         "recovery": recovery,
         "account": accounts.account,
     }

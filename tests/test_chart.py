@@ -70,7 +70,7 @@ def test_fetch_chart_bars_shape(offline):
 def test_fetch_chart_stamps_source_and_delay(offline):
     out = mc.fetch_chart("GC=F", "1h", offline)
     assert out["source"] == "yahoo_v8_chart"
-    assert out["data_delay"] in ("delayed", "real-time-ish")
+    assert out["data_delay"] in ("delayed", "delayed (intraday)")
 
 
 def test_chart_timeframe_switch_changes_range(offline):

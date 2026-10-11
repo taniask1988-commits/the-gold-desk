@@ -100,15 +100,22 @@ function polarityColor(p: number | undefined): string {
 function PolarityGauge({ p }: { p: number }) {
   const x = ((Math.max(-1, Math.min(1, p)) + 1) / 2) * GAUGE_W;
   const col = polarityColor(p);
+  // D-017 (GAUNTLET 8) — the gauge was a fixed 260px svg; on a 390px
+  // viewport its row (gauge + score + gaps) overflowed the panel by
+  // ~66px and dragged the whole document wide. viewBox + a shrinking
+  // flex wrapper makes it scale down with the column instead.
   return (
-    <svg width={GAUGE_W} height={GAUGE_H} className="overflow-visible">
-      <rect x={0} y={10} width={GAUGE_W} height={6} rx={3} fill="#1a1f2c" />
-      <rect x={0} y={10} width={x} height={6} rx={3} fill={col} opacity={0.55} />
-      <line x1={GAUGE_W / 2} y1={6} x2={GAUGE_W / 2} y2={20} stroke="#76828e" strokeWidth={1} />
-      <polygon points={`${x - 5},4 ${x + 5},4 ${x},14`} fill={col} />
-      <text x={2} y={GAUGE_H - 1} fontSize={8} fill="#76828e">−1</text>
-      <text x={GAUGE_W - 10} y={GAUGE_H - 1} fontSize={8} fill="#76828e">+1</text>
-    </svg>
+    <div className="min-w-0 flex-1" style={{ maxWidth: GAUGE_W }}>
+      <svg viewBox={`0 0 ${GAUGE_W} ${GAUGE_H}`} width="100%"
+           height={GAUGE_H} className="overflow-visible">
+        <rect x={0} y={10} width={GAUGE_W} height={6} rx={3} fill="#1a1f2c" />
+        <rect x={0} y={10} width={x} height={6} rx={3} fill={col} opacity={0.55} />
+        <line x1={GAUGE_W / 2} y1={6} x2={GAUGE_W / 2} y2={20} stroke="#76828e" strokeWidth={1} />
+        <polygon points={`${x - 5},4 ${x + 5},4 ${x},14`} fill={col} />
+        <text x={2} y={GAUGE_H - 1} fontSize={8} fill="#76828e">−1</text>
+        <text x={GAUGE_W - 10} y={GAUGE_H - 1} fontSize={8} fill="#76828e">+1</text>
+      </svg>
+    </div>
   );
 }
 
@@ -209,8 +216,8 @@ function SentimentPanelImpl() {
       {score?.ok && (
         <div className="grid gap-4 lg:grid-cols-2">
           {/* left: gauge + signal bars */}
-          <div className="space-y-2.5">
-            <div className="flex items-center gap-3">
+          <div className="min-w-0 space-y-2.5">
+            <div className="flex min-w-0 items-center gap-3">
               <PolarityGauge p={pol} />
               <span className="gdc-display-num text-[19px]" style={{ color: polarityColor(pol) }}>
                 {pol >= 0 ? "+" : ""}{pol.toFixed(3)}

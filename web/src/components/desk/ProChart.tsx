@@ -186,7 +186,8 @@ export function ProChart({
   }, [data]);
 
   const last = useMemo(() => data?.bars?.[data.bars.length - 1] ?? null, [data]);
-  const delayBadge = data?.data_delay === "delayed";
+  const delayLabel = data?.data_delay || "";
+  const delayBadge = Boolean(delayLabel) && delayLabel !== "real-time";
 
   return (
     <div className="gdc-panel" style={{ padding: 0, overflow: "hidden" }}>
@@ -216,7 +217,7 @@ export function ProChart({
           ))}
         </div>
       </div>
-      <div className="flex items-center gap-1.5 px-3 py-1.5 border-b" style={{ borderColor: LINE }}>
+      <div className="flex flex-wrap items-center gap-1.5 px-3 py-1.5 border-b" style={{ borderColor: LINE }}>
         {INDICATOR_CHIPS.map((ind) => {
           const on = active.includes(ind);
           return (
@@ -238,8 +239,8 @@ export function ProChart({
         })}
         {delayBadge && (
           <span className="gdc-chip text-[9px] px-2 py-0.5 ml-auto" style={{ border: `1px solid ${LINE}`, color: DIM }}
-            title="daily bars are delayed end-of-day data — honest label">
-            DELAYED
+            title={`data is not real-time: ${delayLabel} (honest label)`}>
+            {delayLabel.toUpperCase()}
           </span>
         )}
         {data?.stale_error && (

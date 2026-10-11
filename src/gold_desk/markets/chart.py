@@ -263,5 +263,10 @@ def fetch_chart(symbol: str, timeframe: str = "1h",
         out["indicator_series"] = indicator_series(out["bars"], indicators)
         out["indicators"] = indicators
     out.setdefault("source", "yahoo_v8_chart")
-    out.setdefault("data_delay", "delayed" if timeframe == "1d" else "real-time-ish")
+    # D-015 (GAUNTLET 8) — the old intraday label was a vague hedge, not
+    # a data label: Yahoo intraday bars are delayed/unverified, daily
+    # bars are EOD. Both are honest "delayed" variants; the UI badges
+    # them verbatim.
+    out.setdefault("data_delay",
+                   "delayed" if timeframe == "1d" else "delayed (intraday)")
     return out

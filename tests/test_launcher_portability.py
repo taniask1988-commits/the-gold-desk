@@ -162,3 +162,61 @@ def test_update_keeps_rendered_root(tmp_path):
     root = _doctor_root(launcher)
     assert root == str(clone), (
         f"after update doctor resolved {root!r}, expected {clone}")
+
+
+# ============================== BAR-POLISH pins (GAUNTLET 8 Piece 5) ====
+
+def test_readme_counts_match_reality():
+    """D-013 — the README's numbers are generated from the tree, not
+    vibes: route count, page count, and zero stale '146 tests' claims."""
+    readme = (REPO / "README.md").read_text()
+    assert "146 tests" not in readme and "146-test" not in readme
+    n_routes = len(list((REPO / "web" / "src" / "app" / "api" / "desk")
+                        .rglob("route.ts")))
+    n_pages = len([p for p in (REPO / "web" / "src" / "app")
+                   .rglob("page.tsx")])
+    assert f"{n_routes} API routes" in readme, (
+        f"README route count stale (actual {n_routes})")
+    assert f"{n_pages} pages" in readme, (
+        f"README page count stale (actual {n_pages})")
+
+
+def test_body_font_is_inter():
+    """D-015 — the body font chain must resolve to Inter. The old
+    --font-sans pointed at --font-geist-sans, a variable nothing
+    defined, so the computed body font fell back to the browser serif."""
+    css = (REPO / "web" / "src" / "app" / "globals.css").read_text()
+    assert "--font-geist-sans" not in css, (
+        "font-sans still points at an undefined variable")
+    assert '--font-sans: var(--font-inter)' in css
+    # layout.tsx must actually load Inter under that variable name
+    layout = (REPO / "web" / "src" / "app" / "layout.tsx").read_text()
+    assert "--font-inter" in layout and "Inter" in layout
+
+
+def test_no_realtime_ish_hedge_label():
+    """D-015 — 'real-time-ish' was a hedge, not a data label. The chart
+    plane now stamps honest 'delayed' variants and the UI badges them."""
+    for rel in ("src/gold_desk/markets/chart.py", "web/src/app",
+                "web/src/components"):
+        root = REPO / rel
+        if root.is_file():
+            assert "real-time-ish" not in root.read_text(errors="replace")
+        else:
+            for p in root.rglob("*"):
+                if p.is_file() and p.suffix in (".py", ".ts", ".tsx"):
+                    assert "real-time-ish" not in p.read_text(
+                        errors="replace"), f"stale hedge label in {p}"
+
+
+def test_sentiment_gauge_is_responsive():
+    """D-017 — the polarity gauge must scale with its column (viewBox +
+    shrinking wrapper), not drag the document 66px wide at 390px."""
+    src = (REPO / "web" / "src" / "components" / "desk" /
+           "SentimentPanel.tsx").read_text()
+    assert "viewBox={`0 0 ${GAUGE_W} ${GAUGE_H}`}" in src
+    # the <svg> element itself must carry no fixed pixel width (the
+    # inner <rect> geometry legitimately uses GAUGE_W coordinates)
+    svg_tag = src[src.index("<svg"):src.index(">", src.index("<svg")) + 1]
+    assert "width={GAUGE_W}" not in svg_tag
+    assert "min-w-0 flex-1" in src       # shrinking wrapper present

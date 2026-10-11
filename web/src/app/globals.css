@@ -6,8 +6,13 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  /* D-015 (GAUNTLET 8) — the old value pointed at a variable nothing
+     ever defined (layout.tsx loads Inter as --font-inter). An undefined
+     var() makes the whole font-family declaration invalid at
+     computed-value time → the body fell back to the browser serif.
+     Inter IS the body font; wire it in. */
+  --font-sans: var(--font-inter), "Inter", system-ui, -apple-system, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, "SF Mono", monospace;
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -118,6 +123,10 @@
   }
   body {
     @apply bg-background text-foreground;
+    /* D-015 — body font computes to Inter (BAR-POLISH): belt-and-braces
+       alongside the --font-sans theme wiring above. */
+    font-family: var(--font-inter), "Inter", system-ui, -apple-system,
+      sans-serif;
   }
 }
 

@@ -31,9 +31,21 @@ def _market_state(data_root) -> list[str]:
         from .data.feeds import fetch_spot
         spot = fetch_spot(data_root)
         if spot.get("ok"):
+            mt = spot.get("market_time")
+            # D-012 (GAUNTLET 8) — an epoch integer is not a human
+            # timestamp: render it ISO-8601 UTC (epoch may arrive in
+            # seconds or milliseconds depending on the feed).
+            mt_txt = "n/a"
+            if isinstance(mt, (int, float)) and mt > 0:
+                import datetime as _dt
+                secs = mt / 1000.0 if mt > 10**12 else float(mt)
+                mt_txt = _dt.datetime.fromtimestamp(
+                    secs, tz=_dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            elif isinstance(mt, str) and mt.strip():
+                mt_txt = mt.strip()
             lines.append(f"- XAUUSD spot: **{spot.get('price')}** "
                          f"(source: {spot.get('source')}, "
-                         f"market time {spot.get('market_time', 'n/a')})")
+                         f"market time {mt_txt})")
         else:
             lines.append("- XAUUSD spot: unavailable "
                          f"({spot.get('error', 'feed failed')})")
