@@ -533,3 +533,25 @@ Per-piece critic verdicts (fresh context, blind vs the bar):
     widened same round).
   P5 (BAR-POLISH): PICK OURS (carry-forward: README count re-pin +
     launcher help staleness — fixed same round).
+
+## Round 8 exit critic (fresh context, 18-step mechanical re-verification)
+
+- D-001…D-017: ALL RESOLVED (each re-proven by execution, not by
+  reading commit messages — rendered launchers, hostile-clock
+  tripwires, bot-wall fail-closed probes, live DXY/VIX, dead-endpoint
+  desk runs, journal reconciliation, dual-scale epoch rendering,
+  bunless npm start, 390px overflow walks on four pages).
+- Bars: BAR-INSTALL / BAR-HERMETIC / BAR-INTEGRITY / BAR-PORTABILITY /
+  BAR-POLISH — ALL MET. Invariants KEPT (no numpy/scipy; FRED stays
+  optional fail-soft; git diff gauntlet7..HEAD on orchestrator/veto/
+  sizing/risk_gate/constitution is EMPTY — the deterministic live path
+  untouched).
+- Residuals recorded (non-blocking): a fresh install's FIRST macro hit
+  on a bot-walled network still blocks ~10s before the negative
+  tombstones exist (the <2s bar governs the warm path: 0.56s); and
+  demo-overlay journals legitimately stamp the OVERLAY content hash in
+  event rows (e4fb8d…, per demo.yaml discipline) while the canonical
+  loader hash is 7103bf… — intentional, and the UI no longer reads
+  event-row hashes, but future greppers should not misread it as the
+  D-005 drift.
+- FINAL LINE: **VERDICT: SHIP**
